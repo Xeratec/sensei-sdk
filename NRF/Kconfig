@@ -3,13 +3,19 @@
 
 menu "SENSEI Configuration"
 
-config SENSEI
-	bool "Enable SENSEI SDK"
-	default n
-	help
-	  Enable SENSEI SDK features.
+	config SENSEI
+		bool "Enable SENSEI SDK"
+		default n
+		help
+			Enable SENSEI SDK features.
 
-rsource "drivers/Kconfig"
-rsource "system/Kconfig"
+
+	menu "Drivers"
+		rsource "drivers/Kconfig"
+	endmenu
+
+	menu "System"
+		rsource "system/Kconfig"
+	endmenu
 
 endmenu

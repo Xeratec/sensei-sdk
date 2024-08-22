@@ -47,7 +47,7 @@
 
 // ======== Defines/Variables ======================================================================
 
-LOG_MODULE_REGISTER(pwr);
+LOG_MODULE_REGISTER(pwr, CONFIG_SENSEI_PWR_LOG_LEVEL);
 
 #define GPIO_NODE_led_pwr DT_NODELABEL(gpio_led_pwr)
 #define GPIO_NODE_gap9_pwr DT_NODELABEL(gpio_gap9_pwr)
@@ -119,7 +119,7 @@ int pwr_init() {
     goto cleanup;
   }
 
-  LOG_INF("driver init OK.");
+  LOG_INF("Driver init OK.");
 
   // Init pwr thread:
   if (thread_pwr_init() < 0) {

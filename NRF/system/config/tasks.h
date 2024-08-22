@@ -51,4 +51,19 @@
 #ifndef THREAD_PWR_SOFT_RESET_LATENCY_MS
 #define THREAD_PWR_SOFT_RESET_LATENCY_MS 2000
 #endif
+
+/*******************************************************************************/
+/**                       Communication Management                            **/
+/*******************************************************************************/
+
+/** Communication management thread priority */
+#ifndef CONFIG_COMM_THREAD_PRIORITY
+#define CONFIG_COMM_THREAD_PRIORITY 10
+#endif
+
+/** Minimum update period in ms  */
+#ifndef THREAD_COMM_UPDATE_PERIOD_MS
+#define THREAD_COMM_UPDATE_PERIOD_MS (1000 * 20)
+#endif
+
 #endif // TASKS_H_

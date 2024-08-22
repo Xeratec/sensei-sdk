@@ -36,6 +36,7 @@
 		i2ca = &i2c0;
 		i2cb = &i2c1;
 		uartgap = &uart_gap;
+		spia = &spi3;
 	};
 };
 
@@ -86,7 +87,25 @@
 			low-power-enable;
 		};
 	};
+
+	spi3_default: spi3_default {
+		group1 {
+			psels = <NRF_PSEL(SPIM_SCK, 0, 8)>,
+				<NRF_PSEL(SPIM_MOSI, 0, 9)>,
+				<NRF_PSEL(SPIM_MISO, 0, 10)>;
+		};
+	};
+
+	spi3_sleep: spi3_sleep {
+		group1 {
+			psels = <NRF_PSEL(SPIM_SCK, 0, 8)>,
+				<NRF_PSEL(SPIM_MOSI, 0, 9)>,
+				<NRF_PSEL(SPIM_MISO, 0, 10)>;
+			low-power-enable;
+		};
+	};
 };
+
 
 &gpio0 {
 	status = "okay";
@@ -132,6 +151,15 @@
 	pinctrl-0 = <&i2c1_default>;
 	pinctrl-1 = <&i2c1_sleep>;
 	pinctrl-names = "default", "sleep";
+	status = "okay";
+};
+
+&spi3 {
+	compatible = "nordic,nrf-spim";
+	pinctrl-0 = <&spi3_default>;
+	pinctrl-1 = <&spi3_sleep>;
+	pinctrl-names = "default", "sleep";
+	cs-gpios = <&gpio1 4 GPIO_ACTIVE_LOW>;
 	status = "okay";
 };
 

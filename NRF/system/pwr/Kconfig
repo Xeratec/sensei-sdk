@@ -1,0 +1,10 @@
+menuconfig SENSEI_COMM
+	bool "Enable the SENSEI Communication Subsystem"
+	default n
+	depends on SENSEI
+	help
+	  Enable the SENSEI Communication Subsystem.
+
+module = SENSEI_PWR
+module-str = Power Subsystem
+source "subsys/logging/Kconfig.template.log_config"

@@ -43,7 +43,7 @@
 
 // ======== Definitions/Variables ==================================================================
 
-LOG_MODULE_REGISTER(thread_pwr);
+LOG_MODULE_REGISTER(thread_pwr, CONFIG_SENSEI_PWR_LOG_LEVEL);
 
 /* The devicetree node identifier */
 #define GPIO_NODE_pmic_irq DT_NODELABEL(gpio_pmic_irq)

@@ -30,6 +30,10 @@
 			gpios = <&gpio0 26 GPIO_ACTIVE_LOW>;
 			label = "Soft_nRST";
 		};
+		gpio_gap9_irq: gpio_gap9_irq {
+			gpios = <&gpio1 5 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
+			label = "GAP9_nIRQ";
+		};
 	};
 	sensei_comm: sensei_comm {
 		compatible = "gpio-leds";
@@ -44,10 +48,6 @@
 		gpio_gap9_shared_ctrl: gpio_gap9_shared_ctrl {
 			gpios = <&gpio0 28 GPIO_ACTIVE_HIGH>;
 			label = "SHARED_GPIOs_SEL";
-		};
-		gpio_gap9_irq: gpio_gap9_irq {
-			gpios = <&gpio1 5 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
-			label = "GAP9_nIRQ";
 		};
 	};
 

@@ -1,0 +1,3 @@
+module = SENSEI_COMM
+module-str = Communication Subsystem
+source "subsys/logging/Kconfig.template.log_config"

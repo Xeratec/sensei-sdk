@@ -1,0 +1,16 @@
+# HM0360 Options menu
+
+menu "NRFSPI Options"
+    depends on DRIVER_NRFSPI
+
+    config DRIVER_NRFSPI_LOG
+        bool "Enable Logs"
+        help
+            This option enable logs related to NRF SPI driver
+
+    if DRIVER_NRFSPI_LOG
+        source "$(KCONFIG_UTILS_DIR)/logs.kconfig"
+    endif
+
+
+endmenu

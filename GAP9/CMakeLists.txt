@@ -21,6 +21,19 @@ macro(setup_custom_bsp)
     endif()
 
 # Driver options
+    if(CONFIG_DRIVER_NRFSPI)
+        list(APPEND CUSTOM_BSP_SRCS "${GAP_CUSTOM_BSP}/drivers/nrf_spi.c")
+        list(APPEND CUSTOM_BSP_COMPILE_OPTIONS  "-DCONFIG_NRFSPI=1"
+                                                "-D__GAP_NRFSPI__"
+                                                "-D__GAP_DRIVER_NRFSPI__=1"
+        )
+
+        if(CONFIG_DRIVER_NRFSPI_LOG)
+            LIST(APPEND BSP_COMPILE_OPTIONS "-DCONFIG_DRIVER_NRFSPI_LOG=1")
+        endif()
+
+    endif()
+
     if(CUSTOM_BSP_SRCS)
         message(STATUS "============================ Creating custom_bsp library")
         message(STATUS "${CUSTOM_BSP_PREFIX} Sources: ${CUSTOM_BSP_SRCS}")

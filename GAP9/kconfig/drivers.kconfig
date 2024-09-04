@@ -1,5 +1,24 @@
 # Copyright (c) 2025 ETH Zurich and University of Bologna
 # SPDX-License-Identifier: Apache-2.0
 
+config DRIVER_NRFSPI_AS_DEFAULT
+    bool
+
+config HAS_NRFSPI_HARDWARE
+    bool
+    help
+        Select this option from a Board definition to indicate that nrf spi communication hardware is implemented.
+
+menu "Custom BSP Drivers"
+    config DRIVER_NRFSPI
+        bool "NRF SPI"
+        depends on HAS_NRFSPI_HARDWARE
+        default y if DRIVER_NRFSPI_AS_DEFAULT
+
+    if DRIVER_NRFSPI
+        rsource "./drivers_nrfspi_options.kconfig"
+    endif
+endmenu
+
 
 

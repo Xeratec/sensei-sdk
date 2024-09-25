@@ -161,6 +161,13 @@
 	pinctrl-names = "default", "sleep";
 	cs-gpios = <&gpio1 4 GPIO_ACTIVE_LOW>;
 	status = "okay";
+
+	spi_gap9: spi_gap9@0 {
+		compatible = "vnd,spi-device";
+		reg = <0>;
+		spi-max-frequency = <1600000>;
+		label = "GAP9";
+	};
 };
 
 &i2c0 {

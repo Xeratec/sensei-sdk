@@ -31,6 +31,7 @@
 #include "bsp/comm_bsp.h"
 #include "comm/comm_common.h"
 #include "comm/thread_comm.h"
+#include "comm/transport/transport.h"
 
 #include <string.h>
 #include <zephyr/drivers/gpio.h>
@@ -74,9 +75,15 @@ int comm_init() {
 
   LOG_INF("Driver init OK.");
 
+  if (transport_init() < 0) {
+    LOG_ERR("Transport init failed!");
+    err = -1;
+    goto cleanup;
+  }
+
   // Init comm thread:
   if (thread_comm_init() < 0) {
-    LOG_ERR("comm thread init failed.");
+    LOG_ERR("Comm thread init failed.");
     err = -1;
     goto cleanup;
   }
@@ -99,6 +106,7 @@ int comm_start() {
     return -1;
   }
 
+  transport_start();
   thread_comm_start();
 
   atomic_set(&comm_is_running, true);

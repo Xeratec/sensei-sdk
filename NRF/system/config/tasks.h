@@ -61,6 +61,11 @@
 #define CONFIG_COMM_THREAD_PRIORITY 10
 #endif
 
+/** Communication transport thread priority */
+#ifndef CONFIG_COMM_TRANSPORT_THREAD_PRIORITY
+#define CONFIG_COMM_TRANSPORT_THREAD_PRIORITY 10
+#endif
+
 /** Minimum update period in ms  */
 #ifndef THREAD_COMM_UPDATE_PERIOD_MS
 #define THREAD_COMM_UPDATE_PERIOD_MS (1000 * 20)

@@ -6,3 +6,4 @@ target_sources(app PRIVATE
     thread_comm.c
 )
 
+add_subdirectory(transport)

@@ -27,6 +27,7 @@
  */
 
 #include "nrf_spi.h"
+#include "bsp/bsp.h"
 
 /// @brief   Driver's open function.
 ///

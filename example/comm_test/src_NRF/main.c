@@ -51,6 +51,8 @@
 #include "comm/comm_common.h"
 #include "comm/thread_comm.h"
 
+#include "comm/transport/endpoints/gap9/endpoint_gap9.h"
+
 /* 1000 msec = 1 sec */
 #define SLEEP_TIME_MS 3000
 
@@ -84,9 +86,12 @@ int main(void) {
   }
   LOG_INF("USB enabled");
 
+  char buf[64] = "Hello from NRF!";
+
   while (1) {
     k_msleep(SLEEP_TIME_MS);
     printf("Sleeping...\r\n");
+    gap9_send(buf, strlen(buf));
   }
   return 0;
 }

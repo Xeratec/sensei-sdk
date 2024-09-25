@@ -30,7 +30,6 @@
 #define __NRF_SPI_H__
 
 #include "pmsis.h"
-#include "bsp/bsp.h"
 
 #ifdef CONFIG_DRIVER_NRFSPI_LOG
 

@@ -3,7 +3,7 @@
  *
  * File: main.c
  *
- * Last edited: 30.10.2025
+ * Last edited: 24.11.2025
  *
  * Copyright (c) 2024 ETH Zurich and University of Bologna
  *
@@ -67,7 +67,7 @@ static const struct color_data color_sequence[] = {
 #define LED_NODE DT_NODELABEL(led_0)
 #define LED_DEBUG_NODE DT_NODELABEL(debug_led)
 
-#define GPIO_NODE_debug_green DT_NODELABEL(gpio_debug_led_green)
+// #define GPIO_NODE_debug_green DT_NODELABEL(gpio_debug_led_green)
 #define GPIO_NODE_debug_yellow DT_NODELABEL(gpio_debug_led_yellow)
 
 #define GPIO_NODE_debug_button1 DT_NODELABEL(debug_button1)
@@ -76,7 +76,7 @@ static const struct color_data color_sequence[] = {
 static const struct device *const uart_dev = DEVICE_DT_GET_ONE(zephyr_cdc_acm_uart);
 static const struct device *const led = DEVICE_DT_GET(LED_NODE);
 static const struct device *const led_debug = DEVICE_DT_GET(LED_DEBUG_NODE);
-static const struct gpio_dt_spec gpio_led_debug_green = GPIO_DT_SPEC_GET(GPIO_NODE_debug_green, gpios);
+// static const struct gpio_dt_spec gpio_led_debug_green = GPIO_DT_SPEC_GET(GPIO_NODE_debug_green, gpios);
 static const struct gpio_dt_spec gpio_led_debug_yellow = GPIO_DT_SPEC_GET(GPIO_NODE_debug_yellow, gpios);
 static const struct gpio_dt_spec gpio_gap9_spi_ctrl = GPIO_DT_SPEC_GET(GPIO_NODE_gap9_spi_ctrl, gpios);
 static const struct gpio_dt_spec gpio_debug_button1 = GPIO_DT_SPEC_GET(GPIO_NODE_debug_button1, gpios);
@@ -199,22 +199,27 @@ int main(void) {
   gap9_pwr(true);
   LOG_INF("GAP9 powered up");
 
-  if (gpio_pin_configure_dt(&gpio_led_debug_green, GPIO_OUTPUT) < 0) {
-    LOG_ERR("Green Debug LED GPIO configuration error");
-    return 0;
-  }
+  // if (gpio_pin_configure_dt(&gpio_led_debug_green, GPIO_OUTPUT) < 0) {
+  //   LOG_ERR("Green Debug LED GPIO configuration error");
+  //   return 0;
+  // }
 
   if (gpio_pin_configure_dt(&gpio_led_debug_yellow, GPIO_OUTPUT) < 0) {
     LOG_ERR("Yellow Debug LED GPIO configuration error");
     return 0;
   }
 
+  if (gpio_pin_set_dt(&gpio_led_debug_yellow, 1) < 0) {
+    LOG_ERR("Yellow Debug LED GPIO configuration error");
+    return 0;
+  }
+
   while (1) {
     // Toggle the green debug LED
-    if (gpio_pin_toggle_dt(&gpio_led_debug_green) < 0) {
-      LOG_ERR("Green Debug LED GPIO configuration error");
-      return 0;
-    }
+    // if (gpio_pin_toggle_dt(&gpio_led_debug_green) < 0) {
+    //   LOG_ERR("Green Debug LED GPIO configuration error");
+    //   return 0;
+    // }
 
     // Check if the button was pressed and show the LED pattern
     if (k_sem_take(&show_led_pattern_sem, K_MSEC(SLEEP_TIME_MS)) == 0) {

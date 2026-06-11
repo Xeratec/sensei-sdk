@@ -3,7 +3,7 @@
  *
  * File: main.c
  *
- * Last edited: 30.10.2025
+ * Last edited: 2.12.2025
  *
  * Copyright (c) 2024 ETH Zurich and University of Bologna
  *
@@ -63,6 +63,7 @@ static const struct color_data color_sequence[] = {
 };
 
 #define GPIO_NODE_gap9_i2c_ctrl DT_NODELABEL(gpio_gap9_i2c_ctrl)
+#define GPIO_NODE_gap9_spi_ctrl DT_NODELABEL(gpio_gap9_spi_ctrl)
 
 /*
  * A build error on this line means your board is unsupported.
@@ -71,6 +72,7 @@ static const struct color_data color_sequence[] = {
 static const struct device *const uart_dev = DEVICE_DT_GET_ONE(zephyr_cdc_acm_uart);
 static const struct device *const led = DEVICE_DT_GET_ANY(issi_is31fl3194);
 static const struct gpio_dt_spec gpio_p0_6_gap9_i2c_ctrl = GPIO_DT_SPEC_GET(GPIO_NODE_gap9_i2c_ctrl, gpios);
+static const struct gpio_dt_spec gpio_gap9_spi_ctrl = GPIO_DT_SPEC_GET(GPIO_NODE_gap9_spi_ctrl, gpios);
 
 LOG_MODULE_REGISTER(main);
 
@@ -84,6 +86,12 @@ int main(void) {
   // Initialize power management
   // WIESEP: We do not start the power management task as it requires access to the I2C_A bus,
   // which will be used by the GAP9.
+
+  if (gpio_pin_set_dt(&gpio_gap9_spi_ctrl, 1) < 0) {
+    LOG_ERR("GAP9 SPI GPIO configuration error");
+    return 0;
+  }
+
   if (pwr_init()) {
     LOG_ERR("PWR Init failed!");
   }

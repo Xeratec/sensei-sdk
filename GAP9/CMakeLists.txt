@@ -1,8 +1,6 @@
 # Copyright (c) 2025 ETH Zurich and University of Bologna
 # SPDX-License-Identifier: Apache-2.0
 
-macro(setup_custom_bsp)
-
 # Board options
     if(CONFIG_BOARD_SENSEI_BASEV1)
          list(APPEND CUSTOM_BSP_SRCS "${GAP_CUSTOM_BSP}/bsp/boards/bsp_sensei_basev1.c")
@@ -20,17 +18,15 @@ macro(setup_custom_bsp)
         list(APPEND CUSTOM_BSP_COMPILE_OPTIONS "-D__GAP_BOARD_SENSEI_DEBUGV1__=1")
     endif()
 
+target_include_directories(pmsis PUBLIC ${GAP_CUSTOM_BSP}/bsp/drivers)
+target_include_directories(pmsis PUBLIC ${GAP_CUSTOM_BSP}/bsp/boards)
+
+message(STATUS "Custom BSP sources: ${CUSTOM_BSP_SRCS}")
+message(STATUS "Custom BSP compile options: ${CUSTOM_BSP_COMPILE_OPTIONS}")
+message(STATUS "Custom BSP include directories: ${GAP_CUSTOM_BSP}/bsp/boards ${GAP_CUSTOM_BSP}/bsp/drivers")
+
 # Driver options
-    if(CUSTOM_BSP_SRCS)
-        message(STATUS "============================ Creating custom_bsp library")
-        message(STATUS "${CUSTOM_BSP_PREFIX} Sources: ${CUSTOM_BSP_SRCS}")
-        message(STATUS "${CUSTOM_BSP_PREFIX} Options: ${CUSTOM_BSP_COMPILE_OPTIONS}")
-        add_library(custom_bsp STATIC ${CUSTOM_BSP_SRCS})
-        if ("${TARGET_LINKER_LANGUAGE}" STREQUAL "CXX")
-            set_target_properties(custom_bsp PROPERTIES LINKER_LANGUAGE CXX)
-        endif()
-        target_include_directories(custom_bsp PUBLIC ${GAP_CUSTOM_BSP})
-        target_link_libraries(custom_bsp PRIVATE pmsis_implem)
-        target_compile_options(custom_bsp PUBLIC ${CUSTOM_BSP_COMPILE_OPTIONS})
-    endif()
-endmacro()
+if(CUSTOM_BSP_SRCS)
+    target_sources(pmsis PRIVATE ${CUSTOM_BSP_SRCS})
+    target_compile_options(pmsis PUBLIC ${CUSTOM_BSP_COMPILE_OPTIONS})
+endif()

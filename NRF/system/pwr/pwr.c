@@ -3,7 +3,7 @@
  *
  * File: pwr.c
  *
- * Last edited: 30.10.2025
+ * Last edited: 2.12.2025
  *
  * Copyright (c) 2024 ETH Zurich and University of Bologna
  *
@@ -105,16 +105,18 @@ int pwr_init() {
     goto cleanup;
   }
 
-  if (max77654_reset(&pmic_h) != E_MAX77654_SUCCESS) {
-    LOG_ERR("RESET failed!");
-    err = -1;
-    goto cleanup;
+  err = max77654_reset(&pmic_h);
+  if (err != E_MAX77654_SUCCESS) {
+    // Reset is treated as best-effort: log the failure but continue, since
+    // max77654_init() below re-applies the configuration regardless.
+    LOG_ERR("RESET failed! (%d)", err);
   }
 
   k_sleep(K_MSEC(300));
 
-  if (max77654_init(&pmic_h) != E_MAX77654_SUCCESS) {
-    LOG_ERR("Driver init failed.");
+  err = max77654_init(&pmic_h);
+  if (err != E_MAX77654_SUCCESS) {
+    LOG_ERR("Driver init failed. (%d)", err);
     err = -1;
     goto cleanup;
   }

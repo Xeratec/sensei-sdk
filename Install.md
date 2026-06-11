@@ -34,5 +34,27 @@ pip install -r $ZEPHYR_BASE/scripts/requirements.txt
 ```
 
 # Install the GAP SDK
-Follow the instruction on the [GAP SDK GitHub repository](https://github.com/IIS-PBL-wizards-on-GAP9/gap_sdk_private)
 
+Refer to https://github.com/Xeratec/Deeploy/blob/pr/gap9/GAP9.md to build a custom Docker image with the GAP SDK installed.
+
+Next run
+```bash
+cd $GAP_SDK_HOME
+git stash
+git checkout
+git checkout wiesep/dev-v5.19.2
+git apply
+```
+
+```sh
+make clean
+make all
+apt update
+apt install -y autoconf automake bison build-essential curl device-tree-compiler doxygen flex git graphviz gtkwave libfdt-dev libftdi-dev libftdi1 libjpeg-dev libsamplerate-dev libsdl2-dev libsdl2-ttf-dev libsndfile1-dev libtool libusb-1.0-0-dev pkg-config python3-pip qtbase5-dev libqt5charts5-dev rsync sox wget qt6-base-dev libqt6serialport6-dev libgl1-mesa-dev telnet
+make openocd.all
+```
+
+```sh
+cd scripts
+openocd -d0 -c "gdb_port 3333; telnet_port 6666; tcl_port disabled" -f "interface/ftdi/olimex-arm-usb-ocd-h.cfg" -f "tcl/gap9revb.tcl"
+```

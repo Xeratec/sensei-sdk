@@ -12,5 +12,6 @@ board_runner_args(pyocd "--target=nrf5340_cpunet" "--frequency=4000000")
 endif()
 
 include(${ZEPHYR_BASE}/boards/common/nrfjprog.board.cmake)
+include(${ZEPHYR_BASE}/boards/common/nrfutil.board.cmake)
 include(${ZEPHYR_BASE}/boards/common/jlink.board.cmake)
 include(${ZEPHYR_BASE}/boards/common/pyocd.board.cmake)

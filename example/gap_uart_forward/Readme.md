@@ -72,7 +72,7 @@ forwarded GAP9 data appears on **both** the USB CDC-ACM serial port and RTT.
 
 ```sh
 cd src_NRF
-west build -b nrf5340_senseiv1_cpuapp
+west build -b nrf5340_senseiv1/nrf5340/cpuapp -- -DEXTRA_ZEPHYR_MODULES=$SENSEI_SDK_ROOT/NRF
 west flash
 ```
 

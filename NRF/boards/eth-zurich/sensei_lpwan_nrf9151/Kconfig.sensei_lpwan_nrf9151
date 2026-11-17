@@ -1,0 +1,7 @@
+# Copyright (c) 2026 ETH Zurich and University of Bologna
+# SPDX-License-Identifier: Apache-2.0
+
+config BOARD_SENSEI_LPWAN_NRF9151
+	select SOC_NRF9151_LACA
+	# The non-secure image is linked into the code partition from the devicetree.
+	select USE_DT_CODE_PARTITION if BOARD_SENSEI_LPWAN_NRF9151_NRF9151_NS

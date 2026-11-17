@@ -4,7 +4,7 @@ Software development kit for the SENSEI ecosystem.
 
 This repository contains the SENSEI specific SDK for the NRF5340 and the GAP9.
 
-**Currently the nRF Connect SDK v2.6.1 is supported!**
+**Currently the nRF Connect SDK v3.4.1 (Zephyr 4.4) is supported!**
 
 ## Getting Started
 
@@ -52,7 +52,7 @@ Furthermore, it will automatically set the the SENSEI board to to list of suppor
 
 1. Use the file explorer to navigate to the desired example folder and select "nRF Connect: Add Folder as Application" on the `src_NRF` folder.
 2. In the "Applications" tab of the nRF Connect SDK extension, select the newly added application and click on "Add build configuration".
-3. In the new window under "CMakePreset", select "Build for NRF5340 SENSEIV1C APP (build)", and select `v2.6.1` as SDK version and `v2.9.1` as Toolchain version.
+3. In the new window under "CMakePreset", select "Build for NRF5340 SENSEIV1C APP (build)", and select `v3.4.1` as SDK version and as Toolchain version.
 4. Click on "Generate and Build" to build the application.
 5. In the "Actions" tab click on "Flash" to flash the application to the board.
 
@@ -62,9 +62,24 @@ Make sure to export `ZEPHYR_BASE` pointing to the correct nRF Connect SDK folder
 To build and flash the nRF application, open a terminal in the `src_NRF` folder of the desired example and run the following commands:
 ```sh
 cd <example>/src_NRF
-west build -b nrf5340_senseiv1_cpuapp
+west build -b nrf5340_senseiv1/nrf5340/cpuapp -- -DEXTRA_ZEPHYR_MODULES=$SENSEI_SDK_ROOT/NRF
 west flash
 ```
+
+The build uses sysbuild: it also builds the network core image where an example needs Bluetooth.
+`-DEXTRA_ZEPHYR_MODULES=...` makes the SDK board known to sysbuild (the build presets set it).
+
+### Board targets
+| Target | Use |
+|---|---|
+| `nrf5340_senseiv1/nrf5340/cpuapp` | nRF5340 application core of the SENSEI base board |
+| `nrf5340_senseiv1/nrf5340/cpunet` | nRF5340 network core (built by sysbuild as `ipc_radio`) |
+| `nrf5340_senseiv1/nrf5340/cpuapp/bootloader` | application core variant for MCUboot with USB serial recovery |
+| `sensei_lpwan_nrf9151/nrf9151/ns` | nRF9151 of the LPWAN shield, non-secure with TF-M |
+| `sensei_lpwan_nrf9151/nrf9151` | nRF9151 of the LPWAN shield, secure image only |
+
+Shields: `UT_SensorShield_v1`, `SENSEI_DebugBoard_v1` and `LPWAN_Shield_v1` (`west build --shield <name>`).
+Flash partitions are devicetree partitions of the board (MCUboot slots included, MCUboot is off by default).
 
 ### GAP9: Use Terminal
 Next, flash the GAP9 application by opening a terminal in the `src_GAP9` folder and running the following command:
@@ -90,7 +105,7 @@ to configure the configuration with a graphical interface in the terminal.
 - **PCA6416A**: NXP GPIO Expander,
   - Requires `CONFIG_GPIO` and `CONFIG_GPIO_PCA64XXA` to be enabled.
 - **IS31FL3194**: I2C RGB LED,
-  - From *main* Zephyr branch (see [Docs](https://docs.zephyrproject.org/latest/build/dts/api/bindings/led/issi%2Cis31fl3194.html#std-dtcompatible-issi-is31fl3194))
+  - In Zephyr (driver `IS31FL319X`, see [Docs](https://docs.zephyrproject.org/latest/build/dts/api/bindings/led/issi%2Cis31fl3194.html#std-dtcompatible-issi-is31fl3194)). The SDK no longer carries its own copy.
 
 
 ## System Libraries

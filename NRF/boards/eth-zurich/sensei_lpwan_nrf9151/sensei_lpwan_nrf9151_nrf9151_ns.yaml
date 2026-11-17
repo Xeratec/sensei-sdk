@@ -1,0 +1,18 @@
+# Copyright (c) 2026 ETH Zurich and University of Bologna
+# SPDX-License-Identifier: Apache-2.0
+---
+identifier: sensei_lpwan_nrf9151/nrf9151/ns
+name: SENSEI LPWAN nRF9151 (non-secure)
+type: mcu
+arch: arm
+ram: 128
+flash: 212
+toolchain:
+  - zephyr
+  - gnuarmemb
+supported:
+  - gpio
+  - spi
+  - watchdog
+  - netif:modem
+vendor: eth-zurich

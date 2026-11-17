@@ -5,8 +5,7 @@ menuconfig SENSEI_CRYPTO
 	bool "Enable the SENSEI Crypto Library"
 	default n
 	depends on SENSEI
-	select NRF_SECURITY
-	select MBEDTLS_PSA_CRYPTO_C
+	select PSA_CRYPTO
 	select PSA_WANT_GENERATE_RANDOM
 	select PSA_WANT_ALG_SHA_256
 	help

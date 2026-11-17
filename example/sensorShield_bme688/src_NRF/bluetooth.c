@@ -68,7 +68,7 @@ static void advertise(struct k_work *work) {
     settings_load();
   }
 
-  rc = bt_le_adv_start(BT_LE_ADV_CONN, ad, ARRAY_SIZE(ad), sd, ARRAY_SIZE(sd));
+  rc = bt_le_adv_start(BT_LE_ADV_CONN_FAST_2, ad, ARRAY_SIZE(ad), sd, ARRAY_SIZE(sd));
   if (rc) {
     LOG_ERR("Advertising failed to start (rc %d)", rc);
     return;

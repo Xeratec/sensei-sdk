@@ -17,7 +17,7 @@ All functions return one `sensei_crypto_status_t`. Keys live inside PSA, the lib
 
 ## Usage
 
-Enable the library in `prj.conf`. The sub-options default to `y` and can be switched off to save flash. The options select `NRF_SECURITY`, `MBEDTLS_PSA_CRYPTO_C` and the required `PSA_WANT_*` symbols.
+Enable the library in `prj.conf`. The sub-options default to `y` and can be switched off to save flash. The options select `PSA_CRYPTO` (nRF Security with Oberon PSA Crypto on the nRF53, Mbed TLS 4 / TF-PSA-Crypto API) and the required `PSA_WANT_*` symbols.
 
 ```
 CONFIG_SENSEI=y

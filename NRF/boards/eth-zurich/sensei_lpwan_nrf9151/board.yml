@@ -1,0 +1,11 @@
+# Copyright (c) 2026 ETH Zurich and University of Bologna
+# SPDX-License-Identifier: Apache-2.0
+---
+board:
+  name: sensei_lpwan_nrf9151
+  full_name: SENSEI LPWAN shield nRF9151
+  vendor: eth-zurich
+  socs:
+    - name: nrf9151
+      variants:
+        - name: ns

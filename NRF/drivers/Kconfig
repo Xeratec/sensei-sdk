@@ -3,5 +3,4 @@
 
 menu "Drivers"
 rsource "gpio/Kconfig"
-rsource "led/Kconfig"
 endmenu

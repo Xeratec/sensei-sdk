@@ -14,7 +14,7 @@ manifest:
     - name: sdk-nrf
       remote: ncs
       path: nrf
-      revision: v2.6.1
+      revision: v3.4.1
       import: true
       west-commands: scripts/west-commands.yml
     - name: ubxlib

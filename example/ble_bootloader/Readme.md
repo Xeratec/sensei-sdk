@@ -3,26 +3,26 @@
 
 Make sure your `SENSEI_SDK_ROOT` environment variable is set to the path of the SENSEI SDK.
 
-First build the bootloader itself and flash it to the device. This can be done by running the following commands:
+The example builds MCUboot together with the application (sysbuild, `sysbuild.conf`), plus the network core image.
+MCUboot is configured in `src_NRF/sysbuild/mcuboot.conf` (USB serial recovery). Build and flash all of it with:
 
 ```bash
-$> west build -b nrf5340_senseiv1_cpuapp_bootloader --build-dir build_mcuboot $ZEPHYR_BASE/../bootloader/mcuboot/boot/zephyr -- -DEXTRA_ZEPHYR_MODULES=$SENSEI_SDK_ROOT/NRF
-$> west flash -d build_mcuboot
+$> cd src_NRF
+$> west build -b nrf5340_senseiv1/nrf5340/cpuapp -- -DEXTRA_ZEPHYR_MODULES=$SENSEI_SDK_ROOT/NRF
+$> west flash
 ```
 
-Then build the application by running:
-```bash
-$> west build -b nrf5340_senseiv1_cpuapp
-```
+The partitions are the devicetree partitions of the board (MCUboot 64 kB, two image slots of 448 kB).
+MCUboot fits its partition with 44 B to spare: keep its log level low.
 
 Next, you can flash the application via the serial recovery bootloader over USB by running:
 ```bash
-$> mcumgr-client upload build/zephyr/app_update.bin
+$> mcumgr-client upload build/src_NRF/zephyr/zephyr.signed.bin
 ```
 
 Finally, flash the application via the bootloader the device by running:
 ```bash
-$> mcumgr --conntype ble --connstring 'peer_name=mcuboot' upload build/zephyr/app_update.bin
+$> mcumgr --conntype ble --connstring 'peer_name=mcuboot' upload build/src_NRF/zephyr/zephyr.signed.bin
 ```
 
 Alternatively you can use [mcumgr-web](https://github.com/boogie/mcumgr-web/tree/main) to upload, test and then confirm the update.

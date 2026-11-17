@@ -11,8 +11,8 @@
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build",
       "cacheVariables": {
-        "NCS_TOOLCHAIN_VERSION": "NONE",
-        "BOARD": "nrf5340_senseiv1_cpuapp",
+        "BOARD": "nrf5340_senseiv1/nrf5340/cpuapp",
+        "EXTRA_ZEPHYR_MODULES": "$env{SENSEI_SDK_ROOT}/NRF",
         "CACHED_CONF_FILE": "${sourceDir}/prj.conf"
       }
     }

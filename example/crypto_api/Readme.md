@@ -5,7 +5,7 @@ This example runs the test suite and a benchmark of the [SENSEI crypto library](
 Build and flash as described in the top-level [Readme](../../Readme.md#examples):
 ```sh
 cd example/crypto_api/src_NRF
-west build -b nrf5340_senseiv1_cpuapp
+west build -b nrf5340_senseiv1/nrf5340/cpuapp -- -DEXTRA_ZEPHYR_MODULES=$SENSEI_SDK_ROOT/NRF
 west flash
 ```
 

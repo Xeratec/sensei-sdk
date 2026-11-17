@@ -1,0 +1,12 @@
+# Copyright (c) 2025 ETH Zurich and University of Bologna
+# SPDX-License-Identifier: Apache-2.0
+---
+board:
+  name: nrf5340_senseiv1
+  full_name: SENSEI v1
+  vendor: eth-zurich
+  socs:
+    - name: nrf5340
+      variants:
+        - name: bootloader
+          cpucluster: cpuapp

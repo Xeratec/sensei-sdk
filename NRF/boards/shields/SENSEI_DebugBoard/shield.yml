@@ -1,0 +1,7 @@
+# Copyright (c) 2025 ETH Zurich and University of Bologna
+# SPDX-License-Identifier: Apache-2.0
+---
+shields:
+  - name: SENSEI_DebugBoard_v1
+    full_name: SENSEI debug board v1
+    vendor: eth-zurich

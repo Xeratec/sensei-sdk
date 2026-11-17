@@ -43,12 +43,17 @@ static const struct bt_data ad[] = {
                   0xdc, 0x53, 0x8d),
 };
 
+/* The device name goes into the scan response (mcumgr finds the device by it). */
+static const struct bt_data sd[] = {
+    BT_DATA(BT_DATA_NAME_COMPLETE, CONFIG_BT_DEVICE_NAME, sizeof(CONFIG_BT_DEVICE_NAME) - 1),
+};
+
 static void advertise(struct k_work *work) {
   int rc;
 
   bt_le_adv_stop();
 
-  rc = bt_le_adv_start(BT_LE_ADV_CONN_NAME, ad, ARRAY_SIZE(ad), NULL, 0);
+  rc = bt_le_adv_start(BT_LE_ADV_CONN_FAST_2, ad, ARRAY_SIZE(ad), sd, ARRAY_SIZE(sd));
   if (rc) {
     LOG_ERR("Advertising failed to start (rc %d)", rc);
     return;

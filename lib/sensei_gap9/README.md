@@ -17,14 +17,17 @@ numbers, status to errno, which job needs the camera bus), so any message schema
 
 ## nRF5340 (Zephyr)
 
-- `CONFIG_SENSEI_GAP9=y` (selects `SENSEI_LINK`, `SENSEI_BUSARB`; needs `SENSEI_PWR` for `gap9_pwr()`). Options: queue depth, result ring,
+- `CONFIG_SENSEI_GAP9=y` (selects `SENSEI_LINK`, `SENSEI_BUSARB`; needs `SENSEI_PWR` for `gap9_pwr()`). Options: queue depth, staging depth, result ring,
   timeouts, idle power-off, bus wait. `SENSEI_GAP9_SHELL` adds `sensei gap9 [on|off|ping|status]` (needs an app shell root
   command `sensei`).
 - Add `zephyr/gap9_link.overlay` to `EXTRA_DTC_OVERLAY_FILE` of the app. It defines the aliases `gap9-trigger`, `gap9-spi-sel`,
   `gap9-i2c-sel`, `gap9-spis` (SPIS3 on P0.08 to P0.11, trigger P1.05).
 - The app defines the storage with `GAP9_LINK_STORAGE_DEFINE(name, job_t, result_t)`, fills `struct gap9_link_cfg` (codec, hooks,
   storage) and calls `gap9_link_init()`, then `gap9_link_submit()`. Hooks: camera bus lock, camera clock, error counter, energy
-  marker, the work queue for the result callbacks.
+  marker, the work queue for the result callbacks. The codec also names the GAP9 firmware major version it needs
+  (`gap9_major`, checked against HELLO).
+- `gap9_link_submit()` returns `-ENOMEM` when all staging slots are taken; every other error comes through the callback
+  (`final` is set on the last call of a job). `gap9_link_reset()` is for the user button.
 - SPI_A is shared with the LPWAN shield (`sensei_busarb`): GAP9 starts only when the shield holds neither the bus nor an LTE transmission.
 
 ## GAP9

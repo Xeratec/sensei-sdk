@@ -45,6 +45,7 @@ static struct k_work_delayable timer_work;
 static struct k_work spi_work;
 static struct k_work_delayable submit_work;
 static struct k_work shutdown_work;
+static struct k_work reset_work;
 
 static const struct gap9_link_cfg *lcfg;
 static const struct gap9_link_hooks *hooks;
@@ -56,10 +57,11 @@ static const struct spi_config spi_cfg = {
 static volatile bool spis_armed;
 static volatile int spis_rx_amount;
 static bool trig_want;
+static volatile bool link_ready; /* gap9_link_init() is done */
 
-static void report_error(enum gap9_link_error kind) {
+static void report_error(void) {
   if (hooks != NULL && hooks->error != NULL) {
-    hooks->error(kind);
+    hooks->error();
   }
 }
 
@@ -142,7 +144,7 @@ static void spis_ensure_armed(void) {
   if (ret != 0) {
     spis_armed = false;
     LOG_ERR("SPIS arm failed (%d)", ret);
-    report_error(GAP9_LINK_ERR_LINK);
+    report_error();
   }
 }
 
@@ -182,12 +184,6 @@ static void op_power(bool on) {
   LOG_INF("GAP9 %s", on ? "on" : "off");
 }
 
-static void op_arm(const uint8_t *tx, size_t len) {
-  /* The frame is already in core.tx and the SPIS reads that buffer. */
-  ARG_UNUSED(tx);
-  ARG_UNUSED(len);
-}
-
 static void op_trigger(bool high) {
   trig_want = high;
   if (!high) {
@@ -222,6 +218,7 @@ struct delivery {
   void *user;
   int err;
   bool has_res;
+  bool final;
 };
 static struct delivery ring[CONFIG_SENSEI_GAP9_RESULT_RING];
 static unsigned int ring_head, ring_tail;
@@ -237,16 +234,24 @@ static void deliver_handler(struct k_work *w) {
   while (ring_tail != ring_head) {
     struct delivery *d = &ring[ring_tail % CONFIG_SENSEI_GAP9_RESULT_RING];
 
-    d->fn(d->err, d->has_res ? ring_res(ring_tail) : NULL, d->user);
+    d->fn(d->err, d->has_res ? ring_res(ring_tail) : NULL, d->final, d->user);
     ring_tail++;
     k_sem_give(&ring_free);
   }
 }
 
-static void op_deliver(g9_done_fn fn, void *user, int err, const void *res) {
-  if (k_sem_take(&ring_free, K_SECONDS(2)) != 0) {
-    LOG_ERR("result ring full, result dropped");
-    report_error(GAP9_LINK_ERR_LINK);
+/*
+ * A frame that is not final (a JPEG chunk) is dropped when the ring stays full for 2 s. A final
+ * frame ends the job, so it waits for room as long as it takes: the callback frees the job slot
+ * of the app, and the link would never finish the job otherwise.
+ */
+static void op_deliver(g9_done_fn fn, void *user, int err, const void *res, bool final) {
+  if (fn == NULL) {
+    return;
+  }
+  if (k_sem_take(&ring_free, final ? K_FOREVER : K_SECONDS(2)) != 0) {
+    LOG_ERR("result ring full, frame dropped");
+    report_error();
     return;
   }
   struct delivery *d = &ring[ring_head % CONFIG_SENSEI_GAP9_RESULT_RING];
@@ -254,6 +259,7 @@ static void op_deliver(g9_done_fn fn, void *user, int err, const void *res) {
   d->fn = fn;
   d->user = user;
   d->err = err;
+  d->final = final;
   d->has_res = res != NULL;
   if (res != NULL) {
     memcpy(ring_res(ring_head), res, lcfg->codec->result_size);
@@ -266,7 +272,7 @@ static void op_deliver(g9_done_fn fn, void *user, int err, const void *res) {
   }
 }
 
-static void op_error(void) { report_error(GAP9_LINK_ERR_LINK); }
+static void op_error(void) { report_error(); }
 
 static void op_marker(bool on) {
   if (hooks != NULL && hooks->marker != NULL) {
@@ -276,7 +282,6 @@ static void op_marker(bool on) {
 
 static const struct g9_ops ops = {
     .power = op_power,
-    .arm = op_arm,
     .trigger = op_trigger,
     .bus_lock = op_bus_lock,
     .bus_unlock = op_bus_unlock,
@@ -309,15 +314,14 @@ struct stage {
   g9_done_fn done;
   void *user;
 };
-/* One slot is enough: the link thread (higher priority) moves it into the core queue at once. It
- * only stays when the job waits for SPI_A or LTE (bus_take()). */
-#define STAGE_DEPTH 1
+/* The link thread (higher priority) moves a staged job into the core queue at once. It stays
+ * when the job waits for SPI_A or LTE (bus_take()) or for a free queue entry. */
+#define STAGE_DEPTH CONFIG_SENSEI_GAP9_STAGE_DEPTH
 static struct stage stages[STAGE_DEPTH];
 static unsigned int stage_head, stage_tail;
 static struct k_spinlock stage_lock;
 
 static void *stage_job(unsigned int i) {
-  // cppcheck-suppress moduloofone ; one stage today, the depth is a tunable
   return (uint8_t *)lcfg->storage.stage + (size_t)(i % STAGE_DEPTH) * lcfg->codec->job_size;
 }
 
@@ -328,7 +332,6 @@ static void submit_handler(struct k_work *w) {
     k_spinlock_key_t k = k_spin_lock(&stage_lock);
 
     if (stage_tail != stage_head) {
-      // cppcheck-suppress moduloofone ; one stage today, the depth is a tunable
       s = &stages[stage_tail % STAGE_DEPTH];
     }
     k_spin_unlock(&stage_lock, k);
@@ -350,13 +353,17 @@ static void submit_handler(struct k_work *w) {
       }
       LOG_WRN("SPI_A or LTE busy for %d s, job dropped", CONFIG_SENSEI_GAP9_BUS_WAIT_S);
       ret = -EBUSY;
+    } else if (g9_full(&core)) {
+      /* All queue entries are in use: a result will free one (jobs have timeouts). */
+      k_work_reschedule_for_queue(&link_wq, &submit_work, K_MSEC(BUS_RETRY_MS));
+      return;
     } else {
       bus_wait_since = 0;
       ret = g9_submit(&core, stage_job(stage_tail), s->done, s->user);
     }
     if (ret != 0) {
-      report_error(ret == -EBUSY ? GAP9_LINK_ERR_LINK : GAP9_LINK_ERR_QUEUE_FULL);
-      op_deliver(s->done, s->user, ret, NULL);
+      report_error();
+      op_deliver(s->done, s->user, ret, NULL, true);
     }
     k = k_spin_lock(&stage_lock);
     stage_tail++;
@@ -369,6 +376,27 @@ static void submit_handler(struct k_work *w) {
 static void shutdown_handler(struct k_work *w) {
   ARG_UNUSED(w);
   g9_shutdown(&core);
+  /* Jobs that are still staged (waiting for SPI_A, LTE or a queue entry) fail too. */
+  k_work_cancel_delayable(&submit_work);
+  while (stage_tail != stage_head) {
+    struct stage *s = &stages[stage_tail % STAGE_DEPTH];
+
+    op_deliver(s->done, s->user, -ECANCELED, NULL, true);
+    k_spinlock_key_t k = k_spin_lock(&stage_lock);
+
+    stage_tail++;
+    k_spin_unlock(&stage_lock, k);
+  }
+  bus_wait_since = 0;
+  link_sync();
+}
+
+static void reset_handler(struct k_work *w) {
+  ARG_UNUSED(w);
+  if (core.state != G9_OFF) {
+    LOG_WRN("GAP9 reset by button");
+  }
+  g9_reset(&core);
   link_sync();
 }
 
@@ -411,8 +439,10 @@ int gap9_link_init(const struct gap9_link_cfg *cfg) {
   k_work_init(&spi_work, spi_handler);
   k_work_init_delayable(&submit_work, submit_handler);
   k_work_init(&shutdown_work, shutdown_handler);
+  k_work_init(&reset_work, reset_handler);
   k_work_init(&deliver_work, deliver_handler);
   k_work_init_delayable(&timer_work, timer_handler);
+  link_ready = true;
   return 0;
 }
 
@@ -423,7 +453,6 @@ int gap9_link_submit(const void *job, g9_done_fn done, void *user) {
     k_spin_unlock(&stage_lock, k);
     return -ENOMEM;
   }
-  // cppcheck-suppress moduloofone ; one stage today, the depth is a tunable
   struct stage *s = &stages[stage_head % STAGE_DEPTH];
 
   memcpy(stage_job(stage_head), job, lcfg->codec->job_size); /* a few microseconds */
@@ -437,7 +466,18 @@ int gap9_link_submit(const void *job, g9_done_fn done, void *user) {
 
 bool gap9_link_busy(void) { return g9_busy(&core) || stage_head != stage_tail; }
 
-void gap9_link_power_off_now(void) { k_work_submit_to_queue(&link_wq, &shutdown_work); }
+void gap9_link_power_off_now(void) {
+  if (link_ready) {
+    k_work_submit_to_queue(&link_wq, &shutdown_work);
+  }
+}
+
+/* Called by the power thread (button): may come before the link is up. */
+void gap9_link_reset(void) {
+  if (link_ready) {
+    k_work_submit_to_queue(&link_wq, &reset_work);
+  }
+}
 
 void gap9_link_status_get(struct gap9_link_status *st) {
   st->state = core.state;

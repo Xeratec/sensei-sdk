@@ -25,6 +25,7 @@
 #define G9L_TYPE_POLL 0x13u                    /* GAP9 -> nRF: "send me your frame", header only */
 #define G9L_TYPE_NONE 0x14u                    /* nRF -> GAP9: no job, header only */
 #define G9L_TYPE_BUSFREE 0x15u                 /* GAP9 -> nRF: camera done, payload u32 seq LE */
+#define G9L_TYPE_PEEK 0x16u                    /* GAP9 -> nRF: header-only look, consumes nothing */
 
 /* Frame flags (sensei_link/spi.h): ERROR = "the previous frame you sent me was bad",
  * MORE = "more result frames of the same job follow" (JPEG chunks). */

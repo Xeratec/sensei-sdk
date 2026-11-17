@@ -32,8 +32,11 @@
 #define G9_QUEUE_DEPTH 3
 #endif
 
-/** Result callback. err < 0: timeout, link or GAP9 error (res may be NULL). */
-typedef void (*g9_done_fn)(int err, const void *res, void *user);
+/**
+ * Result callback, once per result frame. err < 0: timeout, link or GAP9 error (res may be NULL).
+ * final: the last call of this job (a job with MORE frames calls it with final = false first).
+ */
+typedef void (*g9_done_fn)(int err, const void *res, bool final, void *user);
 
 /** How the app's job and result messages are coded. All functions are called on the link thread. */
 struct g9_codec {
@@ -50,14 +53,20 @@ struct g9_codec {
   int (*result_err)(const void *res);
   /** The job needs the shared camera bus: the bus lock is held until GAP9 sends BUSFREE. */
   bool (*job_uses_bus)(const void *job);
+  /**
+   * Major version that GAP9 reports in its hello (Version.major) and that these job and result
+   * messages need. Another major: the jobs fail with -EPROTO and GAP9 is powered off.
+   */
+  uint32_t gap9_major;
 };
 
 struct g9_ops {
   /** Rail and select lines on (boot starts) or off. */
   void (*power)(bool on);
-  /** Arm the SPIS: send `tx` (len bytes, valid until the next arm) in the next transaction. */
-  void (*arm)(const uint8_t *tx, size_t len);
-  /** Drive the trigger line: true = GAP9 should start a transaction now. */
+  /**
+   * Drive the trigger line: true = GAP9 should start a transaction now. The frame to send is
+   * struct g9.tx (tx_len bytes); the SPIS reads that buffer, so it needs no call to arm it.
+   */
   void (*trigger)(bool high);
   void (*bus_lock)(void);
   void (*bus_unlock)(void);
@@ -66,9 +75,10 @@ struct g9_ops {
   /**
    * Give a result frame to the user, once per frame. A job may answer with several frames (flag
    * MORE on all but the last, for example a detect result and JPEG chunks); the last one ends
-   * the job. res is valid during the call only.
+   * the job (final). res is valid during the call only. A final frame must never be dropped
+   * (the job would never end); a frame that is not final may be.
    */
-  void (*deliver)(g9_done_fn fn, void *user, int err, const void *res);
+  void (*deliver)(g9_done_fn fn, void *user, int err, const void *res, bool final);
   void (*error)(void);
   void (*marker)(bool on);
 };
@@ -83,6 +93,7 @@ struct g9_entry {
   enum { G9E_FREE, G9E_PENDING, G9E_SENT } st;
   bool locked;  /* this entry holds the bus lock */
   bool busfree; /* bus free received */
+  bool partial; /* a result frame with MORE was delivered */
   void *job;    /* codec->job_size bytes of the app's pool */
   g9_done_fn done;
   void *user;
@@ -93,7 +104,7 @@ struct g9 {
   const struct g9_codec *codec;
   struct g9_cfg cfg;
   enum g9_state state;
-  enum { G9T_NONE, G9T_BOOT, G9T_BUSFREE, G9T_JOB, G9T_IDLE, G9T_CYCLE } timer;
+  enum { G9T_NONE, G9T_BOOT, G9T_BUSFREE, G9T_JOB, G9T_IDLE, G9T_CYCLE, G9T_FETCH } timer;
   bool err_flag; /* last GAP9 frame was bad: set ERROR in our next header */
   bool boot_retry;
   int armed; /* index of the job frame in tx, -1 for NONE */
@@ -116,6 +127,9 @@ void g9_init(struct g9 *g, const struct g9_ops *ops, const struct g9_codec *code
 /** Queue a job (copied). -ENOMEM if the queue is full. Starts a boot if GAP9 is off. */
 int g9_submit(struct g9 *g, const void *job, g9_done_fn done, void *user);
 
+/** True if g9_submit() would fail with -ENOMEM. */
+bool g9_full(const struct g9 *g);
+
 /**
  * A SPI transaction ended. rx holds the bytes the master clocked in (rx_len of them). The SPIS
  * receive buffer is as long as the longest armed frame, so rx_len is also the number of bytes of
@@ -130,5 +144,11 @@ bool g9_busy(const struct g9 *g);
 
 /** Power off now and fail all jobs (-ECANCELED). */
 void g9_shutdown(struct g9 *g);
+
+/**
+ * Reset GAP9 (the button): power cycle it, fail the job in flight (-ECANCELED) and run the
+ * waiting ones on the new boot. Does nothing while GAP9 is off.
+ */
+void g9_reset(struct g9 *g);
 
 #endif /* SENSEI_GAP9_CORE_H_ */

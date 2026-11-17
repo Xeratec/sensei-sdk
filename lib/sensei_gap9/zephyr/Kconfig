@@ -28,6 +28,16 @@ config SENSEI_GAP9_QUEUE_DEPTH
 	range 1 8
 	depends on SENSEI_GAP9
 
+config SENSEI_GAP9_STAGE_DEPTH
+	int "Jobs that can wait outside the queue (each costs one job struct of the app in RAM)"
+	default 2
+	range 1 4
+	depends on SENSEI_GAP9
+	help
+	  gap9_link_submit() puts the job here, the link thread moves it into the queue. A job stays
+	  here while the LPWAN client uses SPI_A or LTE (up to CONFIG_SENSEI_GAP9_BUS_WAIT_S) or the
+	  queue is full. gap9_link_submit() returns -ENOMEM when all slots are used.
+
 config SENSEI_GAP9_RESULT_RING
 	int "Results buffered for the delivery work queue (each costs one result struct of the app)"
 	default 4
@@ -55,7 +65,8 @@ config SENSEI_GAP9_JOB_TIMEOUT_MS
 	default 8000
 	depends on SENSEI_GAP9
 	help
-	  On expiry the job fails with -ETIMEDOUT and GAP9 is power cycled.
+	  On expiry the job fails with -ETIMEDOUT and GAP9 is power cycled. The same time is given to
+	  GAP9 to take a job that the link has armed (the job fails if it never does).
 
 config SENSEI_GAP9_IDLE_OFF_MS
 	int "Delay between the last job and the GAP9 power-off (ms)"

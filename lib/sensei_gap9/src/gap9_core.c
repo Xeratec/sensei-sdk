@@ -78,7 +78,6 @@ static void arm_frame(struct g9 *g, struct g9_entry *job) {
     g->armed = -1;
     g->tx_len = G9L_HDR;
   }
-  g->ops->arm(g->tx, g->tx_len);
 }
 
 /* Choose the frame: the job in flight (resend), else the oldest pending one, else NONE. */
@@ -89,10 +88,17 @@ static void arm_next(struct g9 *g, bool trigger) {
     e = find(g, G9E_SENT);
     if (e == NULL) {
       e = oldest_pending(g);
-      /* The bus lock is taken before GAP9 can see a detect job. */
-      if (e != NULL && uses_bus(g, e) && !e->locked) {
-        g->ops->bus_lock();
-        e->locked = true;
+      if (e != NULL) {
+        /* The bus lock is taken before GAP9 can see a detect job. */
+        if (uses_bus(g, e) && !e->locked) {
+          g->ops->bus_lock();
+          e->locked = true;
+        }
+        /* GAP9 has to fetch the job. One that never does is power cycled (the timer is not
+         * restarted by every poll or peek). */
+        if (g->timer != G9T_FETCH) {
+          set_timer(g, G9T_FETCH, g->cfg.job_ms);
+        }
       }
     }
   }
@@ -109,6 +115,7 @@ static void start_boot(struct g9 *g) {
   set_timer(g, G9T_BOOT, g->cfg.boot_ms);
 }
 
+/* GAP9 is off first, then the camera bus goes back to the sensors. */
 static void power_off(struct g9 *g) {
   g->ops->trigger(false);
   g->ops->power(false);
@@ -116,6 +123,9 @@ static void power_off(struct g9 *g) {
   set_timer(g, G9T_NONE, 0);
   g->state = G9_OFF;
   g->armed = -1;
+  for (int i = 0; i < G9_QUEUE_DEPTH; i++) {
+    unlock_bus(g, &g->q[i]);
+  }
 }
 
 static void fail_entry(struct g9 *g, struct g9_entry *e, int err) {
@@ -125,7 +135,7 @@ static void fail_entry(struct g9 *g, struct g9_entry *e, int err) {
   unlock_bus(g, e);
   e->st = G9E_FREE;
   if (fn != NULL) {
-    g->ops->deliver(fn, user, err, NULL);
+    g->ops->deliver(fn, user, err, NULL, true);
   }
 }
 
@@ -137,9 +147,8 @@ static void fail_all(struct g9 *g, int err) {
   }
 }
 
-/* Power cycle: off, wait, boot again if jobs are left. */
-static void cycle(struct g9 *g) {
-  power_off(g);
+/* After power_off() and the failed entry: wait, then boot again if jobs are left. */
+static void restart(struct g9 *g) {
   if (oldest_pending(g) != NULL) {
     g->state = G9_CYCLE;
     set_timer(g, G9T_CYCLE, g->cfg.restart_off_ms);
@@ -160,6 +169,15 @@ void g9_init(struct g9 *g, const struct g9_ops *ops, const struct g9_codec *code
   for (int i = 0; i < G9_QUEUE_DEPTH; i++) {
     g->q[i].job = (uint8_t *)jobs + (size_t)i * codec->job_size;
   }
+}
+
+bool g9_full(const struct g9 *g) {
+  for (int i = 0; i < G9_QUEUE_DEPTH; i++) {
+    if (g->q[i].st == G9E_FREE) {
+      return false;
+    }
+  }
+  return true;
 }
 
 bool g9_busy(const struct g9 *g) {
@@ -186,6 +204,7 @@ int g9_submit(struct g9 *g, const void *job, g9_done_fn done, void *user) {
   e->user = user;
   e->locked = false;
   e->busfree = false;
+  e->partial = false;
   e->st = G9E_PENDING;
 
   switch (g->state) {
@@ -212,15 +231,48 @@ void g9_shutdown(struct g9 *g) {
   fail_all(g, -ECANCELED);
 }
 
-static void on_hello(struct g9 *g, const uint8_t *p, size_t len) {
-  if (!sensei_decode_Version(p, len, &g->version)) {
-    memset(&g->version, 0, sizeof(g->version));
+void g9_reset(struct g9 *g) {
+  if (g->state == G9_OFF) {
+    return;
   }
-  if (g->state == G9_BOOT) {
+  struct g9_entry *e = find(g, G9E_SENT);
+
+  power_off(g);
+  if (e != NULL) {
+    fail_entry(g, e, -ECANCELED);
+  }
+  restart(g);
+}
+
+/* Returns false if the frame ended the session (GAP9 is off now). */
+static bool on_hello(struct g9 *g, const uint8_t *p, size_t len) {
+  if (!sensei_decode_Version(p, len, &g->version) || g->version.major != g->codec->gap9_major) {
+    /* GAP9 runs a firmware with other job messages: no job can work. */
+    count_error(g);
+    power_off(g);
+    fail_all(g, -EPROTO);
+    return false;
+  }
+  if (g->state == G9_RUN) {
+    /* GAP9 restarted by itself (watchdog, fault): the job it had is lost. Run it again from the
+     * start, unless some of its result frames were delivered already. */
+    struct g9_entry *e = find(g, G9E_SENT);
+
+    if (e != NULL) {
+      count_error(g);
+      if (e->partial) {
+        fail_entry(g, e, -ECONNRESET);
+      } else {
+        e->st = G9E_PENDING;
+        e->busfree = false;
+      }
+    }
+  } else if (g->state == G9_BOOT) {
     g->boot_retry = true;
     g->state = G9_RUN;
     set_timer(g, G9T_NONE, 0);
   }
+  return true;
 }
 
 static void on_busfree(struct g9 *g, const uint8_t *p, size_t len) {
@@ -248,15 +300,22 @@ static void on_result(struct g9 *g, const uint8_t *p, size_t len, uint8_t flags)
     count_error(g);
     return;
   }
+  int err = g->codec->result_err(g->res);
+
   if (uses_bus(g, e) && !e->busfree) {
-    count_error(g); /* result before bus free: GAP9 broke the order */
+    /* GAP9 is done with the camera. A successful job must say so first; a failed one (bad job,
+     * detector not built) may answer at once. */
+    if (err == 0) {
+      count_error(g);
+    }
     unlock_bus(g, e);
   }
   if (more) {
     /* first result of a JPEG job, or a chunk: the job goes on */
+    e->partial = true;
     set_timer(g, G9T_JOB, g->cfg.job_ms);
     if (e->done != NULL) {
-      g->ops->deliver(e->done, e->user, g->codec->result_err(g->res), g->res);
+      g->ops->deliver(e->done, e->user, err, g->res, false);
     }
     return;
   }
@@ -265,13 +324,11 @@ static void on_result(struct g9 *g, const uint8_t *p, size_t len, uint8_t flags)
 
   unlock_bus(g, e);
   e->st = G9E_FREE;
-  int err = g->codec->result_err(g->res);
-
   if (err != 0) {
     count_error(g);
   }
   if (fn != NULL) {
-    g->ops->deliver(fn, user, err, g->res);
+    g->ops->deliver(fn, user, err, g->res, true);
   }
 }
 
@@ -294,9 +351,13 @@ void g9_spi_done(struct g9 *g, const uint8_t *rx, size_t rx_len) {
     return;
   }
 
-  if (h.type == G9L_TYPE_POLL) {
-    bool gap9_err = (h.flags & G9L_FLAG_ERROR) != 0;
-    bool consumed = !gap9_err && rx_len >= g->tx_len;
+  /* Any good frame from GAP9, a poll too, shows that the last header it got from us was fine. */
+  g->err_flag = false;
+
+  if (h.type == G9L_TYPE_POLL || h.type == G9L_TYPE_PEEK) {
+    /* A peek reads the header only and never takes the frame, even a NONE of 8 bytes. */
+    bool gap9_err = h.type == G9L_TYPE_POLL && (h.flags & G9L_FLAG_ERROR) != 0;
+    bool consumed = h.type == G9L_TYPE_POLL && !gap9_err && rx_len >= g->tx_len;
 
     if (gap9_err) {
       count_error(g);
@@ -319,11 +380,11 @@ void g9_spi_done(struct g9 *g, const uint8_t *rx, size_t rx_len) {
     return;
   }
 
-  /* A frame from GAP9: it is good. */
-  g->err_flag = false;
   switch (h.type) {
   case G9L_TYPE_HELLO:
-    on_hello(g, payload, h.len);
+    if (!on_hello(g, payload, h.len)) {
+      return;
+    }
     break;
   case G9L_TYPE_BUSFREE:
     on_busfree(g, payload, h.len);
@@ -356,15 +417,18 @@ void g9_timer_expired(struct g9 *g) {
       fail_all(g, -ETIMEDOUT);
     }
     break;
+  case G9T_FETCH:
   case G9T_BUSFREE:
   case G9T_JOB: {
-    struct g9_entry *e = find(g, G9E_SENT);
+    /* FETCH: the armed job was never taken. Otherwise the job in flight. */
+    struct g9_entry *e = kind == G9T_FETCH ? (g->armed >= 0 ? &g->q[g->armed] : NULL) : find(g, G9E_SENT);
 
     count_error(g);
+    power_off(g);
     if (e != NULL) {
       fail_entry(g, e, -ETIMEDOUT);
     }
-    cycle(g);
+    restart(g);
     break;
   }
   case G9T_IDLE:

@@ -133,19 +133,23 @@ static int push_frame(uint8_t type, uint8_t flags, const uint8_t *payload, size_
 
 /*
  * One poll. Reads the 8 byte header of the armed frame, and the payload if want_payload and the
- * header is good. Returns 0 (header good), -1 (header bad). *hdr is filled when the header parsed.
+ * header is good. Without want_payload the transaction is a PEEK: the nRF5340 does not take the
+ * frame. Returns 0 (header good), -1 (header bad). *hdr is filled when the header parsed.
+ * The ERROR flag in the header only says that the nRF5340 rejected our last push: the payload is
+ * read anyway.
  */
 static int poll_frame(bool want_payload, bool report_error, sensei_spi_header_t *hdr, int *payload_bad) {
   int rc = 0;
 
   *payload_bad = 0;
-  sensei_spi_header_pack(poll_hdr, G9L_TYPE_POLL, report_error ? G9L_FLAG_ERROR : 0, NULL, 0);
+  sensei_spi_header_pack(poll_hdr, want_payload ? G9L_TYPE_POLL : G9L_TYPE_PEEK, report_error ? G9L_FLAG_ERROR : 0,
+                         NULL, 0);
   cs(0);
   pi_time_wait_us(G9L_CS_SETUP_US);
   pi_spi_transfer(&spi_dev, poll_hdr, rx_frame, G9L_HDR * 8, PI_SPI_CS_NONE);
   if (sensei_spi_header_parse(rx_frame, hdr) != SENSEI_SPI_OK) {
     rc = -1;
-  } else if (want_payload && hdr->len > 0 && !(hdr->flags & G9L_FLAG_ERROR)) {
+  } else if (want_payload && hdr->len > 0) {
     pi_spi_receive(&spi_dev, rx_frame + G9L_HDR, (uint32_t)hdr->len * 8, PI_SPI_CS_NONE);
     *payload_bad = sensei_spi_check_payload(hdr, rx_frame + G9L_HDR) != SENSEI_SPI_OK;
   } else if (want_payload && hdr->len == 0) {

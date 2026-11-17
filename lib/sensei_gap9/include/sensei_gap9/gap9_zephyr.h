@@ -36,11 +36,6 @@
 extern "C" {
 #endif
 
-enum gap9_link_error {
-  GAP9_LINK_ERR_LINK,       /* link, timeout or GAP9 error, dropped result */
-  GAP9_LINK_ERR_QUEUE_FULL, /* job queue full */
-};
-
 /** What the link needs from the app. All hooks may be NULL except where noted. */
 struct gap9_link_hooks {
   /** Work queue that runs the result callbacks. NULL: the system work queue. */
@@ -50,8 +45,8 @@ struct gap9_link_hooks {
   void (*bus_unlock)(void);
   /** Gate the camera clock: true before GAP9 powers up, false after power-off. Takes the bus lock itself. */
   void (*camera_clock)(bool on);
-  /** Count an error. */
-  void (*error)(enum gap9_link_error kind);
+  /** Count a link error (bad frame, timeout, GAP9 error, dropped frame). */
+  void (*error)(void);
   /** Energy marker: high while GAP9 is on. */
   void (*marker)(bool on);
   /** Submit a ping job and wait (the app knows its job format). Used by the shell only. */
@@ -61,7 +56,7 @@ struct gap9_link_hooks {
 /** Memory of the link, sized for the app's job and result structs. Use GAP9_LINK_STORAGE_DEFINE(). */
 struct gap9_link_storage {
   void *jobs;   /* CONFIG_SENSEI_GAP9_QUEUE_DEPTH jobs */
-  void *stage;  /* one job */
+  void *stage;  /* CONFIG_SENSEI_GAP9_STAGE_DEPTH jobs */
   void *ring;   /* CONFIG_SENSEI_GAP9_RESULT_RING results */
   void *result; /* one result */
 };
@@ -69,7 +64,7 @@ struct gap9_link_storage {
 /** Defines static storage `name` for job_t and result_t, sized by Kconfig. */
 #define GAP9_LINK_STORAGE_DEFINE(name, job_t, result_t)                                                                \
   static job_t name##_jobs[CONFIG_SENSEI_GAP9_QUEUE_DEPTH];                                                            \
-  static job_t name##_stage[1];                                                                                        \
+  static job_t name##_stage[CONFIG_SENSEI_GAP9_STAGE_DEPTH];                                                           \
   static result_t name##_ring[CONFIG_SENSEI_GAP9_RESULT_RING];                                                         \
   static result_t name##_result[1];                                                                                    \
   static const struct gap9_link_storage name = {name##_jobs, name##_stage, name##_ring, name##_result}
@@ -85,16 +80,28 @@ int gap9_link_init(const struct gap9_link_cfg *cfg);
 
 /**
  * Queue a job (copied). Jobs that use the camera bus take the bus lock hook before GAP9 sees them.
- * done runs on hooks->deliver_wq, once per result frame. Returns -ENOMEM if the staging slot is
- * taken; a full job queue or a busy SPI_A bus is reported through done (-ENOMEM, -EBUSY).
+ * done runs on hooks->deliver_wq, once per result frame, and with final set for the last one.
+ *
+ * Returns 0 or -ENOMEM: all CONFIG_SENSEI_GAP9_STAGE_DEPTH staging slots are taken (try again
+ * later). A staged job waits for SPI_A or LTE (up to CONFIG_SENSEI_GAP9_BUS_WAIT_S, then done gets
+ * -EBUSY) and for a free queue entry. Other errors come through done: -ETIMEDOUT, -EPROTO (GAP9
+ * firmware with other messages), -ECANCELED (power off or button), -ECONNRESET (GAP9 restarted
+ * after it sent part of the result), or the status of the job.
  */
 int gap9_link_submit(const void *job, g9_done_fn done, void *user);
 
 /** True while GAP9 is powered or jobs are pending. */
 bool gap9_link_busy(void);
 
-/** Power GAP9 off now and fail the queued jobs (-ECANCELED). Safe from any thread. */
+/** Power GAP9 off now and fail the queued and staged jobs (-ECANCELED). Safe from any thread. */
 void gap9_link_power_off_now(void);
+
+/**
+ * Reset GAP9 (the user pressed the button): power cycle it through the link, so that the link
+ * state stays right. The job in flight fails (-ECANCELED), waiting jobs run on the new boot. Does
+ * nothing while GAP9 is off. Safe from any thread.
+ */
+void gap9_link_reset(void);
 
 struct gap9_link_status {
   enum g9_state state;

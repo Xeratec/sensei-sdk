@@ -17,4 +17,6 @@ menuconfig SENSEI_PWR
 	help
 	  Enable the SENSEI Power Subsystem.
 
+rsource "crypto/Kconfig"
+
 endmenu

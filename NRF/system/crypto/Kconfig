@@ -1,0 +1,68 @@
+# Copyright (c) 2025 ETH Zurich and University of Bologna
+# SPDX-License-Identifier: Apache-2.0
+
+menuconfig SENSEI_CRYPTO
+	bool "Enable the SENSEI Crypto Library"
+	default n
+	depends on SENSEI
+	select NRF_SECURITY
+	select MBEDTLS_PSA_CRYPTO_C
+	select PSA_WANT_GENERATE_RANDOM
+	select PSA_WANT_ALG_SHA_256
+	help
+	  Enable the SENSEI Crypto Library, a simplified layer over the PSA
+	  Crypto API (AES-GCM, SHA-256, HMAC, HKDF, ECDH and ECDSA on P-256).
+	  The application must size the mbed TLS heap (CONFIG_MBEDTLS_ENABLE_HEAP
+	  and CONFIG_MBEDTLS_HEAP_SIZE) and the stack of the calling thread.
+
+if SENSEI_CRYPTO
+
+config SENSEI_CRYPTO_AEAD
+	bool "AES-GCM authenticated encryption"
+	default y
+	select PSA_WANT_ALG_GCM
+	select PSA_WANT_KEY_TYPE_AES
+	help
+	  AES-128/256-GCM encryption and decryption.
+
+config SENSEI_CRYPTO_HMAC
+	bool "HMAC-SHA256"
+	default y
+	select PSA_WANT_ALG_HMAC
+	select PSA_WANT_KEY_TYPE_HMAC
+	help
+	  HMAC-SHA256 message authentication.
+
+config SENSEI_CRYPTO_HKDF
+	bool "HKDF-SHA256 key derivation"
+	default y
+	select SENSEI_CRYPTO_HMAC
+	select PSA_WANT_ALG_HKDF
+	help
+	  HKDF-SHA256 (RFC 5869) key derivation.
+
+config SENSEI_CRYPTO_ECDH
+	bool "ECDH on P-256"
+	default y
+	select PSA_WANT_ALG_ECDH
+	select PSA_WANT_ECC_SECP_R1_256
+	select PSA_WANT_KEY_TYPE_ECC_KEY_PAIR
+	select PSA_WANT_KEY_TYPE_ECC_PUBLIC_KEY
+	help
+	  ECDH key agreement on NIST P-256.
+
+config SENSEI_CRYPTO_ECDSA
+	bool "ECDSA on P-256"
+	default y
+	select PSA_WANT_ALG_ECDSA
+	select PSA_WANT_ECC_SECP_R1_256
+	select PSA_WANT_KEY_TYPE_ECC_KEY_PAIR
+	select PSA_WANT_KEY_TYPE_ECC_PUBLIC_KEY
+	help
+	  ECDSA signatures with SHA-256 on NIST P-256.
+
+module = SENSEI_CRYPTO
+module-str = SENSEI Crypto Library
+source "subsys/logging/Kconfig.template.log_config"
+
+endif # SENSEI_CRYPTO

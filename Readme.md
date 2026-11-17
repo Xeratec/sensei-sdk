@@ -93,6 +93,11 @@ to configure the configuration with a graphical interface in the terminal.
   - From *main* Zephyr branch (see [Docs](https://docs.zephyrproject.org/latest/build/dts/api/bindings/led/issi%2Cis31fl3194.html#std-dtcompatible-issi-is31fl3194))
 
 
+## System Libraries
+- **Crypto**: Simplified crypto library on top of the PSA Crypto API (AES-GCM, SHA-256, HMAC, HKDF, ECDH and ECDSA on P-256), see [NRF/system/crypto](NRF/system/crypto/README.md).
+  - Enable with `CONFIG_SENSEI_CRYPTO`, example in `example/crypto_api`.
+
+
 ## Maintainers
 - **Philip Wiese** ([wiesep@iis.ee.ethz.ch](mailto:wiesep@iis.ee.ethz.ch))
 - **Sebastian Frey** ([sefrey@iis.ee.ethz.ch](mailto:sefrey@iis.ee.ethz.ch))

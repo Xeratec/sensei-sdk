@@ -54,7 +54,7 @@ int32_t bsp_nrfspi_close(pi_device_t *device) { return 0; }
 #endif
 
 // FLASH ***********************************************************************
-#if defined CONFIG_MX25U51245G
+#if defined CONFIG_DRIVER_MX25U51245G
 
 void bsp_mx25u51245g_conf_init(struct pi_mx25u51245g_conf *conf) {
   conf->spi_itf = DT_MX25U51245G_SPI_ITF;
@@ -72,7 +72,7 @@ int bsp_mx25u51245g_open(pi_device_t *device) {
   pi_err_t err = PI_OK;
   pi_device_t *mem1v8 = NULL;
 
-  // Enabling 3V3CAM power supply
+  // Enable the 1.8 V memory supply
   err = pi_open(PI_POWERSUPPLY_MEM1V8, &mem1v8);
 
   if (err) {
@@ -89,26 +89,20 @@ int bsp_mx25u51245g_open(pi_device_t *device) {
 }
 
 int bsp_mx25u51245g_close(pi_device_t *device) {
-  pi_err_t err = PI_OK;
-  pi_device_t *mem1v8 = NULL;
-
-  // Enabling 3V3CAM power supply
-  err = pi_close(PI_POWERSUPPLY_MEM1V8);
-
-  if (err) {
-    return err;
-  }
-
   struct pi_flash_conf *conf = (struct pi_flash_conf *)device->config;
   pi_flash_api_t *api = (pi_flash_api_t *)conf->api;
   device->api = (struct pi_device_api *)api;
-  return api->close(device);
+  int err = api->close(device);
+
+  // Switch the 1.8 V memory supply off after the device is closed
+  pi_close(PI_POWERSUPPLY_MEM1V8);
+  return err;
 }
 
 #endif
 
 // RAM *************************************************************************
-#if defined CONFIG_APS256XXN
+#if defined CONFIG_DRIVER_APS256XXN
 
 void bsp_aps256xxn_conf_init(struct pi_aps256xxn_conf *conf) {
   conf->ram_start = DT_APS256XXN_RAM_START;
@@ -126,7 +120,7 @@ int bsp_aps256xxn_open(pi_device_t *device) {
   pi_err_t err = PI_OK;
   pi_device_t *mem1v8 = NULL;
 
-  // Enabling 3V3CAM power supply
+  // Enable the 1.8 V memory supply
   err = pi_open(PI_POWERSUPPLY_MEM1V8, &mem1v8);
 
   if (err) {
@@ -143,16 +137,14 @@ int bsp_aps256xxn_open(pi_device_t *device) {
 }
 
 int bsp_aps256xxn_close(pi_device_t *device) {
-  pi_err_t err = PI_OK;
-  pi_device_t *mem1v8 = NULL;
-
-  // Enabling 3V3CAM power supply
-  err = pi_close(PI_POWERSUPPLY_MEM1V8);
-
   struct pi_ram_conf *conf = (struct pi_ram_conf *)device->config;
   pi_ram_api_t *api = (pi_ram_api_t *)conf->api;
   device->api = (struct pi_device_api *)api;
-  return api->open(device);
+  api->close(device); // returns void
+
+  // Switch the 1.8 V memory supply off after the device is closed
+  pi_close(PI_POWERSUPPLY_MEM1V8);
+  return PI_OK;
 }
 #endif
 

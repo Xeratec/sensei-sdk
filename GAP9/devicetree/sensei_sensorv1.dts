@@ -20,7 +20,7 @@
                     driver_name     = "hm0360";
                     device_type     = "camera";
                     device_board    = "sensei_sensorv1";
-                    device_driver   = "bsp/camera/hm0360.h";
+                    device_driver   = "hm0360.h";
                 };
                 conf
                 {

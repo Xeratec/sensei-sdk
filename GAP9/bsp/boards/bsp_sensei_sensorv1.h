@@ -36,7 +36,7 @@
 extern "C" {
 #endif
 
-#ifdef __GAP_HM0360__
+#ifdef CONFIG_HM0360
 
 /// @brief  Open necessary features that belongs to the board to be able to use
 ///         an HM0360 device correctly.

@@ -36,7 +36,7 @@
 extern "C" {
 #endif
 
-#ifdef __GAP_NRFSPI__
+#ifdef CONFIG_NRFSPI
 
 /// @brief  Open necessary features that belongs to the board to be able to use
 ///         an NRFSPI device correctly.
@@ -55,12 +55,12 @@ int32_t bsp_nrfspi_close(pi_device_t *device);
 
 #endif
 
-#ifdef CONFIG_MX25U51245G
+#ifdef CONFIG_DRIVER_MX25U51245G
 int bsp_mx25u51245g_open(pi_device_t *device);
 int bsp_mx25u51245g_close(pi_device_t *device);
 #endif
 
-#ifdef CONFIG_APS256XXN
+#ifdef CONFIG_DRIVER_APS256XXN
 int bsp_aps256xxn_open(pi_device_t *device);
 int bsp_aps256xxn_close(pi_device_t *device);
 #endif
@@ -69,37 +69,8 @@ int bsp_aps256xxn_close(pi_device_t *device);
 int32_t bsp_printf_uart_open(pi_device_t *device);
 #endif // PRINTF_UART
 
-#ifndef pi_default_flash_conf
-#ifdef __GAP_DRIVER_MRAM_DEFAULT__
-#define pi_default_flash_conf pi_mram_conf
-#else
-#ifdef __GAP_DRIVER_MX25U51245G_DEFAULT__
-#define pi_default_flash_conf pi_mx25u51245g_conf
-#endif
-#endif
-#endif
-
-#ifndef pi_default_flash_conf_init
-#ifdef __GAP_DRIVER_MRAM_DEFAULT__
-#define pi_default_flash_conf_init pi_mram_conf_init
-#else
-#ifdef __GAP_DRIVER_MX25U51245G_DEFAULT__
-#define pi_default_flash_conf_init pi_mx25u51245g_conf_init
-#endif
-#endif
-#endif
-
-#ifndef pi_default_ram_conf
-#ifdef __GAP_DRIVER_APS256XXN_DEFAULT__
-#define pi_default_ram_conf pi_aps256xxn_conf
-#endif
-#endif
-
-#ifndef pi_default_ram_conf_init
-#ifdef __GAP_DRIVER_APS256XXN_DEFAULT__
-#define pi_default_ram_conf_init pi_aps256xxn_conf_init
-#endif
-#endif
+// pi_default_flash_conf and pi_default_ram_conf come from the SDK (bsp_flash.h, bsp_ram.h) via the
+// DRIVER_*_AS_DEFAULT options selected in kconfig/board.kconfig.
 
 #ifdef __cplusplus
 }

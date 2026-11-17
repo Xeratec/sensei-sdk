@@ -38,26 +38,5 @@ int pwr_bsp_init() {
   return 0;
 }
 
-/* Rails as in the node firmware: SBB0 3.3 V, SBB1 2.8 V, SBB2 1.2 V, LDO0 3.3 V. */
-int pwr_bsp_start() {
-  struct max77654_conf *c = &pwr_pmic()->conf;
-  static const uint16_t sbb_mv[3] = {3300, 2800, 1200};
-
-  for (int i = 0; i < 3; i++) {
-    c->sbb_conf[i].mode = MAX77654_SBB_MODE_BUCKBOOST;
-    c->sbb_conf[i].peak_current = MAX77654_SBB_PEAK_CURRENT_1A;
-    c->sbb_conf[i].active_discharge = false;
-    c->sbb_conf[i].en = MAX77654_REG_ON;
-    c->sbb_conf[i].output_voltage_mV = sbb_mv[i];
-  }
-  c->ldo_conf[0].mode = MAX77654_LDO_MODE_LDO;
-  c->ldo_conf[0].active_discharge = false;
-  c->ldo_conf[0].en = MAX77654_REG_ON;
-  c->ldo_conf[0].output_voltage_mV = 3300;
-
-  if (max77654_config(pwr_pmic()) != E_MAX77654_SUCCESS) {
-    LOG_ERR("PMIC configuration failed");
-    return -1;
-  }
-  return 0;
-}
+/* The PMIC rails are on since boot (SDK power module, CONFIG_SENSEI_PWR_BOOT_RAILS). */
+int pwr_bsp_start() { return 0; }

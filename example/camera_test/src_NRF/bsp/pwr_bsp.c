@@ -86,35 +86,7 @@ int pwr_bsp_init() {
 }
 
 int pwr_bsp_start() {
-  // Configure PMIC
-  struct max77654_conf *pmic_conf = &pwr_pmic()->conf;
-
-  pmic_conf->sbb_conf[0].mode = MAX77654_SBB_MODE_BUCKBOOST;
-  pmic_conf->sbb_conf[0].peak_current = MAX77654_SBB_PEAK_CURRENT_1A;
-  pmic_conf->sbb_conf[0].active_discharge = false;
-  pmic_conf->sbb_conf[0].en = MAX77654_REG_ON;
-  pmic_conf->sbb_conf[0].output_voltage_mV = 3300;
-
-  pmic_conf->sbb_conf[1].mode = MAX77654_SBB_MODE_BUCKBOOST;
-  pmic_conf->sbb_conf[1].peak_current = MAX77654_SBB_PEAK_CURRENT_1A;
-  pmic_conf->sbb_conf[1].active_discharge = false;
-  pmic_conf->sbb_conf[1].en = MAX77654_REG_ON;
-  pmic_conf->sbb_conf[1].output_voltage_mV = 2800;
-
-  pmic_conf->sbb_conf[2].mode = MAX77654_SBB_MODE_BUCKBOOST;
-  pmic_conf->sbb_conf[2].peak_current = MAX77654_SBB_PEAK_CURRENT_1A;
-  pmic_conf->sbb_conf[2].active_discharge = false;
-  pmic_conf->sbb_conf[2].en = MAX77654_REG_ON;
-  pmic_conf->sbb_conf[2].output_voltage_mV = 1200;
-
-  pmic_conf->ldo_conf[0].mode = MAX77654_LDO_MODE_LDO;
-  pmic_conf->ldo_conf[0].active_discharge = false;
-  pmic_conf->ldo_conf[0].en = MAX77654_REG_ON;
-  pmic_conf->ldo_conf[0].output_voltage_mV = 3300;
-
-  max77654_config(pwr_pmic());
-
-  LOG_INF("PMIC configured for UT SensorShield");
+  // The PMIC rails are on since boot (SDK power module, CONFIG_SENSEI_PWR_BOOT_RAILS).
 
   // Enable HM0360 clock
   if (gpio_pin_set_dt(&gpio_HM0360_CLK_EN, 0) < 0) {

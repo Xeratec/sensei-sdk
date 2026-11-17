@@ -24,6 +24,20 @@ Untested on hardware.
 `pwr/pwr_board.h` is for the application's board hooks (`bsp/pwr_bsp.h`): `pwr_pmic()` gives the PMIC handle.
 `pwr_priv.h` is internal.
 
+## Checks for the sleep floor
+
+Both are independent of `CONFIG_SENSEI_PWR` (no PMIC needed).
+
+- `CONFIG_SENSEI_PWR_CHECK`, `pwr/pwr_check.h`: `sensei_pwr_check_idle(cb, user)` walks all devices with device PM and calls
+  `cb` for each one that is not suspended (state, runtime PM usage count, whether runtime PM is on). Use it from a shell
+  command or a test when the system should be idle. Devices without runtime PM stay active by design, so the callback
+  says whether runtime PM is on.
+- `CONFIG_SENSEI_PWR_RAM_POWERDOWN`, `pwr/pwr_ram.h`: `sensei_pwr_ram_powerdown()` powers down the 4 kB RAM sections of the
+  nRF5340 application core between the end of the image RAM and the end of `zephyr,sram` (uses the nRF Connect SDK
+  library `ram_pwrdn`). Left alone: every devicetree `zephyr,memory-region` node (retained RAM), the chosen
+  `zephyr,ipc_shm` and the partial section at the end. Call it last in `main()`. Needs a libc arena other than -1
+  (`CONFIG_COMMON_LIBC_MALLOC_ARENA_SIZE=0` when nothing calls `malloc()`). Untested on hardware.
+
 ## Start-up order
 
 1. GPIO and the I2C buses: the TWIM driver starts at `POST_KERNEL` 50 (`CONFIG_I2C_INIT_PRIORITY`). The PSRAM

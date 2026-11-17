@@ -23,5 +23,6 @@ rsource "crypto/Kconfig"
 rsource "ota/Kconfig"
 rsource "marker/Kconfig"
 rsource "wdt/Kconfig"
+rsource "diag/Kconfig"
 
 endmenu

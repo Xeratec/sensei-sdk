@@ -253,6 +253,22 @@ ZTEST(sensei_scd41, test_10_sleep_and_wake) {
   zassert_equal(pm_device_runtime_put(dev), 0);
 }
 
+/* A sensor that sleeps and then loses its rail comes back awake (the emulator models the power loss itself): a node
+ * that switches the sensor from "on" to "gated" must be able to start it again. */
+ZTEST(sensei_scd41, test_10b_rail_off_ends_the_sleep) {
+  zassert_equal(pm_device_runtime_get(dev), 0);
+  zassert_equal(sensei_scd41_sleep(dev), 0);
+  zassert_true(em->asleep);
+  zassert_equal(pm_device_runtime_put(dev), 0); /* rails off */
+  k_msleep(50);                                 /* the emulator notes the supply every 10 ms */
+  zassert_false(em->asleep);
+  zassert_equal(pm_device_runtime_get(dev), 0);
+  zassert_equal(sensei_scd41_start(dev), 5000);
+  k_msleep(5100);
+  zassert_equal(sensei_scd41_fetch(dev), 0);
+  zassert_equal(pm_device_runtime_put(dev), 0);
+}
+
 /* The sensor loses its settings with the power: the driver writes them again after every cold start. */
 ZTEST(sensei_scd41, test_11_asc_after_cold_start) {
   zassert_equal(sensei_scd41_set_asc(dev, true, 48, 156), 0); /* rails off: stored only */

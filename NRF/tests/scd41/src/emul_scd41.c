@@ -67,12 +67,15 @@ static void settings_default(void) {
 }
 
 /* Notes the moment the supply is on (10 ms resolution, the tick of native_sim): the 1000 ms power-up time run from
- * there. Supply off clears it. */
+ * there. Supply off is a power loss: the sensor wakes up in idle with the default settings. */
 static void rail_poll(struct k_timer *t) {
   ARG_UNUSED(t);
   bool on = gpio_emul_output_get_dt(&rail_vdd) == 1;
 
   if (!on) {
+    if (rail_on_since_us >= 0) {
+      scd41_emul_power_loss();
+    }
     rail_on_since_us = -1;
   } else if (rail_on_since_us < 0) {
     rail_on_since_us = sensirion_emul_now_us();

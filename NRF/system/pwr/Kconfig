@@ -53,3 +53,23 @@ config SENSEI_PWR_BOOT_RAILS
 	  turns them on.
 
 endif # SENSEI_PWR
+
+config SENSEI_PWR_CHECK
+	bool "Device power state check (sensei_pwr_check_idle)"
+	depends on SENSEI && PM_DEVICE
+	help
+	  Adds sensei_pwr_check_idle(), which lists the devices that are not suspended. For shell commands and
+	  tests; it does not need the PMIC module (CONFIG_SENSEI_PWR).
+
+config SENSEI_PWR_RAM_POWERDOWN
+	bool "Power down RAM that the image does not use (nRF5340 application core)"
+	depends on SENSEI && SOC_NRF5340_CPUAPP && !BUILD_WITH_TFM
+	# The libc arena (-1) is all RAM after the image: malloc() would use powered-down RAM
+	depends on COMMON_LIBC_MALLOC_ARENA_SIZE != -1
+	select RAM_POWER_DOWN_LIBRARY
+	help
+	  Adds sensei_pwr_ram_powerdown(), to be called at the end of the start-up. It powers down the 4 kB
+	  sections between the end of the image RAM and the end of the application RAM, except retained RAM and
+	  other devicetree memory regions and the shared memory with the network core. Saves the retention current
+	  of those sections in sleep (about 20 to 40 nA per section, estimate). Needs CONFIG_COMMON_LIBC_MALLOC_ARENA_SIZE
+	  other than -1: set 0 when nothing calls malloc().

@@ -60,6 +60,7 @@ zephyr_udc0: &usbd {
 		#size-cells = <1>;
 		ranges;
 
+		/* Swap using move needs no scratch area: the two image slots take the space up to the storage. */
 		boot_partition: partition@0 {
 			compatible = "zephyr,mapped-partition";
 			label = "mcuboot";
@@ -68,17 +69,12 @@ zephyr_udc0: &usbd {
 		slot0_partition: partition@10000 {
 			compatible = "zephyr,mapped-partition";
 			label = "image-0";
-			reg = <0x10000 0x70000>;
+			reg = <0x10000 0x75000>;
 		};
-		slot1_partition: partition@80000 {
+		slot1_partition: partition@85000 {
 			compatible = "zephyr,mapped-partition";
 			label = "image-1";
-			reg = <0x80000 0x70000>;
-		};
-		scratch_partition: partition@f0000 {
-			compatible = "zephyr,mapped-partition";
-			label = "image-scratch";
-			reg = <0xf0000 0xa000>;
+			reg = <0x85000 0x75000>;
 		};
 		storage_partition: partition@fa000 {
 			compatible = "zephyr,mapped-partition";

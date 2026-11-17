@@ -18,5 +18,8 @@ menuconfig SENSEI_PWR
 	  Enable the SENSEI Power Subsystem.
 
 rsource "crypto/Kconfig"
+rsource "ota/Kconfig"
+rsource "marker/Kconfig"
+rsource "wdt/Kconfig"
 
 endmenu

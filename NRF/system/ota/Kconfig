@@ -1,0 +1,85 @@
+# SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+# SPDX-License-Identifier: Apache-2.0
+#
+# Authors:
+# - Philip Wiese <wiesep@iis.ee.ethz.ch>
+
+menuconfig SENSEI_OTA
+	bool "Firmware update with MCUboot: SMP server, trial boot and confirm"
+	default n
+	depends on SENSEI
+	depends on BOOTLOADER_MCUBOOT
+	select MCUMGR
+	select MCUMGR_GRP_IMG
+	select MCUMGR_GRP_OS
+	select MCUMGR_GRP_OS_MCUMGR_PARAMS
+	select IMG_MANAGER
+	select FLASH
+	select FLASH_MAP
+	select STREAM_FLASH
+	select STREAM_FLASH_ERASE
+	select IMG_ERASE_PROGRESSIVELY
+	select NET_BUF
+	select ZCBOR
+	select REBOOT
+	help
+	  Helpers for apps that are started by MCUboot (see NRF/system/ota/README.md): the mcumgr image and
+	  OS groups, the Bluetooth SMP transport, SMP on a shared byte stream (USB CDC), and the trial boot
+	  supervision (confirm after a check, reset to revert otherwise). MCUboot comes from sysbuild
+	  (SB_CONFIG_BOOTLOADER_MCUBOOT=y).
+
+if SENSEI_OTA
+
+config SENSEI_OTA_SMP_BT
+	bool "SMP over Bluetooth (GATT SMP service)"
+	default y if BT_PERIPHERAL
+	depends on BT_PERIPHERAL
+	select MCUMGR_TRANSPORT_BT
+	help
+	  Standard SMP service (UUID 8d53dc1d-1db7-4cd3-868b-8a527460aa84). The application sizes the net
+	  buffers: MCUMGR_TRANSPORT_NETBUF_SIZE must hold an ATT MTU of 498 B (use 512). Access to the
+	  service is the choice MCUMGR_TRANSPORT_BT_PERM_*: RW (open, for development), RW_ENCRYPT
+	  (pairing required, needs BT_SMP) or RW_AUTHEN.
+
+config SENSEI_OTA_SMP_STREAM
+	bool "SMP on a byte stream shared with another protocol (USB CDC)"
+	select BASE64
+	select CRC
+	select MCUMGR_TRANSPORT_SERIAL_HAS_SMP_OVER_CONSOLE
+	help
+	  mcumgr serial line framing (base64 lines) on a stream whose other frames are 0x00-delimited. See
+	  sensei_smp_stream_feed() in sensei_ota.h.
+
+config SENSEI_OTA_STREAM_MTU
+	int "SMP MTU on the byte stream, bytes"
+	default 256
+	depends on SENSEI_OTA_SMP_STREAM
+	help
+	  Must not exceed MCUMGR_TRANSPORT_NETBUF_SIZE + 2.
+
+config SENSEI_OTA_CONFIRM
+	bool "Confirm the new image after the app's check passed"
+	default y
+	help
+	  A new image runs on trial. If this is off, only an SMP confirm makes it permanent; without one it
+	  reverts after SENSEI_OTA_TRIAL_TIMEOUT_S.
+
+config SENSEI_OTA_CONFIRM_DELAY_S
+	int "Run time before the image is confirmed, s"
+	default 30
+	range 5 3600
+	depends on SENSEI_OTA_CONFIRM
+
+config SENSEI_OTA_TRIAL_TIMEOUT_S
+	int "Trial time, s"
+	default 300
+	range 30 86400
+	help
+	  If the image is still unconfirmed after this time (it never passed the check, or nobody confirmed
+	  it), the node resets and MCUboot goes back to the old image.
+
+module = SENSEI_OTA
+module-str = SENSEI OTA
+source "subsys/logging/Kconfig.template.log_config"
+
+endif # SENSEI_OTA

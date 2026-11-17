@@ -1,0 +1,30 @@
+# Copyright (c) 2026 ETH Zurich and University of Bologna
+# SPDX-License-Identifier: Apache-2.0
+
+menuconfig SENSEI_WDT
+	bool "Hardware watchdog"
+	depends on SENSEI
+	select WATCHDOG
+	help
+	  Hardware watchdog (devicetree alias watchdog0) that is fed only while the application reports
+	  that it is healthy (sensei_wdt.h).
+
+if SENSEI_WDT
+
+config SENSEI_WDT_TIMEOUT_S
+	int "Watchdog timeout (s)"
+	default 60
+	help
+	  Timeout for applications that take it from Kconfig. Pass it to sensei_wdt_start().
+
+config SENSEI_WDT_FEED_PERIOD_MS
+	int "Feed period (ms)"
+	default 5000
+	help
+	  Interval of the work item that feeds the watchdog. Keep it well below the timeout.
+
+module = SENSEI_WDT
+module-str = SENSEI watchdog
+source "subsys/logging/Kconfig.template.log_config"
+
+endif # SENSEI_WDT

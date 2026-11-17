@@ -1,0 +1,10 @@
+# Copyright (c) 2026 ETH Zurich and University of Bologna
+# SPDX-License-Identifier: Apache-2.0
+
+config SENSEI_MARKER
+	bool "Energy marker GPIOs"
+	depends on SENSEI
+	depends on GPIO
+	help
+	  Two GPIO outputs for the digital inputs of a power analyzer (sensei_marker.h). Needs the devicetree
+	  aliases marker0 and marker1.

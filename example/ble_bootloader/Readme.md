@@ -12,7 +12,7 @@ $> west build -b nrf5340_senseiv1/nrf5340/cpuapp -- -DEXTRA_ZEPHYR_MODULES=$SENS
 $> west flash
 ```
 
-The partitions are the devicetree partitions of the board (MCUboot 64 kB, two image slots of 448 kB).
+The partitions are the devicetree partitions of the board (MCUboot 64 kB, two image slots of 468 kB).
 MCUboot fits its partition with 44 B to spare: keep its log level low.
 
 Next, you can flash the application via the serial recovery bootloader over USB by running:

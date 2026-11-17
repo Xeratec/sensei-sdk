@@ -1,3 +1,11 @@
+<!--
+SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+SPDX-License-Identifier: CC-BY-4.0
+
+Authors:
+- Philip Wiese <wiesep@iis.ee.ethz.ch>
+-->
+
 This example reads and prints all GAP9 efuse registers. Reading is
 non-destructive (see the note in `src_GAP/main.c` about the permanence of
 *programming* efuses).

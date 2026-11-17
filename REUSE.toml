@@ -1,34 +1,9 @@
 version = 1
 
 [[annotations]]
-path = "**/*.md"
-SPDX-FileCopyrightText = "2025 ETH Zurich and University of Bologna"
-SPDX-License-Identifier = "CC-BY-ND-4.0"
-
-[[annotations]]
-path = "**/*.txt"
-SPDX-FileCopyrightText = "2025 ETH Zurich and University of Bologna"
-SPDX-License-Identifier = "CC-BY-ND-4.0"
-
-[[annotations]]
-path = "**/*.patch"
-SPDX-FileCopyrightText = "2025 ETH Zurich and University of Bologna"
-SPDX-License-Identifier = "CC-BY-ND-4.0"
-
-[[annotations]]
 path = "**/*.json"
 SPDX-FileCopyrightText = "2025 ETH Zurich and University of Bologna"
-SPDX-License-Identifier = "CC-BY-ND-4.0"
-
-[[annotations]]
-path = "**/*.tensor"
-SPDX-FileCopyrightText = "2025 ETH Zurich and University of Bologna"
-SPDX-License-Identifier = "CC-BY-ND-4.0"
-
-[[annotations]]
-path = "**/*.tflite"
-SPDX-FileCopyrightText = "2025 ETH Zurich and University of Bologna"
-SPDX-License-Identifier = "CC-BY-ND-4.0"
+SPDX-License-Identifier = "Apache-2.0"
 
 [[annotations]]
 path = [
@@ -81,23 +56,23 @@ path = [
 SPDX-FileCopyrightText = "2021 Sensirion AG"
 SPDX-License-Identifier = "BSD-3-Clause"
 
-[[annotations]]
-path = "**/*.ipynb"
-SPDX-FileCopyrightText = "2025 ETH Zurich and University of Bologna"
-SPDX-License-Identifier = "Apache-2.0"
-
-[[annotations]]
-path = "**/*.pdf"
-SPDX-FileCopyrightText = "2025 ETH Zurich and University of Bologna"
-SPDX-License-Identifier = "CC-BY-ND-4.0"
-
-[[annotations]]
-path = "**/*.png"
-SPDX-FileCopyrightText = "2025 ETH Zurich and University of Bologna"
-SPDX-License-Identifier = "CC-BY-ND-4.0"
-
 # Third party: Semtech LR1121 Modem-E host driver (Clear BSD), vendored in the LPWAN shield app
 [[annotations]]
 path = "NRF/apps/lpwan_shield/third_party/lr1121_modem/**"
 SPDX-FileCopyrightText = "2024 Semtech Corporation"
 SPDX-License-Identifier = "BSD-3-Clause-Clear"
+
+# Third party: MAX77654 driver (Philip Schilk), docs without a header
+[[annotations]]
+path = [
+    "NRF/system/third_party/max77654/README.md",
+    "NRF/system/third_party/max77654/doc/main.md"
+]
+SPDX-FileCopyrightText = "2022 Philip Schilk"
+SPDX-License-Identifier = "Apache-2.0"
+
+# Third party: Unity test framework (vendored in the MAX77654 tests)
+[[annotations]]
+path = "NRF/system/third_party/max77654/test/Unity/**"
+SPDX-FileCopyrightText = "2007-21 Mike Karlesky, Mark VanderVoord, Greg Williams"
+SPDX-License-Identifier = "MIT"

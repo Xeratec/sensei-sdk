@@ -1,3 +1,11 @@
+<!--
+SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+SPDX-License-Identifier: CC-BY-4.0
+
+Authors:
+- Philip Wiese <wiesep@iis.ee.ethz.ch>
+-->
+
 This example probes every IC the SDK has a driver for, prints one reading and puts the IC into its lowest-power state. Tests only run if the devicetree node exists. Untested on hardware.
 
 | IC | Driver | Low-power step |

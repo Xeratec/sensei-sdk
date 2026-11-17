@@ -1,3 +1,11 @@
+<!--
+SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+SPDX-License-Identifier: CC-BY-4.0
+
+Authors:
+- Philip Wiese <wiesep@iis.ee.ethz.ch>
+-->
+
 # sensei_link
 
 The link layer that SENSEI apps use to talk to other chips: framing for byte streams and SPI, fragmentation,

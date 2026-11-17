@@ -1,3 +1,11 @@
+<!--
+SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+SPDX-License-Identifier: CC-BY-4.0
+
+Authors:
+- Philip Wiese <wiesep@iis.ee.ethz.ch>
+-->
+
 # sensei_busarb
 
 One owner at a time for the shared SPI_A pins and for the LTE current peaks of the SENSEI base board.

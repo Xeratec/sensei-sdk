@@ -1,3 +1,11 @@
+<!--
+SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+SPDX-License-Identifier: CC-BY-4.0
+
+Authors:
+- Philip Wiese <wiesep@iis.ee.ethz.ch>
+-->
+
 # Energy markers
 
 Two GPIO outputs for the digital inputs of a power analyzer (for example the Nordic PPK2), so that a current

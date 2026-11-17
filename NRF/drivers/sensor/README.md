@@ -1,3 +1,11 @@
+<!--
+SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+SPDX-License-Identifier: CC-BY-4.0
+
+Authors:
+- Philip Wiese <wiesep@iis.ee.ethz.ch>
+-->
+
 # Sensor drivers
 
 Drivers for the ICs of the SENSEI boards that Zephyr 4.4 does not cover, or covers in a way that does not fit.

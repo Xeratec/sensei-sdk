@@ -1,3 +1,11 @@
+<!--
+SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+SPDX-License-Identifier: CC-BY-4.0
+
+Authors:
+- Philip Wiese <wiesep@iis.ee.ethz.ch>
+-->
+
 # sensei_sensor_math
 
 Unit conversions and timings of the sensor shield drivers in `NRF/drivers/sensor`. Plain C, no Zephyr, so the node

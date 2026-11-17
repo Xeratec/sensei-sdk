@@ -1,3 +1,11 @@
+<!--
+SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+SPDX-License-Identifier: CC-BY-4.0
+
+Authors:
+- Philip Wiese <wiesep@iis.ee.ethz.ch>
+-->
+
 # Power module (`CONFIG_SENSEI_PWR`)
 
 MAX77654 PMIC of the SENSEI base board: rails, charger, battery reading, nIRQ events and the nEN button.

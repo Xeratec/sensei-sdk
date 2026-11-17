@@ -1,3 +1,11 @@
+<!--
+SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+SPDX-License-Identifier: CC-BY-4.0
+
+Authors:
+- Philip Wiese <wiesep@iis.ee.ethz.ch>
+-->
+
 # MAX-M10S GNSS driver (I2C)
 
 Zephyr GNSS driver for the u-blox MAX-M10S on I2C (DDC, address 0x42), UBX protocol only. Zephyr's own u-blox drivers are UART only. Untested on hardware.

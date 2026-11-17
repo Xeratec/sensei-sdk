@@ -1,3 +1,11 @@
+<!--
+SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+SPDX-License-Identifier: CC-BY-4.0
+
+Authors:
+- Philip Wiese <wiesep@iis.ee.ethz.ch>
+-->
+
 # sensei_pwr_math
 
 Pure logic of the power module in `NRF/system/pwr`. Plain C, no Zephyr, so the firmware and the host tests use the

@@ -1,3 +1,11 @@
+<!--
+SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+SPDX-License-Identifier: CC-BY-4.0
+
+Authors:
+- Philip Wiese <wiesep@iis.ee.ethz.ch>
+-->
+
 # sensei_gap9
 
 Link between the nRF5340 and the GAP9 of the SENSEI base board. The nRF5340 sends jobs, GAP9 runs them and sends results.

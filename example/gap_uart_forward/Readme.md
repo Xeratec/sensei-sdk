@@ -1,3 +1,11 @@
+<!--
+SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+SPDX-License-Identifier: CC-BY-4.0
+
+Authors:
+- Philip Wiese <wiesep@iis.ee.ethz.ch>
+-->
+
 This example forwards data sensed on the GAP9 to a host over UART.
 
 The GAP9 periodically produces a sensor reading and prints it as a text line.

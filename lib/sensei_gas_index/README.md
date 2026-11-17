@@ -1,3 +1,11 @@
+<!--
+SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+SPDX-License-Identifier: CC-BY-4.0
+
+Authors:
+- Philip Wiese <wiesep@iis.ee.ethz.ch>
+-->
+
 # sensei_gas_index
 
 VOC and NOx index from SGP41 raw ticks. A thin wrapper (`include/sensei_gas_index.h`) around the Sensirion gas

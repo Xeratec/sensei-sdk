@@ -1,3 +1,11 @@
+<!--
+SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+SPDX-License-Identifier: CC-BY-4.0
+
+Authors:
+- Philip Wiese <wiesep@iis.ee.ethz.ch>
+-->
+
 # Third-party code
 
 One copy of each vendor library, here or in the `lib/` folder that uses it. The drivers in `NRF/drivers/sensor`

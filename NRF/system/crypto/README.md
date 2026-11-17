@@ -1,3 +1,11 @@
+<!--
+SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+SPDX-License-Identifier: CC-BY-4.0
+
+Authors:
+- Philip Wiese <wiesep@iis.ee.ethz.ch>
+-->
+
 # SENSEI Crypto Library
 
 A small, consistent C API for common cryptographic operations on the nRF5340. It is a thin layer over the PSA Crypto API of nRF Security (nRF Connect SDK v2.6.1) and derives from the semester project of Ahmed Malanovic (see [Attribution](#attribution)).

@@ -1,3 +1,11 @@
+<!--
+SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+SPDX-License-Identifier: CC-BY-4.0
+
+Authors:
+- Philip Wiese <wiesep@iis.ee.ethz.ch>
+-->
+
 # APS12804O PSRAM driver
 
 16 MiB QSPI PSRAM on the nRF5340 QSPI pins (P0.13 to P0.18), supply behind the load switch P1.14, chip select mux P0.19 (low = PSRAM). Untested on hardware.

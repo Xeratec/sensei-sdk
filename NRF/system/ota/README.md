@@ -1,3 +1,11 @@
+<!--
+SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+SPDX-License-Identifier: CC-BY-4.0
+
+Authors:
+- Philip Wiese <wiesep@iis.ee.ethz.ch>
+-->
+
 # SENSEI OTA helpers
 
 Firmware update for apps that MCUboot starts (sysbuild with `SB_CONFIG_BOOTLOADER_MCUBOOT=y`). Enable it with

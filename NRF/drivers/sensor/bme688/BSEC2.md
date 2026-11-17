@@ -1,3 +1,11 @@
+<!--
+SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+SPDX-License-Identifier: CC-BY-4.0
+
+Authors:
+- Philip Wiese <wiesep@iis.ee.ethz.ch>
+-->
+
 # BSEC2 (not supported)
 
 BSEC2 is Bosch's proprietary IAQ library. It is not in this repository and the BME688 driver does not call it.

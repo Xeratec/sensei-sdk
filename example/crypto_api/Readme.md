@@ -1,3 +1,11 @@
+<!--
+SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+SPDX-License-Identifier: CC-BY-4.0
+
+Authors:
+- Philip Wiese <wiesep@iis.ee.ethz.ch>
+-->
+
 This example runs the test suite and a benchmark of the [SENSEI crypto library](../../NRF/system/crypto/README.md) on the nRF5340 and prints the results over RTT.
 
 ## NRF

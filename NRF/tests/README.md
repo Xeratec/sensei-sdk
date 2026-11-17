@@ -43,6 +43,10 @@ Output goes to `build/twister`. A fresh workspace for the tests alone: `scripts/
 - `common/sensei_sim.overlay`: board devices that `CONFIG_SENSEI` code expects (`i2ca`, an ADC channel) as native_sim
   emulators. Add it with `list(APPEND EXTRA_DTC_OVERLAY_FILE ...)` before `find_package(Zephyr)`.
 - `common/sensirion_emul.h`: CRC-8 and word helpers of the SCD41 and SGP41 emulators.
+- `common/sensei_emul.cmake`: `sensei_emul_sources(<target> scd41 sgp41 bh1730)` adds the emulators of the driver tests
+  (sources and include paths, they stay in their test folders) to an app on native_sim. The node repository uses it for its
+  simulated node (`firmware/sim`): its overlay has the sensor nodes, its code sets the values in `scd41_emul_get()` and
+  the like. The app needs `CONFIG_EMUL`, `CONFIG_I2C_EMUL` and, for the rails, `CONFIG_GPIO_EMUL` and `CONFIG_REGULATOR`.
 
 ## Sensor emulators
 

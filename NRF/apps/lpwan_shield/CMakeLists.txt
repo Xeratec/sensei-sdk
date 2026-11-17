@@ -25,6 +25,7 @@ project(sensei_lpwan_shield)
 
 target_sources(app PRIVATE
   src/main.c
+  src/diag.c
   src/link.c
   src/service.c
 )

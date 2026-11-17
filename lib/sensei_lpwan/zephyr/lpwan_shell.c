@@ -30,6 +30,17 @@ static int cmd_status(const struct shell *sh, size_t argc, char **argv) {
   shell_print(sh, "nRF9151 firmware '%s', modem '%s'", i.fw, i.modem);
   shell_print(sh, "transfers %u, bad frames %u, retries %u, events %u", i.transfers, i.bad_frames, i.retries, i.events);
   shell_print(sh, "uplinks ok %u, failed %u, last result %d", i.uplink_ok, i.uplink_fail, i.last_result);
+  shell_print(sh, "LTE answers %u, without answer %u", i.lte_acked, i.lte_noack);
+  {
+    struct sensei_lpwan_lte_info e;
+
+    if (sensei_lpwan_lte_info(&e) == 0) {
+      shell_print(
+          sh,
+          "LTE evaluation %u s ago: energy %d (1 bad ... 5 excellent), RSRP %d dBm, CE level %u, RAI of the cell %d",
+          e.age_s, (int)e.energy, (int)e.rsrp_dbm, (unsigned)e.ce_level, (int)e.rai);
+    }
+  }
   shell_print(sh, "requests failed in a row %u, shield power cycles after a lost link %u", i.failures, i.recoveries);
   if (i.proto_mismatch) {
     shell_error(sh, "the nRF9151 speaks another protocol version: update the shield firmware, reboot");

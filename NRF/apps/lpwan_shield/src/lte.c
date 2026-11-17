@@ -31,17 +31,19 @@
 #include <zephyr/net/socket.h>
 
 #include "lte.h"
+#include "sensei_lpwan/lpwan_rai.h"
 #include "sensei_lpwan/lpwan_timers.h"
 #include "service.h"
 
 LOG_MODULE_REGISTER(lte, CONFIG_LPWAN_SHIELD_LOG_LEVEL);
 
-enum cmd { CMD_CONNECT, CMD_DISCONNECT, CMD_SEND, CMD_TIME, CMD_SLEEP_DEEP };
+enum cmd { CMD_CONNECT, CMD_DISCONNECT, CMD_SEND, CMD_TIME, CMD_SLEEP_DEEP, CMD_EVAL };
 
 struct msg {
   enum cmd cmd;
   uint32_t seq;
   uint16_t len;
+  sensei_LteRai rai; /* CMD_SEND: the flag of the client for this chunk (last chunk of a message) */
   uint8_t data[1024];
 };
 
@@ -66,6 +68,13 @@ static volatile bool want_connected;
 static volatile bool connect_cancelled; /* lte_disconnect() asked the connect in progress to stop */
 static int sock = -1;
 static int32_t last_rsrp_dbm;
+
+/* The answer of the server to the last chunk (LTE_RAI_ONE_RESP): the receive thread gives the semaphore, the worker
+ * waits for it. wait_key is (1 << 16 | msg_id << 8 | index) of the chunk that waits, 0: none. */
+static K_SEM_DEFINE(answer_sem, 0, 1);
+static atomic_t wait_key;
+static atomic_t n_answers, n_no_answer;
+static volatile sensei_RaiSupport rai_support;
 
 static struct k_thread lte_thread, rx_thread;
 K_THREAD_STACK_DEFINE(lte_stack, CONFIG_LPWAN_SHIELD_LTE_STACK);
@@ -98,7 +107,16 @@ static void lte_handler(const struct lte_lc_evt *const evt) {
   }
   case LTE_LC_EVT_PSM_UPDATE:
     LOG_INF("PSM: TAU %d s, active %d s", evt->psm_cfg.tau, evt->psm_cfg.active_time);
+    if (evt->psm_cfg.tau < 0 && cfg.psm_tau_s > 0) {
+      LOG_WRN("the network grants no PSM%s", IS_ENABLED(CONFIG_LTE_PROPRIETARY_PSM_REQ) ? ": proprietary PSM" : "");
+    }
     break;
+#ifdef CONFIG_LTE_LC_RAI_MODULE
+  case LTE_LC_EVT_RAI_UPDATE:
+    rai_support = lpwan_rai_support(evt->rai_cfg.as_rai, evt->rai_cfg.cp_rai);
+    LOG_INF("RAI of the cell: AS %d, CP %d", (int)evt->rai_cfg.as_rai, (int)evt->rai_cfg.cp_rai);
+    break;
+#endif
   case LTE_LC_EVT_EDRX_UPDATE:
     LOG_INF("eDRX: cycle %d, ptw %d", (int)evt->edrx_cfg.edrx, (int)evt->edrx_cfg.ptw);
     break;
@@ -306,26 +324,104 @@ static void worker_connect(void) {
   }
 }
 
+/* ---- send with RAI (the sequence is in lib/sensei_lpwan/src/lpwan_rai.c, host tested) ---- */
+
+static int io_set_rai(void *ctx, enum lpwan_rai_opt opt) {
+  int v = (int)opt;
+
+  ARG_UNUSED(ctx);
+  return zsock_setsockopt(sock, SOL_SOCKET, SO_RAI, &v, sizeof(v)) == 0 ? 0 : -errno;
+}
+
+static int io_send(void *ctx, const uint8_t *data, size_t len) {
+  ARG_UNUSED(ctx);
+  return zsock_send(sock, data, len, 0) == (ssize_t)len ? 0 : -EIO;
+}
+
+static bool io_wait_answer(void *ctx, uint32_t timeout_ms) {
+  ARG_UNUSED(ctx);
+  return k_sem_take(&answer_sem, K_MSEC(timeout_ms)) == 0;
+}
+
+static const struct lpwan_rai_io rai_io = {.set_rai = io_set_rai, .send = io_send, .wait_answer = io_wait_answer};
+
+/* The values of lpwan_rai_opt are those of the socket option. */
+BUILD_ASSERT(LPWAN_RAI_OPT_NO_DATA == RAI_NO_DATA && LPWAN_RAI_OPT_LAST == RAI_LAST &&
+             LPWAN_RAI_OPT_ONE_RESP == RAI_ONE_RESP);
+
 static void worker_send(const struct msg *m) {
-  ssize_t n = -1;
+  struct lpwan_rai_out out = {0};
+  sensei_LteRai flag = m->rai;
+  uint32_t wait_ms = 0;
   uint32_t attempts = 0;
 
   if (!registered) {
     svc_emit_tx_done(m->seq, false, 0, 0); /* coverage lost: fail at once, the master retries later */
     return;
   }
-  for (int i = 0; i < 2 && n != m->len; i++) {
+  if (!IS_ENABLED(CONFIG_LPWAN_SHIELD_RAI)) {
+    flag = sensei_LteRai_LTE_RAI_OFF;
+  } else if (!cfg.udp && flag == sensei_LteRai_LTE_RAI_ONE_RESP) {
+    flag = sensei_LteRai_LTE_RAI_LAST; /* the answer of a TCP server is a stream, not one datagram */
+  }
+  if (flag == sensei_LteRai_LTE_RAI_ONE_RESP && m->len >= 2) {
+    wait_ms = CONFIG_LPWAN_SHIELD_LTE_ANSWER_WAIT_S * 1000U;
+    k_sem_reset(&answer_sem);
+    atomic_set(&wait_key, (1 << 16) | (m->data[0] << 8) | m->data[1]);
+  } else if (flag == sensei_LteRai_LTE_RAI_ONE_RESP) {
+    flag = sensei_LteRai_LTE_RAI_LAST; /* no chunk header to match an answer with */
+  }
+  /* A send that failed is tried once more on a new socket. A datagram that went out is not sent again, also if the
+   * answer did not come: the client decides. */
+  for (int i = 0; i < 2 && !out.sent; i++) {
     attempts++;
     if (sock < 0 && open_socket() != 0) {
       continue;
     }
-    n = zsock_send(sock, m->data, m->len, 0);
-    if (n != m->len) {
-      LOG_WRN("send failed (%d), reopen socket", (int)n);
+    lpwan_rai_send(&rai_io, NULL, flag, m->data, m->len, wait_ms, &out);
+    if (out.rai_errors > 0) {
+      LOG_WRN("RAI option refused (%u): the modem or the network does not support it", out.rai_errors);
+    }
+    if (!out.sent) {
+      LOG_WRN("send failed, reopen socket");
       close_socket();
     }
   }
-  svc_emit_tx_done(m->seq, n == m->len, attempts, 0);
+  atomic_set(&wait_key, 0);
+  if (wait_ms != 0 && out.sent) {
+    (void)atomic_inc(out.answered ? &n_answers : &n_no_answer);
+    if (!out.answered) {
+      LOG_WRN("no answer of the server within %u s", (unsigned)(wait_ms / 1000));
+    }
+  }
+  svc_emit_tx_done_ack(m->seq, lpwan_rai_send_ok(flag, wait_ms, &out), attempts, out.answered);
+}
+
+/* The connection evaluation of the registered modem. The result is an event; without one the master sends as usual. */
+static void worker_eval(void) {
+  sensei_LpwanEvent e = sensei_LpwanEvent_init_zero;
+  sensei_ConnEval *c = &e.conn_eval;
+#ifdef CONFIG_LTE_LC_CONN_EVAL_MODULE
+  struct lte_lc_conn_eval_params p;
+  int err = registered && modem_ready ? lte_lc_conn_eval_params_get(&p) : -ENOTCONN;
+
+  if (err == 0) {
+    c->valid = true;
+    c->energy = lpwan_energy_from_modem((int)p.energy_estimate);
+    c->rsrp_dbm = p.rsrp == LTE_LC_CELL_RSRP_INVALID ? 0 : lpwan_rsrp_dbm(p.rsrp);
+    c->rsrq_db = p.rsrq == LTE_LC_CELL_RSRQ_INVALID ? 0 : lpwan_rsrq_db(p.rsrq);
+    c->ce_level = p.ce_level <= LTE_LC_CE_LEVEL_3 ? (uint32_t)p.ce_level : 0;
+    c->tx_repetitions = p.tx_rep > 0 ? (uint32_t)p.tx_rep : 0;
+    last_rsrp_dbm = c->rsrp_dbm;
+    LOG_INF("conneval: energy %d, RSRP %d dBm, CE %u, TX repetitions %u", (int)c->energy, (int)c->rsrp_dbm,
+            (unsigned)c->ce_level, (unsigned)c->tx_repetitions);
+  } else {
+    LOG_WRN("conneval: no result (%d)", err);
+  }
+#endif
+  c->rai_support = rai_support;
+  e.which_body = sensei_LpwanEvent_conn_eval_tag;
+  svc_emit(&e);
 }
 
 static void lte_main(void *a, void *b, void *c) {
@@ -345,6 +441,9 @@ static void lte_main(void *a, void *b, void *c) {
       break;
     case CMD_TIME:
       emit_time();
+      break;
+    case CMD_EVAL:
+      worker_eval();
       break;
     case CMD_DISCONNECT:
     case CMD_SLEEP_DEEP:
@@ -378,7 +477,20 @@ static void rx_main(void *a, void *b, void *c) {
       ssize_t n = zsock_recv(sock, buf, sizeof(buf), 0);
 
       if (n > 0) {
-        svc_emit_downlink(radio_id(), cfg.server_port, buf, (size_t)n);
+        uint32_t key = (uint32_t)atomic_get(&wait_key);
+        enum lpwan_answer a = lpwan_answer_classify(buf, (size_t)n, key != 0, (uint8_t)(key >> 8), (uint8_t)key);
+
+        if (a == LPWAN_ANSWER_ACK) {
+          k_sem_give(&answer_sem);
+        } else if (a == LPWAN_ANSWER_OLD_ACK) {
+          LOG_DBG("late ack dropped");
+        } else {
+          /* A downlink is an answer too, and it goes to the node first. */
+          svc_emit_downlink(radio_id(), cfg.server_port, buf, (size_t)n);
+          if (key != 0) {
+            k_sem_give(&answer_sem);
+          }
+        }
       } else if (n == 0 || (errno != EAGAIN && errno != EINTR)) {
         /* TCP closed by the server, or a socket error: reopen on the next send. */
         close_socket();
@@ -411,12 +523,13 @@ sensei_LpwanResult lte_configure(const sensei_LteConfigure *c) {
   return sensei_LpwanResult_LPWAN_OK;
 }
 
-static sensei_LpwanResult post(enum cmd cmd, uint32_t seq, const uint8_t *data, size_t len) {
+static sensei_LpwanResult post(enum cmd cmd, uint32_t seq, const uint8_t *data, size_t len, sensei_LteRai rai) {
   static struct msg m; /* only the link thread posts */
 
   m.cmd = cmd;
   m.seq = seq;
   m.len = (uint16_t)len;
+  m.rai = rai;
   if (len) {
     memcpy(m.data, data, len);
   }
@@ -429,7 +542,7 @@ sensei_LpwanResult lte_connect(void) {
   }
   want_connected = true;
   connect_cancelled = false; /* a new request: an earlier disconnect does not cancel it (do_connect() checks both) */
-  return post(CMD_CONNECT, 0, NULL, 0);
+  return post(CMD_CONNECT, 0, NULL, 0, sensei_LteRai_LTE_RAI_OFF);
 }
 
 sensei_LpwanResult lte_disconnect(void) {
@@ -440,22 +553,30 @@ sensei_LpwanResult lte_disconnect(void) {
   want_connected = false;
   connect_cancelled = true;
   k_sem_give(&registered_sem);
-  return post(CMD_DISCONNECT, 0, NULL, 0);
+  return post(CMD_DISCONNECT, 0, NULL, 0, sensei_LteRai_LTE_RAI_OFF);
 }
 
-sensei_LpwanResult lte_send(uint32_t seq, uint32_t port, const uint8_t *data, size_t len) {
+sensei_LpwanResult lte_send(uint32_t seq, uint32_t port, const uint8_t *data, size_t len, sensei_LteRai rai) {
   ARG_UNUSED(port); /* UDP/TCP: the destination port is part of the configuration */
-  if (len == 0 || len > sizeof(((struct msg *)0)->data)) {
+  if (len == 0 || len > sizeof(((struct msg *)0)->data) || (unsigned)rai > sensei_LteRai_LTE_RAI_ONE_RESP) {
     return sensei_LpwanResult_LPWAN_INVALID;
   }
-  return post(CMD_SEND, seq, data, len);
+  return post(CMD_SEND, seq, data, len, rai);
 }
 
-sensei_LpwanResult lte_request_time(void) { return post(CMD_TIME, 0, NULL, 0); }
+sensei_LpwanResult lte_eval(void) {
+#ifdef CONFIG_LTE_LC_CONN_EVAL_MODULE
+  return post(CMD_EVAL, 0, NULL, 0, sensei_LteRai_LTE_RAI_OFF);
+#else
+  return sensei_LpwanResult_LPWAN_UNSUPPORTED;
+#endif
+}
+
+sensei_LpwanResult lte_request_time(void) { return post(CMD_TIME, 0, NULL, 0, sensei_LteRai_LTE_RAI_OFF); }
 
 sensei_LpwanResult lte_sleep(uint32_t deep) {
   /* deep = 0: the modem sleeps by itself in PSM, nothing to do. */
-  return deep ? post(CMD_SLEEP_DEEP, 0, NULL, 0) : sensei_LpwanResult_LPWAN_OK;
+  return deep ? post(CMD_SLEEP_DEEP, 0, NULL, 0, sensei_LteRai_LTE_RAI_OFF) : sensei_LpwanResult_LPWAN_OK;
 }
 
 void lte_fill_status(sensei_LpwanStatus *st) {
@@ -468,6 +589,9 @@ void lte_fill_status(sensei_LpwanStatus *st) {
     }
     st->rssi_dbm = last_rsrp_dbm;
   }
+  st->rai_support = rai_support;
+  st->lte_answers = (uint32_t)atomic_get(&n_answers);
+  st->lte_no_answer = (uint32_t)atomic_get(&n_no_answer);
 }
 
 void lte_modem_string(char *out, size_t cap) { snprintf(out, cap, "%s", modem_ver); }

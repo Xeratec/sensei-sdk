@@ -270,6 +270,36 @@ static void test_spi_header_crc(void) {
   CHECK(sensei_spi_check_payload(&h, buf + 8) == SENSEI_SPI_ERR_CRC);
 }
 
+static void test_frag_ack(void) {
+  uint8_t ack[SENSEI_FRAG_ACK_SIZE];
+  uint8_t id = 0, idx = 0;
+  uint8_t chunk[8];
+  uint8_t msg[4] = {1, 2, 3, 4};
+  size_t n;
+  sensei_reasm_t r;
+  uint8_t buf[16];
+  const uint8_t *out;
+  size_t out_len;
+
+  sensei_frag_ack(0x42, 9, ack);
+  CHECK(ack[0] == 0x42 && ack[1] == 9 && ack[2] == 0);
+  CHECK(sensei_frag_is_ack(ack, sizeof(ack), &id, &idx) && id == 0x42 && idx == 9);
+  CHECK(sensei_frag_is_ack(ack, sizeof(ack), NULL, NULL));
+  CHECK(!sensei_frag_is_ack(ack, 2, NULL, NULL));
+  CHECK(!sensei_frag_is_ack(ack, 4, NULL, NULL));
+  CHECK(!sensei_frag_is_ack(NULL, 3, NULL, NULL));
+  /* a chunk has count >= 1: no chunk of any message looks like an ack */
+  n = sensei_frag_chunk(7, msg, 0, 222, 0, chunk, sizeof(chunk));
+  CHECK(n == 3 && !sensei_frag_is_ack(chunk, n, NULL, NULL));
+  for (unsigned c = 1; c < 256; c++) {
+    uint8_t three[3] = {1, 0, (uint8_t)c};
+    CHECK(!sensei_frag_is_ack(three, 3, NULL, NULL));
+  }
+  /* the reassembler refuses an ack as a chunk (count 0) */
+  sensei_reasm_init(&r, buf, sizeof(buf), 222, 1000);
+  CHECK(sensei_reasm_feed(&r, ack, sizeof(ack), 0, &out, &out_len) == SENSEI_REASM_ERR_FORMAT);
+}
+
 static void test_frag(void) {
   static uint8_t msg[3000];
   static uint8_t chunk[1100];
@@ -403,5 +433,6 @@ int main(void) {
   test_spi();
   test_spi_header_crc();
   test_frag();
+  test_frag_ack();
   return CHECK_DONE();
 }

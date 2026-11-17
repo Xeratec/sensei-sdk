@@ -22,6 +22,7 @@
 #endif
 
 #include "dfu.h"
+#include "diag.h"
 #include "lora.h"
 #include "lte.h"
 
@@ -37,6 +38,7 @@ int service_start(void);
  */
 void nrf_modem_fault_handler(struct nrf_modem_fault_info *fault) {
   LOG_ERR("modem fault 0x%x at 0x%x: reset", (unsigned)fault->reason, (unsigned)fault->program_counter);
+  diag_modem_fault(fault->reason, fault->program_counter); /* reported to the nRF5340 after the reset */
   sys_reboot(SYS_REBOOT_COLD);
 }
 #endif
@@ -50,6 +52,7 @@ int main(void) {
   if (err) {
     LOG_ERR("watchdog init failed: %d", err);
   }
+  diag_init();
   /* The update state and the trial supervision are ready before the first request. */
   dfu_init();
   /* The link comes first so the master gets answers while the radios start. */

@@ -41,6 +41,7 @@
 #endif
 
 #include "dfu.h"
+#include "diag/sensei_diag_rt.h"
 #include "link.h"
 #include "lte.h"
 #include "ota/sensei_ota_image.h"
@@ -525,6 +526,7 @@ static void trial_fn(struct k_work *work) {
 }
 
 void dfu_init(void) {
+  sensei_diag_set_image_id(running_image_id()); /* a fault record names the image that faulted */
 #ifdef CONFIG_LPWAN_SHIELD_MODEM_DFU
   k_work_queue_init(&modem_wq);
   k_work_queue_start(&modem_wq, modem_wq_stack, K_THREAD_STACK_SIZEOF(modem_wq_stack),

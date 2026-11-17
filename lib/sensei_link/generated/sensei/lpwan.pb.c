@@ -71,7 +71,14 @@ PB_BIND(sensei_DownlinkRx, sensei_DownlinkRx, 2)
 PB_BIND(sensei_LpwanError, sensei_LpwanError, AUTO)
 
 
+PB_BIND(sensei_ConnEval, sensei_ConnEval, AUTO)
+
+
 PB_BIND(sensei_LpwanEvent, sensei_LpwanEvent, 2)
+
+
+
+
 
 
 

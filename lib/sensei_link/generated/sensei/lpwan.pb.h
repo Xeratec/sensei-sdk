@@ -84,6 +84,25 @@ typedef enum _sensei_DfuFail {
     sensei_DfuFail_DFU_FAIL_RATE = 11 /* too many new transfers in a short time: wait and ask again (result BUSY) */
 } sensei_DfuFail;
 
+/* LTE connection evaluation (AT%CONEVAL), the answer to lte_eval. */
+typedef enum _sensei_EnergyEstimate {
+    sensei_EnergyEstimate_ENERGY_UNKNOWN = 0, /* the evaluation failed or the modem gave no value */
+    sensei_EnergyEstimate_ENERGY_EXCESSIVE = 1, /* bad: connection set-up is hard, maximum repetitions may be needed */
+    sensei_EnergyEstimate_ENERGY_INCREASED = 2, /* poor: retries and more repetitions */
+    sensei_EnergyEstimate_ENERGY_NORMAL = 3,
+    sensei_EnergyEstimate_ENERGY_REDUCED = 4, /* good */
+    sensei_EnergyEstimate_ENERGY_EFFICIENT = 5 /* excellent */
+} sensei_EnergyEstimate;
+
+/* RAI configuration of the cell, as the modem reports it (%RAI). */
+typedef enum _sensei_RaiSupport {
+    sensei_RaiSupport_RAI_UNKNOWN = 0, /* no report yet */
+    sensei_RaiSupport_RAI_NONE = 1, /* the network supports neither */
+    sensei_RaiSupport_RAI_AS = 2, /* access stratum RAI (LTE-M and NB-IoT user plane) */
+    sensei_RaiSupport_RAI_CP = 3, /* control plane RAI (NB-IoT) */
+    sensei_RaiSupport_RAI_AS_CP = 4
+} sensei_RaiSupport;
+
 /* Struct definitions */
 typedef struct _sensei_LteConfigure {
     sensei_LteMode mode;
@@ -121,6 +140,10 @@ typedef struct _sensei_Send {
     uint32_t port;
     sensei_Send_payload_t payload; /* <= 1024 B */
     bool confirmed;
+    /* LTE only. Set on the last chunk of a message (the client decides from its `lte_rai` setting): LTE_RAI_LAST or
+ LTE_RAI_ONE_RESP. The shield sets the RAI socket option for this send. With LTE_RAI_ONE_RESP it also waits for the
+ answer of the server (an ack or a downlink): tx_done is ok only if one came, and TxDone.acked is set. */
+    sensei_LteRai rai;
 } sensei_Send;
 
 typedef struct _sensei_DfuBegin {
@@ -174,6 +197,9 @@ typedef struct _sensei_LpwanRequest {
         sensei_Send send;
         sensei_Empty get_time;
         sensei_LpwanSleep sleep;
+        /* LTE: connection evaluation (%CONEVAL) of the registered modem. Answered at once; the result follows as the
+     conn_eval event (it may take seconds). Needs the connected state; an older shield answers LPWAN_UNSUPPORTED. */
+        sensei_Empty lte_eval;
         /* Update of the shield (nRF9151 app or modem). See DfuBegin. Tags 40 to 49 are reserved for it. */
         sensei_DfuBegin dfu_begin; /* open (or resume) a transfer */
         sensei_DfuChunk dfu_chunk; /* bytes of the image */
@@ -207,6 +233,18 @@ typedef struct _sensei_LpwanStatus {
  shield powered. late_tx_*: the result of a send that had no result event (it was given up), reported once. */
     uint32_t late_tx_seq; /* seq of that send, 0: none */
     bool late_tx_ok;
+    /* Diagnostics of the shield (lib/sensei_diag), fields 9 to 11. */
+    uint32_t reset_cause; /* reset cause bits of the last start (SENSEI_RESET_*, as Status.reset_cause) */
+    uint32_t boot_count; /* boots since the shield's retained RAM was lost (power cut) */
+    /* Fatal error that ended the previous run of the shield, reported once, else absent. A fault of the modem core
+ (the shield resets itself then) has reason 0x80, `pc` in the modem firmware and `status` = the modem library's
+ NRF_MODEM_FAULT_* code, thread "modem". */
+    bool has_fault;
+    sensei_FaultRecord fault;
+    /* LTE, fields 20 and up. rssi_dbm is the RSRP. */
+    sensei_RaiSupport rai_support; /* what the network told the modem (LTE_LC_EVT_RAI_UPDATE), for the current cell */
+    uint32_t lte_answers; /* sends that waited for an answer (LTE_RAI_ONE_RESP) and got one, since start */
+    uint32_t lte_no_answer; /* ... and got none within the wait */
 } sensei_LpwanStatus;
 
 typedef struct _sensei_NetworkTime {
@@ -252,6 +290,8 @@ typedef struct _sensei_TxDone {
     uint32_t attempts;
     /* LoRa: payload bytes the LR1121 takes in the next uplink (the MAC answers it still owes are counted), 0: not known. */
     uint32_t next_max_payload;
+    /* LTE with LTE_RAI_ONE_RESP: the server's answer arrived (ok is false without it). Otherwise false. */
+    bool acked;
 } sensei_TxDone;
 
 typedef PB_BYTES_ARRAY_T(1024) sensei_DownlinkRx_payload_t;
@@ -266,6 +306,16 @@ typedef struct _sensei_LpwanError {
     char message[49];
 } sensei_LpwanError;
 
+typedef struct _sensei_ConnEval {
+    bool valid; /* false: no result (not registered, radio busy, not supported); the rest is 0 */
+    sensei_EnergyEstimate energy;
+    int32_t rsrp_dbm;
+    int32_t rsrq_db;
+    uint32_t ce_level; /* coverage enhancement level 0 ... 3 */
+    uint32_t tx_repetitions; /* estimated */
+    sensei_RaiSupport rai_support; /* as in LpwanStatus, so that the client learns it without asking for the status */
+} sensei_ConnEval;
+
 typedef struct _sensei_LpwanEvent {
     pb_size_t which_body;
     union {
@@ -276,6 +326,7 @@ typedef struct _sensei_LpwanEvent {
         sensei_DownlinkRx downlink_rx;
         sensei_NetworkTime network_time;
         sensei_LpwanError error;
+        sensei_ConnEval conn_eval;
     };
 } sensei_LpwanEvent;
 
@@ -313,6 +364,14 @@ extern "C" {
 #define _sensei_DfuFail_MAX sensei_DfuFail_DFU_FAIL_RATE
 #define _sensei_DfuFail_ARRAYSIZE ((sensei_DfuFail)(sensei_DfuFail_DFU_FAIL_RATE+1))
 
+#define _sensei_EnergyEstimate_MIN sensei_EnergyEstimate_ENERGY_UNKNOWN
+#define _sensei_EnergyEstimate_MAX sensei_EnergyEstimate_ENERGY_EFFICIENT
+#define _sensei_EnergyEstimate_ARRAYSIZE ((sensei_EnergyEstimate)(sensei_EnergyEstimate_ENERGY_EFFICIENT+1))
+
+#define _sensei_RaiSupport_MIN sensei_RaiSupport_RAI_UNKNOWN
+#define _sensei_RaiSupport_MAX sensei_RaiSupport_RAI_AS_CP
+#define _sensei_RaiSupport_ARRAYSIZE ((sensei_RaiSupport)(sensei_RaiSupport_RAI_AS_CP+1))
+
 #define sensei_LteConfigure_mode_ENUMTYPE sensei_LteMode
 
 #define sensei_LoraConfigure_region_ENUMTYPE sensei_LoraRegion
@@ -320,6 +379,7 @@ extern "C" {
 
 
 #define sensei_Send_radio_ENUMTYPE sensei_Radio
+#define sensei_Send_rai_ENUMTYPE sensei_LteRai
 
 #define sensei_DfuBegin_target_ENUMTYPE sensei_DfuTarget
 
@@ -332,6 +392,7 @@ extern "C" {
 
 
 
+#define sensei_LpwanStatus_rai_support_ENUMTYPE sensei_RaiSupport
 
 #define sensei_NetworkTime_radio_ENUMTYPE sensei_Radio
 
@@ -345,13 +406,16 @@ extern "C" {
 
 #define sensei_LpwanError_code_ENUMTYPE sensei_LpwanResult
 
+#define sensei_ConnEval_energy_ENUMTYPE sensei_EnergyEstimate
+#define sensei_ConnEval_rai_support_ENUMTYPE sensei_RaiSupport
+
 
 
 /* Initializer values for message structs */
 #define sensei_LteConfigure_init_default         {_sensei_LteMode_MIN, 0, 0, 0, 0, "", "", 0, 0}
 #define sensei_LoraConfigure_init_default        {_sensei_LoraRegion_MIN, _sensei_LoraClass_MIN, 0, 0, 0, 0}
 #define sensei_LoraProvision_init_default        {{0}, {0}, {0}}
-#define sensei_Send_init_default                 {_sensei_Radio_MIN, 0, {0, {0}}, 0}
+#define sensei_Send_init_default                 {_sensei_Radio_MIN, 0, {0, {0}}, 0, _sensei_LteRai_MIN}
 #define sensei_DfuBegin_init_default             {_sensei_DfuTarget_MIN, 0, {0}, 0}
 #define sensei_DfuConfirm_init_default           {0}
 #define sensei_DfuChunk_init_default             {0, {0, {0}}, 0}
@@ -359,19 +423,20 @@ extern "C" {
 #define sensei_LpwanSleep_init_default           {0}
 #define sensei_LpwanRequest_init_default         {0, 0, {sensei_Empty_init_default}}
 #define sensei_LpwanVersion_init_default         {false, sensei_Version_init_default, "", 0, 0, 0, 0, ""}
-#define sensei_LpwanStatus_init_default          {0, 0, 0, 0, 0, 0, 0, 0}
+#define sensei_LpwanStatus_init_default          {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, false, sensei_FaultRecord_init_default, _sensei_RaiSupport_MIN, 0, 0}
 #define sensei_NetworkTime_init_default          {0, _sensei_Radio_MIN}
 #define sensei_SendInfo_init_default             {0, 0, 0}
 #define sensei_LpwanResponse_init_default        {0, _sensei_LpwanResult_MIN, 0, {sensei_LpwanVersion_init_default}}
 #define sensei_RadioEvent_init_default           {_sensei_Radio_MIN}
-#define sensei_TxDone_init_default               {0, 0, 0, 0}
+#define sensei_TxDone_init_default               {0, 0, 0, 0, 0}
 #define sensei_DownlinkRx_init_default           {_sensei_Radio_MIN, 0, {0, {0}}}
 #define sensei_LpwanError_init_default           {_sensei_LpwanResult_MIN, ""}
+#define sensei_ConnEval_init_default             {0, _sensei_EnergyEstimate_MIN, 0, 0, 0, 0, _sensei_RaiSupport_MIN}
 #define sensei_LpwanEvent_init_default           {0, {sensei_RadioEvent_init_default}}
 #define sensei_LteConfigure_init_zero            {_sensei_LteMode_MIN, 0, 0, 0, 0, "", "", 0, 0}
 #define sensei_LoraConfigure_init_zero           {_sensei_LoraRegion_MIN, _sensei_LoraClass_MIN, 0, 0, 0, 0}
 #define sensei_LoraProvision_init_zero           {{0}, {0}, {0}}
-#define sensei_Send_init_zero                    {_sensei_Radio_MIN, 0, {0, {0}}, 0}
+#define sensei_Send_init_zero                    {_sensei_Radio_MIN, 0, {0, {0}}, 0, _sensei_LteRai_MIN}
 #define sensei_DfuBegin_init_zero                {_sensei_DfuTarget_MIN, 0, {0}, 0}
 #define sensei_DfuConfirm_init_zero              {0}
 #define sensei_DfuChunk_init_zero                {0, {0, {0}}, 0}
@@ -379,14 +444,15 @@ extern "C" {
 #define sensei_LpwanSleep_init_zero              {0}
 #define sensei_LpwanRequest_init_zero            {0, 0, {sensei_Empty_init_zero}}
 #define sensei_LpwanVersion_init_zero            {false, sensei_Version_init_zero, "", 0, 0, 0, 0, ""}
-#define sensei_LpwanStatus_init_zero             {0, 0, 0, 0, 0, 0, 0, 0}
+#define sensei_LpwanStatus_init_zero             {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, false, sensei_FaultRecord_init_zero, _sensei_RaiSupport_MIN, 0, 0}
 #define sensei_NetworkTime_init_zero             {0, _sensei_Radio_MIN}
 #define sensei_SendInfo_init_zero                {0, 0, 0}
 #define sensei_LpwanResponse_init_zero           {0, _sensei_LpwanResult_MIN, 0, {sensei_LpwanVersion_init_zero}}
 #define sensei_RadioEvent_init_zero              {_sensei_Radio_MIN}
-#define sensei_TxDone_init_zero                  {0, 0, 0, 0}
+#define sensei_TxDone_init_zero                  {0, 0, 0, 0, 0}
 #define sensei_DownlinkRx_init_zero              {_sensei_Radio_MIN, 0, {0, {0}}}
 #define sensei_LpwanError_init_zero              {_sensei_LpwanResult_MIN, ""}
+#define sensei_ConnEval_init_zero                {0, _sensei_EnergyEstimate_MIN, 0, 0, 0, 0, _sensei_RaiSupport_MIN}
 #define sensei_LpwanEvent_init_zero              {0, {sensei_RadioEvent_init_zero}}
 
 /* Field tags (for use in manual encoding/decoding) */
@@ -412,6 +478,7 @@ extern "C" {
 #define sensei_Send_port_tag                     2
 #define sensei_Send_payload_tag                  3
 #define sensei_Send_confirmed_tag                4
+#define sensei_Send_rai_tag                      5
 #define sensei_DfuBegin_target_tag               1
 #define sensei_DfuBegin_size_tag                 2
 #define sensei_DfuBegin_sha256_tag               3
@@ -440,6 +507,7 @@ extern "C" {
 #define sensei_LpwanRequest_send_tag             10
 #define sensei_LpwanRequest_get_time_tag         11
 #define sensei_LpwanRequest_sleep_tag            12
+#define sensei_LpwanRequest_lte_eval_tag         13
 #define sensei_LpwanRequest_dfu_begin_tag        40
 #define sensei_LpwanRequest_dfu_chunk_tag        41
 #define sensei_LpwanRequest_dfu_finish_tag       42
@@ -462,6 +530,12 @@ extern "C" {
 #define sensei_LpwanStatus_dropped_events_tag    6
 #define sensei_LpwanStatus_late_tx_seq_tag       7
 #define sensei_LpwanStatus_late_tx_ok_tag        8
+#define sensei_LpwanStatus_reset_cause_tag       9
+#define sensei_LpwanStatus_boot_count_tag        10
+#define sensei_LpwanStatus_fault_tag             11
+#define sensei_LpwanStatus_rai_support_tag       20
+#define sensei_LpwanStatus_lte_answers_tag       21
+#define sensei_LpwanStatus_lte_no_answer_tag     22
 #define sensei_NetworkTime_unix_time_tag         1
 #define sensei_NetworkTime_radio_tag             2
 #define sensei_SendInfo_expected_ms_tag          1
@@ -479,11 +553,19 @@ extern "C" {
 #define sensei_TxDone_ok_tag                     2
 #define sensei_TxDone_attempts_tag               3
 #define sensei_TxDone_next_max_payload_tag       4
+#define sensei_TxDone_acked_tag                  5
 #define sensei_DownlinkRx_radio_tag              1
 #define sensei_DownlinkRx_port_tag               2
 #define sensei_DownlinkRx_payload_tag            3
 #define sensei_LpwanError_code_tag               1
 #define sensei_LpwanError_message_tag            2
+#define sensei_ConnEval_valid_tag                1
+#define sensei_ConnEval_energy_tag               2
+#define sensei_ConnEval_rsrp_dbm_tag             3
+#define sensei_ConnEval_rsrq_db_tag              4
+#define sensei_ConnEval_ce_level_tag             5
+#define sensei_ConnEval_tx_repetitions_tag       6
+#define sensei_ConnEval_rai_support_tag          7
 #define sensei_LpwanEvent_joined_tag             1
 #define sensei_LpwanEvent_connected_tag          2
 #define sensei_LpwanEvent_disconnected_tag       3
@@ -491,6 +573,7 @@ extern "C" {
 #define sensei_LpwanEvent_downlink_rx_tag        5
 #define sensei_LpwanEvent_network_time_tag       6
 #define sensei_LpwanEvent_error_tag              7
+#define sensei_LpwanEvent_conn_eval_tag          8
 
 /* Struct field encoding specification for nanopb */
 #define sensei_LteConfigure_FIELDLIST(X, a) \
@@ -527,7 +610,8 @@ X(a, STATIC,   SINGULAR, FIXED_LENGTH_BYTES, app_key,           3)
 X(a, STATIC,   SINGULAR, UENUM,    radio,             1) \
 X(a, STATIC,   SINGULAR, UINT32,   port,              2) \
 X(a, STATIC,   SINGULAR, BYTES,    payload,           3) \
-X(a, STATIC,   SINGULAR, BOOL,     confirmed,         4)
+X(a, STATIC,   SINGULAR, BOOL,     confirmed,         4) \
+X(a, STATIC,   SINGULAR, UENUM,    rai,               5)
 #define sensei_Send_CALLBACK NULL
 #define sensei_Send_DEFAULT NULL
 
@@ -580,6 +664,7 @@ X(a, STATIC,   ONEOF,    MESSAGE,  (body,lora_join,lora_join),   9) \
 X(a, STATIC,   ONEOF,    MESSAGE,  (body,send,send),  10) \
 X(a, STATIC,   ONEOF,    MESSAGE,  (body,get_time,get_time),  11) \
 X(a, STATIC,   ONEOF,    MESSAGE,  (body,sleep,sleep),  12) \
+X(a, STATIC,   ONEOF,    MESSAGE,  (body,lte_eval,lte_eval),  13) \
 X(a, STATIC,   ONEOF,    MESSAGE,  (body,dfu_begin,dfu_begin),  40) \
 X(a, STATIC,   ONEOF,    MESSAGE,  (body,dfu_chunk,dfu_chunk),  41) \
 X(a, STATIC,   ONEOF,    MESSAGE,  (body,dfu_finish,dfu_finish),  42) \
@@ -600,6 +685,7 @@ X(a, STATIC,   ONEOF,    MESSAGE,  (body,dfu_confirm,dfu_confirm),  46)
 #define sensei_LpwanRequest_body_send_MSGTYPE sensei_Send
 #define sensei_LpwanRequest_body_get_time_MSGTYPE sensei_Empty
 #define sensei_LpwanRequest_body_sleep_MSGTYPE sensei_LpwanSleep
+#define sensei_LpwanRequest_body_lte_eval_MSGTYPE sensei_Empty
 #define sensei_LpwanRequest_body_dfu_begin_MSGTYPE sensei_DfuBegin
 #define sensei_LpwanRequest_body_dfu_chunk_MSGTYPE sensei_DfuChunk
 #define sensei_LpwanRequest_body_dfu_finish_MSGTYPE sensei_Empty
@@ -628,9 +714,16 @@ X(a, STATIC,   SINGULAR, SINT32,   snr_db,            4) \
 X(a, STATIC,   SINGULAR, UINT32,   queued,            5) \
 X(a, STATIC,   SINGULAR, UINT32,   dropped_events,    6) \
 X(a, STATIC,   SINGULAR, UINT32,   late_tx_seq,       7) \
-X(a, STATIC,   SINGULAR, BOOL,     late_tx_ok,        8)
+X(a, STATIC,   SINGULAR, BOOL,     late_tx_ok,        8) \
+X(a, STATIC,   SINGULAR, UINT32,   reset_cause,       9) \
+X(a, STATIC,   SINGULAR, UINT32,   boot_count,       10) \
+X(a, STATIC,   OPTIONAL, MESSAGE,  fault,            11) \
+X(a, STATIC,   SINGULAR, UENUM,    rai_support,      20) \
+X(a, STATIC,   SINGULAR, UINT32,   lte_answers,      21) \
+X(a, STATIC,   SINGULAR, UINT32,   lte_no_answer,    22)
 #define sensei_LpwanStatus_CALLBACK NULL
 #define sensei_LpwanStatus_DEFAULT NULL
+#define sensei_LpwanStatus_fault_MSGTYPE sensei_FaultRecord
 
 #define sensei_NetworkTime_FIELDLIST(X, a) \
 X(a, STATIC,   SINGULAR, FIXED32,  unix_time,         1) \
@@ -670,7 +763,8 @@ X(a, STATIC,   SINGULAR, UENUM,    radio,             1)
 X(a, STATIC,   SINGULAR, UINT32,   seq,               1) \
 X(a, STATIC,   SINGULAR, BOOL,     ok,                2) \
 X(a, STATIC,   SINGULAR, UINT32,   attempts,          3) \
-X(a, STATIC,   SINGULAR, UINT32,   next_max_payload,   4)
+X(a, STATIC,   SINGULAR, UINT32,   next_max_payload,   4) \
+X(a, STATIC,   SINGULAR, BOOL,     acked,             5)
 #define sensei_TxDone_CALLBACK NULL
 #define sensei_TxDone_DEFAULT NULL
 
@@ -687,6 +781,17 @@ X(a, STATIC,   SINGULAR, STRING,   message,           2)
 #define sensei_LpwanError_CALLBACK NULL
 #define sensei_LpwanError_DEFAULT NULL
 
+#define sensei_ConnEval_FIELDLIST(X, a) \
+X(a, STATIC,   SINGULAR, BOOL,     valid,             1) \
+X(a, STATIC,   SINGULAR, UENUM,    energy,            2) \
+X(a, STATIC,   SINGULAR, SINT32,   rsrp_dbm,          3) \
+X(a, STATIC,   SINGULAR, SINT32,   rsrq_db,           4) \
+X(a, STATIC,   SINGULAR, UINT32,   ce_level,          5) \
+X(a, STATIC,   SINGULAR, UINT32,   tx_repetitions,    6) \
+X(a, STATIC,   SINGULAR, UENUM,    rai_support,       7)
+#define sensei_ConnEval_CALLBACK NULL
+#define sensei_ConnEval_DEFAULT NULL
+
 #define sensei_LpwanEvent_FIELDLIST(X, a) \
 X(a, STATIC,   ONEOF,    MESSAGE,  (body,joined,joined),   1) \
 X(a, STATIC,   ONEOF,    MESSAGE,  (body,connected,connected),   2) \
@@ -694,7 +799,8 @@ X(a, STATIC,   ONEOF,    MESSAGE,  (body,disconnected,disconnected),   3) \
 X(a, STATIC,   ONEOF,    MESSAGE,  (body,tx_done,tx_done),   4) \
 X(a, STATIC,   ONEOF,    MESSAGE,  (body,downlink_rx,downlink_rx),   5) \
 X(a, STATIC,   ONEOF,    MESSAGE,  (body,network_time,network_time),   6) \
-X(a, STATIC,   ONEOF,    MESSAGE,  (body,error,error),   7)
+X(a, STATIC,   ONEOF,    MESSAGE,  (body,error,error),   7) \
+X(a, STATIC,   ONEOF,    MESSAGE,  (body,conn_eval,conn_eval),   8)
 #define sensei_LpwanEvent_CALLBACK NULL
 #define sensei_LpwanEvent_DEFAULT NULL
 #define sensei_LpwanEvent_body_joined_MSGTYPE sensei_RadioEvent
@@ -704,6 +810,7 @@ X(a, STATIC,   ONEOF,    MESSAGE,  (body,error,error),   7)
 #define sensei_LpwanEvent_body_downlink_rx_MSGTYPE sensei_DownlinkRx
 #define sensei_LpwanEvent_body_network_time_MSGTYPE sensei_NetworkTime
 #define sensei_LpwanEvent_body_error_MSGTYPE sensei_LpwanError
+#define sensei_LpwanEvent_body_conn_eval_MSGTYPE sensei_ConnEval
 
 extern const pb_msgdesc_t sensei_LteConfigure_msg;
 extern const pb_msgdesc_t sensei_LoraConfigure_msg;
@@ -724,6 +831,7 @@ extern const pb_msgdesc_t sensei_RadioEvent_msg;
 extern const pb_msgdesc_t sensei_TxDone_msg;
 extern const pb_msgdesc_t sensei_DownlinkRx_msg;
 extern const pb_msgdesc_t sensei_LpwanError_msg;
+extern const pb_msgdesc_t sensei_ConnEval_msg;
 extern const pb_msgdesc_t sensei_LpwanEvent_msg;
 
 /* Defines for backwards compatibility with code written before nanopb-0.4.0 */
@@ -746,10 +854,12 @@ extern const pb_msgdesc_t sensei_LpwanEvent_msg;
 #define sensei_TxDone_fields &sensei_TxDone_msg
 #define sensei_DownlinkRx_fields &sensei_DownlinkRx_msg
 #define sensei_LpwanError_fields &sensei_LpwanError_msg
+#define sensei_ConnEval_fields &sensei_ConnEval_msg
 #define sensei_LpwanEvent_fields &sensei_LpwanEvent_msg
 
 /* Maximum encoded size of messages (where known) */
 #define SENSEI_SENSEI_LPWAN_PB_H_MAX_SIZE        sensei_LpwanRequest_size
+#define sensei_ConnEval_size                     30
 #define sensei_DfuBegin_size                     44
 #define sensei_DfuChunk_size                     523
 #define sensei_DfuConfirm_size                   5
@@ -759,17 +869,17 @@ extern const pb_msgdesc_t sensei_LpwanEvent_msg;
 #define sensei_LoraProvision_size                38
 #define sensei_LpwanError_size                   52
 #define sensei_LpwanEvent_size                   1038
-#define sensei_LpwanRequest_size                 1046
-#define sensei_LpwanResponse_size                106
+#define sensei_LpwanRequest_size                 1048
+#define sensei_LpwanResponse_size                144
 #define sensei_LpwanSleep_size                   6
-#define sensei_LpwanStatus_size                  36
+#define sensei_LpwanStatus_size                  133
 #define sensei_LpwanVersion_size                 96
 #define sensei_LteConfigure_size                 134
 #define sensei_NetworkTime_size                  7
 #define sensei_RadioEvent_size                   2
 #define sensei_SendInfo_size                     18
-#define sensei_Send_size                         1037
-#define sensei_TxDone_size                       20
+#define sensei_Send_size                         1039
+#define sensei_TxDone_size                       22
 
 #ifdef __cplusplus
 } /* extern "C" */

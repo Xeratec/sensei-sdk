@@ -98,6 +98,12 @@ sensei_LpwanResult lpwan_sm_admit(lpwan_sm_t *sm, const sensei_LpwanRequest *req
     }
     return sm->tech == LPWAN_TECH_LORA ? sensei_LpwanResult_LPWAN_NOT_JOINED : sensei_LpwanResult_LPWAN_NOT_CONNECTED;
 
+  case sensei_LpwanRequest_lte_eval_tag:
+    if (sm->tech == LPWAN_TECH_LTE && sm->state == LPWAN_ST_CONNECTED) {
+      return sensei_LpwanResult_LPWAN_OK;
+    }
+    return sm->state == LPWAN_ST_SENDING ? sensei_LpwanResult_LPWAN_BUSY : sensei_LpwanResult_LPWAN_NOT_CONNECTED;
+
   case sensei_LpwanRequest_lte_disconnect_tag:
     if (sm->state == LPWAN_ST_IDLE || sm->state == LPWAN_ST_DISCONNECTING) {
       return sensei_LpwanResult_LPWAN_OK;

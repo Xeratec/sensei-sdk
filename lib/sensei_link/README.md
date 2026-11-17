@@ -15,7 +15,7 @@ the nanopb glue and the messages of the SDK libraries. C99, no allocation, no OS
 |---|---|---|
 | Stream framing | `cobs.h`, `crc.h`, `stream.h` | `COBS(channel \| message \| CRC-16) 0x00`, a byte-wise receiver |
 | SPI frame | `spi.h` | 8 byte header `0x5E, version, type, flags, len, crc16`, then the message. The CRC covers header bytes 0 to 5 and the message |
-| Fragments | `frag.h` | message split into radio chunks `msg_id, index, count, data`, with a reassembler |
+| Fragments | `frag.h` | message split into radio chunks `msg_id, index, count, data`, with a reassembler; the 3-byte acknowledgement `msg_id, index, 0` (count 0, never a chunk) |
 | nanopb glue | `pb.h` | `sensei_encode_<Name>()` and `sensei_decode_<Name>()`, `SENSEI_PB_DECLARE()` for app messages |
 | Messages | `proto/sensei/*.proto` | `types.proto` (Empty, Version, Radio), `lpwan.proto` (nRF5340 to nRF9151 requests, responses, events, and the update of the shield: `Dfu*`) |
 | SHA-256 | `sha256.h` | small streaming SHA-256 (no allocation, no hardware), for images that arrive in pieces; `sensei_sha256_update_ff()` hashes a skipped 0xFF region |

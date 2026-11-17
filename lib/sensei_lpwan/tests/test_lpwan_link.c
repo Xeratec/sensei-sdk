@@ -456,6 +456,18 @@ static void test_sm_table(void) {
   rq.which_body = sensei_LpwanRequest_lte_disconnect_tag;
   CHECK(lpwan_sm_admit(&sm, &rq) == sensei_LpwanResult_LPWAN_OK);
 
+  /* the connection evaluation needs a connected LTE modem and does not move the machine */
+  lpwan_sm_init(&sm);
+  rq.which_body = sensei_LpwanRequest_lte_eval_tag;
+  CHECK(lpwan_sm_admit(&sm, &rq) == sensei_LpwanResult_LPWAN_NOT_CONNECTED);
+  sm.state = LPWAN_ST_CONNECTED;
+  sm.tech = LPWAN_TECH_LORA;
+  CHECK(lpwan_sm_admit(&sm, &rq) == sensei_LpwanResult_LPWAN_NOT_CONNECTED);
+  sm.tech = LPWAN_TECH_LTE;
+  CHECK(lpwan_sm_admit(&sm, &rq) == sensei_LpwanResult_LPWAN_OK && sm.state == LPWAN_ST_CONNECTED);
+  sm.state = LPWAN_ST_SENDING;
+  CHECK(lpwan_sm_admit(&sm, &rq) == sensei_LpwanResult_LPWAN_BUSY);
+
   /* the update needs the radios idle; its status and the confirm are always answered */
   lpwan_sm_init(&sm);
   for (pb_size_t t = sensei_LpwanRequest_dfu_begin_tag; t <= sensei_LpwanRequest_dfu_abort_tag; t++) {

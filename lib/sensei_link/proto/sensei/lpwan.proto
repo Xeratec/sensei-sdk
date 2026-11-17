@@ -84,6 +84,10 @@ message Send {
   uint32 port = 2;
   bytes payload = 3; // <= 1024 B
   bool confirmed = 4;
+  // LTE only. Set on the last chunk of a message (the client decides from its `lte_rai` setting): LTE_RAI_LAST or
+  // LTE_RAI_ONE_RESP. The shield sets the RAI socket option for this send. With LTE_RAI_ONE_RESP it also waits for the
+  // answer of the server (an ack or a downlink): tx_done is ok only if one came, and TxDone.acked is set.
+  LteRai rai = 5;
 }
 
 // ---- Update of the shield ----
@@ -171,6 +175,9 @@ message LpwanRequest {
     Send send = 10;
     Empty get_time = 11;
     LpwanSleep sleep = 12;
+    // LTE: connection evaluation (%CONEVAL) of the registered modem. Answered at once; the result follows as the
+    // conn_eval event (it may take seconds). Needs the connected state; an older shield answers LPWAN_UNSUPPORTED.
+    Empty lte_eval = 13;
     // Update of the shield (nRF9151 app or modem). See DfuBegin. Tags 40 to 49 are reserved for it.
     DfuBegin dfu_begin = 40;     // open (or resume) a transfer
     DfuChunk dfu_chunk = 41;     // bytes of the image
@@ -203,6 +210,17 @@ message LpwanStatus {
   // shield powered. late_tx_*: the result of a send that had no result event (it was given up), reported once.
   uint32 late_tx_seq = 7; // seq of that send, 0: none
   bool late_tx_ok = 8;
+  // LTE, fields 20 and up. rssi_dbm is the RSRP.
+  RaiSupport rai_support = 20; // what the network told the modem (LTE_LC_EVT_RAI_UPDATE), for the current cell
+  uint32 lte_answers = 21;     // sends that waited for an answer (LTE_RAI_ONE_RESP) and got one, since start
+  uint32 lte_no_answer = 22;   // ... and got none within the wait
+  // Diagnostics of the shield (lib/sensei_diag), fields 9 to 11.
+  uint32 reset_cause = 9; // reset cause bits of the last start (SENSEI_RESET_*, as Status.reset_cause)
+  uint32 boot_count = 10; // boots since the shield's retained RAM was lost (power cut)
+  // Fatal error that ended the previous run of the shield, reported once, else absent. A fault of the modem core
+  // (the shield resets itself then) has reason 0x80, `pc` in the modem firmware and `status` = the modem library's
+  // NRF_MODEM_FAULT_* code, thread "modem".
+  FaultRecord fault = 11;
 }
 
 message NetworkTime {
@@ -245,6 +263,8 @@ message TxDone {
   uint32 attempts = 3;
   // LoRa: payload bytes the LR1121 takes in the next uplink (the MAC answers it still owes are counted), 0: not known.
   uint32 next_max_payload = 4;
+  // LTE with LTE_RAI_ONE_RESP: the server's answer arrived (ok is false without it). Otherwise false.
+  bool acked = 5;
 }
 
 message DownlinkRx {
@@ -258,6 +278,35 @@ message LpwanError {
   string message = 2;
 }
 
+// LTE connection evaluation (AT%CONEVAL), the answer to lte_eval.
+enum EnergyEstimate {
+  ENERGY_UNKNOWN = 0;   // the evaluation failed or the modem gave no value
+  ENERGY_EXCESSIVE = 1; // bad: connection set-up is hard, maximum repetitions may be needed
+  ENERGY_INCREASED = 2; // poor: retries and more repetitions
+  ENERGY_NORMAL = 3;
+  ENERGY_REDUCED = 4;   // good
+  ENERGY_EFFICIENT = 5; // excellent
+}
+
+// RAI configuration of the cell, as the modem reports it (%RAI).
+enum RaiSupport {
+  RAI_UNKNOWN = 0; // no report yet
+  RAI_NONE = 1;    // the network supports neither
+  RAI_AS = 2;      // access stratum RAI (LTE-M and NB-IoT user plane)
+  RAI_CP = 3;      // control plane RAI (NB-IoT)
+  RAI_AS_CP = 4;
+}
+
+message ConnEval {
+  bool valid = 1; // false: no result (not registered, radio busy, not supported); the rest is 0
+  EnergyEstimate energy = 2;
+  sint32 rsrp_dbm = 3;
+  sint32 rsrq_db = 4;
+  uint32 ce_level = 5;        // coverage enhancement level 0 ... 3
+  uint32 tx_repetitions = 6;  // estimated
+  RaiSupport rai_support = 7; // as in LpwanStatus, so that the client learns it without asking for the status
+}
+
 message LpwanEvent {
   oneof body {
     RadioEvent joined = 1;
@@ -267,5 +316,6 @@ message LpwanEvent {
     DownlinkRx downlink_rx = 5;
     NetworkTime network_time = 6;
     LpwanError error = 7;
+    ConnEval conn_eval = 8;
   }
 }

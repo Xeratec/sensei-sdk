@@ -24,7 +24,12 @@ int lte_init(void);
 sensei_LpwanResult lte_configure(const sensei_LteConfigure *cfg);
 sensei_LpwanResult lte_connect(void);
 sensei_LpwanResult lte_disconnect(void);
-sensei_LpwanResult lte_send(uint32_t seq, uint32_t port, const uint8_t *data, size_t len);
+/** rai: the flag of the client for this chunk (the last chunk of a message): RAI option and, for one response, the wait
+ *  for the answer of the server; tx_done reports it. */
+sensei_LpwanResult lte_send(uint32_t seq, uint32_t port, const uint8_t *data, size_t len, sensei_LteRai rai);
+/** Connection evaluation (%CONEVAL): the result is the conn_eval event. Not supported without
+ * CONFIG_LTE_LC_CONN_EVAL_MODULE. */
+sensei_LpwanResult lte_eval(void);
 /** Network time is delivered as an event as soon as it is known. */
 sensei_LpwanResult lte_request_time(void);
 /** deep = 0: keep the registration (the modem sleeps in PSM). deep = 1: modem off. */

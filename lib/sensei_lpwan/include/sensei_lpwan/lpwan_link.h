@@ -114,6 +114,7 @@ void lpwan_sm_init(lpwan_sm_t *sm);
  *   lte_connect, lora_join              IDLE, tech NONE, then CONNECTING (tech LTE or LORA)
  *   send                                CONNECTED with the matching tech, then SENDING
  *   get_time                            CONNECTED
+ *   lte_eval                            CONNECTED with LTE (no change of state; the result is the conn_eval event)
  *   lte_disconnect                      CONNECTING, CONNECTED, ERROR or IDLE: the active
  *                                       technology is released (LTE detaches, LoRa is parked)
  *   sleep                               IDLE or CONNECTED

@@ -46,6 +46,25 @@ size_t sensei_frag_chunk(uint8_t msg_id, const uint8_t *msg, size_t len, size_t 
   return SENSEI_FRAG_HEADER_SIZE + n;
 }
 
+void sensei_frag_ack(uint8_t msg_id, uint8_t index, uint8_t out[SENSEI_FRAG_ACK_SIZE]) {
+  out[0] = msg_id;
+  out[1] = index;
+  out[2] = 0;
+}
+
+bool sensei_frag_is_ack(const uint8_t *data, size_t len, uint8_t *msg_id, uint8_t *index) {
+  if (data == NULL || len != SENSEI_FRAG_ACK_SIZE || data[2] != 0) {
+    return false;
+  }
+  if (msg_id != NULL) {
+    *msg_id = data[0];
+  }
+  if (index != NULL) {
+    *index = data[1];
+  }
+  return true;
+}
+
 void sensei_reasm_init(sensei_reasm_t *r, uint8_t *buf, size_t cap, size_t mtu, uint32_t timeout_ms) {
   memset(r, 0, sizeof(*r));
   r->buf = buf;

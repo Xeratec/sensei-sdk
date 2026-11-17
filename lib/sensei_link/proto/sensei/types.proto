@@ -31,3 +31,28 @@ enum Radio {
   RADIO_LTEM = 2;
   RADIO_NBIOT = 3;
 }
+
+// Release assistance indication (RAI) of an LTE-M or NB-IoT uplink: how the node tells the modem and the network what
+// follows the last chunk of a message, so that the radio connection ends early. The node setting `lte_rai` and the
+// flag of one Send use these values.
+enum LteRai {
+  LTE_RAI_OFF = 0;      // no indication
+  LTE_RAI_LAST = 1;     // nothing follows the chunk
+  LTE_RAI_ONE_RESP = 2; // one datagram from the server follows the chunk (the collector always answers)
+}
+
+// Record of the last fatal error (lib/sensei_diag): written into retained RAM by the fault handler, reported once
+// after the next boot. Addresses are of the image `image_id` (first 4 bytes of its hash): the host finds the ELF with
+// it.
+message FaultRecord {
+  uint32 reason = 1;     // 0 CPU exception, 1 spurious IRQ, 2 stack check, 3 oops, 4 panic, 16 up: arch, 0x80 modem
+  uint32 pc = 2;         // program counter of the fault, 0: not known
+  uint32 lr = 3;         // link register
+  string thread = 4;     // faulting thread, "ISR" in an interrupt
+  uint32 uptime_s = 5;   // uptime at the fault
+  uint32 last_job = 6;   // job id the firmware had set last (0: none)
+  fixed32 image_id = 7;  // image that faulted, 0: not set
+  uint32 boot_count = 8; // boot counter of the boot that faulted
+  uint32 status = 9;     // Cortex-M: stacked xPSR (bits 0 to 8: interrupt the fault hit, 0 in a thread), else 0
+  bool coredump = 10;    // a coredump is kept on the node (Debug shell: `sensei diag dump`)
+}

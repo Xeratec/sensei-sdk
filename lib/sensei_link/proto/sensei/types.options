@@ -4,4 +4,5 @@
 # Authors:
 # - Philip Wiese <wiesep@iis.ee.ethz.ch>
 
-# No size limits needed: the messages have no repeated, bytes or string fields.
+# Only FaultRecord has a string. Its max_size counts the terminating NUL (15 characters).
+sensei.FaultRecord.thread max_size:16

@@ -26,6 +26,15 @@ typedef enum _sensei_Radio {
     sensei_Radio_RADIO_NBIOT = 3
 } sensei_Radio;
 
+/* Release assistance indication (RAI) of an LTE-M or NB-IoT uplink: how the node tells the modem and the network what
+ follows the last chunk of a message, so that the radio connection ends early. The node setting `lte_rai` and the
+ flag of one Send use these values. */
+typedef enum _sensei_LteRai {
+    sensei_LteRai_LTE_RAI_OFF = 0, /* no indication */
+    sensei_LteRai_LTE_RAI_LAST = 1, /* nothing follows the chunk */
+    sensei_LteRai_LTE_RAI_ONE_RESP = 2 /* one datagram from the server follows the chunk (the collector always answers) */
+} sensei_LteRai;
+
 /* Struct definitions */
 /* Empty request or reply body. */
 typedef struct _sensei_Empty {
@@ -41,6 +50,22 @@ typedef struct _sensei_Version {
     uint32_t git;
 } sensei_Version;
 
+/* Record of the last fatal error (lib/sensei_diag): written into retained RAM by the fault handler, reported once
+ after the next boot. Addresses are of the image `image_id` (first 4 bytes of its hash): the host finds the ELF with
+ it. */
+typedef struct _sensei_FaultRecord {
+    uint32_t reason; /* 0 CPU exception, 1 spurious IRQ, 2 stack check, 3 oops, 4 panic, 16 up: arch, 0x80 modem */
+    uint32_t pc; /* program counter of the fault, 0: not known */
+    uint32_t lr; /* link register */
+    char thread[16]; /* faulting thread, "ISR" in an interrupt */
+    uint32_t uptime_s; /* uptime at the fault */
+    uint32_t last_job; /* job id the firmware had set last (0: none) */
+    uint32_t image_id; /* image that faulted, 0: not set */
+    uint32_t boot_count; /* boot counter of the boot that faulted */
+    uint32_t status; /* Cortex-M: stacked xPSR (bits 0 to 8: interrupt the fault hit, 0 in a thread), else 0 */
+    bool coredump; /* a coredump is kept on the node (Debug shell: `sensei diag dump`) */
+} sensei_FaultRecord;
+
 
 #ifdef __cplusplus
 extern "C" {
@@ -51,20 +76,37 @@ extern "C" {
 #define _sensei_Radio_MAX sensei_Radio_RADIO_NBIOT
 #define _sensei_Radio_ARRAYSIZE ((sensei_Radio)(sensei_Radio_RADIO_NBIOT+1))
 
+#define _sensei_LteRai_MIN sensei_LteRai_LTE_RAI_OFF
+#define _sensei_LteRai_MAX sensei_LteRai_LTE_RAI_ONE_RESP
+#define _sensei_LteRai_ARRAYSIZE ((sensei_LteRai)(sensei_LteRai_LTE_RAI_ONE_RESP+1))
+
+
 
 
 
 /* Initializer values for message structs */
 #define sensei_Empty_init_default                {0}
 #define sensei_Version_init_default              {0, 0, 0, 0}
+#define sensei_FaultRecord_init_default          {0, 0, 0, "", 0, 0, 0, 0, 0, 0}
 #define sensei_Empty_init_zero                   {0}
 #define sensei_Version_init_zero                 {0, 0, 0, 0}
+#define sensei_FaultRecord_init_zero             {0, 0, 0, "", 0, 0, 0, 0, 0, 0}
 
 /* Field tags (for use in manual encoding/decoding) */
 #define sensei_Version_major_tag                 1
 #define sensei_Version_minor_tag                 2
 #define sensei_Version_patch_tag                 3
 #define sensei_Version_git_tag                   4
+#define sensei_FaultRecord_reason_tag            1
+#define sensei_FaultRecord_pc_tag                2
+#define sensei_FaultRecord_lr_tag                3
+#define sensei_FaultRecord_thread_tag            4
+#define sensei_FaultRecord_uptime_s_tag          5
+#define sensei_FaultRecord_last_job_tag          6
+#define sensei_FaultRecord_image_id_tag          7
+#define sensei_FaultRecord_boot_count_tag        8
+#define sensei_FaultRecord_status_tag            9
+#define sensei_FaultRecord_coredump_tag          10
 
 /* Struct field encoding specification for nanopb */
 #define sensei_Empty_FIELDLIST(X, a) \
@@ -80,16 +122,33 @@ X(a, STATIC,   SINGULAR, FIXED32,  git,               4)
 #define sensei_Version_CALLBACK NULL
 #define sensei_Version_DEFAULT NULL
 
+#define sensei_FaultRecord_FIELDLIST(X, a) \
+X(a, STATIC,   SINGULAR, UINT32,   reason,            1) \
+X(a, STATIC,   SINGULAR, UINT32,   pc,                2) \
+X(a, STATIC,   SINGULAR, UINT32,   lr,                3) \
+X(a, STATIC,   SINGULAR, STRING,   thread,            4) \
+X(a, STATIC,   SINGULAR, UINT32,   uptime_s,          5) \
+X(a, STATIC,   SINGULAR, UINT32,   last_job,          6) \
+X(a, STATIC,   SINGULAR, FIXED32,  image_id,          7) \
+X(a, STATIC,   SINGULAR, UINT32,   boot_count,        8) \
+X(a, STATIC,   SINGULAR, UINT32,   status,            9) \
+X(a, STATIC,   SINGULAR, BOOL,     coredump,         10)
+#define sensei_FaultRecord_CALLBACK NULL
+#define sensei_FaultRecord_DEFAULT NULL
+
 extern const pb_msgdesc_t sensei_Empty_msg;
 extern const pb_msgdesc_t sensei_Version_msg;
+extern const pb_msgdesc_t sensei_FaultRecord_msg;
 
 /* Defines for backwards compatibility with code written before nanopb-0.4.0 */
 #define sensei_Empty_fields &sensei_Empty_msg
 #define sensei_Version_fields &sensei_Version_msg
+#define sensei_FaultRecord_fields &sensei_FaultRecord_msg
 
 /* Maximum encoded size of messages (where known) */
-#define SENSEI_SENSEI_TYPES_PB_H_MAX_SIZE        sensei_Version_size
+#define SENSEI_SENSEI_TYPES_PB_H_MAX_SIZE        sensei_FaultRecord_size
 #define sensei_Empty_size                        0
+#define sensei_FaultRecord_size                  66
 #define sensei_Version_size                      23
 
 #ifdef __cplusplus

@@ -23,6 +23,7 @@
 #include <zephyr/logging/log.h>
 
 #include "dfu.h"
+#include "diag.h"
 #include "link.h"
 #include "lora.h"
 #include "lte.h"
@@ -120,7 +121,7 @@ void svc_emit_radio(pb_size_t tag, sensei_Radio radio) {
   svc_emit(&e);
 }
 
-void svc_emit_tx_done(uint32_t seq, bool ok, uint32_t attempts, uint32_t next_max_payload) {
+static void emit_tx_done(uint32_t seq, bool ok, uint32_t attempts, uint32_t next_max_payload, bool acked) {
   sensei_LpwanEvent e = sensei_LpwanEvent_init_zero;
 
   e.which_body = sensei_LpwanEvent_tx_done_tag;
@@ -128,7 +129,16 @@ void svc_emit_tx_done(uint32_t seq, bool ok, uint32_t attempts, uint32_t next_ma
   e.tx_done.ok = ok;
   e.tx_done.attempts = attempts;
   e.tx_done.next_max_payload = next_max_payload;
+  e.tx_done.acked = acked;
   svc_emit(&e);
+}
+
+void svc_emit_tx_done(uint32_t seq, bool ok, uint32_t attempts, uint32_t next_max_payload) {
+  emit_tx_done(seq, ok, attempts, next_max_payload, false);
+}
+
+void svc_emit_tx_done_ack(uint32_t seq, bool ok, uint32_t attempts, bool acked) {
+  emit_tx_done(seq, ok, attempts, 0, acked);
 }
 
 void svc_emit_downlink(sensei_Radio radio, uint32_t port, const uint8_t *data, size_t len) {
@@ -197,6 +207,7 @@ static void fill_status(sensei_LpwanResponse *r) {
   r->which_payload = sensei_LpwanResponse_status_tag;
   memset(&r->status, 0, sizeof(r->status));
   r->status.dropped_events = link_dropped_events();
+  diag_fill_status(&r->status);
 #ifdef CONFIG_LPWAN_SHIELD_LTE
   lte_fill_status(&r->status);
 #endif
@@ -270,7 +281,7 @@ static sensei_LpwanResult run(const sensei_LpwanRequest *req, struct send_answer
 #endif
     }
 #ifdef CONFIG_LPWAN_SHIELD_LTE
-    return lte_send(req->seq, s->port, s->payload.bytes, s->payload.size);
+    return lte_send(req->seq, s->port, s->payload.bytes, s->payload.size, s->rai);
 #else
     return backend_off();
 #endif
@@ -286,6 +297,12 @@ static sensei_LpwanResult run(const sensei_LpwanRequest *req, struct send_answer
 #endif
     }
     return backend_off();
+  case sensei_LpwanRequest_lte_eval_tag:
+#ifdef CONFIG_LPWAN_SHIELD_LTE
+    return lte_eval();
+#else
+    return backend_off();
+#endif
   case sensei_LpwanRequest_lte_disconnect_tag:
     if (sm.tech == LPWAN_TECH_LORA) {
 #ifdef CONFIG_LPWAN_SHIELD_LORA

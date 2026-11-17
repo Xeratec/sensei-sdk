@@ -29,6 +29,7 @@
 #include <zephyr/kernel.h>
 
 #include "sensei/lpwan.pb.h"
+#include "sensei_lpwan/lpwan_rai.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -50,6 +51,7 @@ struct sensei_lpwan_config {
   uint32_t lte_psm_tau_s;    /* requested PSM periodic TAU in s, 0: PSM off */
   uint32_t lte_psm_active_s; /* requested PSM active time in s */
   bool lte_edrx;             /* request eDRX (cycle and window from Kconfig) */
+  uint8_t lte_rai; /* sensei_LteRai: RAI on the last chunk of a message (LTE_RAI_ONE_RESP: the server answers) */
   /* LoRaWAN (EU868, class A, OTAA) */
   uint8_t lora_dr; /* data rate 0 ... 15 */
   bool lora_adr;
@@ -117,6 +119,42 @@ uint32_t sensei_lpwan_lora_mtu(void);
  */
 int sensei_lpwan_radio_send(sensei_Radio radio, const uint8_t *chunk, size_t len, void (*done)(int err, void *user),
                             void *user);
+
+/**
+ * Like sensei_lpwan_radio_send() and says whether the chunk is the last of its message. For LTE the last chunk gets the
+ * RAI flag of the configuration (`lte_rai`): with LTE_RAI_ONE_RESP the shield waits for the answer of the server (the
+ * collector's ack or a downlink) and done() reports -EIO if none came, so the caller retries the chunk. Other chunks
+ * and the other radios are as without the flag.
+ */
+int sensei_lpwan_radio_send_ex(sensei_Radio radio, const uint8_t *chunk, size_t len, bool last,
+                               void (*done)(int err, void *user), void *user);
+
+/** What to do before a data uplink on LTE (from the connection evaluation, %CONEVAL). */
+enum sensei_lpwan_link {
+  SENSEI_LPWAN_LINK_OK,   /* send: the link is fine, or the evaluation is off or gave nothing */
+  SENSEI_LPWAN_LINK_BAD,  /* the energy estimate is bad: a caller that can wait may defer */
+  SENSEI_LPWAN_LINK_WAIT, /* the shield evaluates: on_up follows, ask again then */
+};
+
+/**
+ * Check the LTE link before a data uplink (not for alerts and status). The first call after the last result expired
+ * (`SENSEI_LPWAN_EVAL_VALID_S`) asks the shield and returns WAIT; the result is an event, on_up(LTE) follows and the
+ * next call answers from it. A shield without the evaluation, or one that gives no result, is not asked again for
+ * `SENSEI_LPWAN_EVAL_RETRY_S`: OK meanwhile. Call on the hook work queue (the app's).
+ */
+enum sensei_lpwan_link sensei_lpwan_lte_link_check(void);
+
+/** The last evaluation of the LTE link, for the Status of the node and the shell. */
+struct sensei_lpwan_lte_info {
+  sensei_EnergyEstimate energy;
+  int16_t rsrp_dbm;
+  uint8_t ce_level; /* 0 ... 3 */
+  sensei_RaiSupport rai;
+  uint32_t age_s; /* since the result came */
+};
+
+/** 0, or -ENODATA if no evaluation gave a result yet. */
+int sensei_lpwan_lte_info(struct sensei_lpwan_lte_info *out);
 
 /** Time until LoRa sends are accepted again after a refusal for the duty cycle, ms; 0: now. */
 uint32_t sensei_lpwan_lora_retry_after_ms(void);
@@ -191,6 +229,17 @@ bool sensei_lpwan_dfu_active(void);
 
 /** The version the shield reported at the last handshake (the node puts it in Status). -ENODATA: not read yet. */
 int sensei_lpwan_shield_version(sensei_LpwanVersion *out);
+
+/** Diagnostics of the shield, read with its status after each version read. */
+struct sensei_lpwan_shield_diag {
+  uint32_t reset_cause; /**< SENSEI_RESET_* bits of the shield's last start, 0: an older shield */
+  uint32_t boot_count;  /**< boots of the shield since its retained RAM was lost */
+  bool has_fault;       /**< the shield reported a fatal error of its previous run (kept until the node restarts) */
+  sensei_FaultRecord fault;
+};
+
+/** The shield's diagnostics (the node puts the reset cause in Status). -ENODATA: not read yet. */
+int sensei_lpwan_shield_diag(struct sensei_lpwan_shield_diag *out);
 
 /** One-line state for the shell and status messages. */
 const char *sensei_lpwan_state_str(void);

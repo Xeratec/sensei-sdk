@@ -16,3 +16,12 @@
 &wdt0 {
 	status = "okay";
 };
+
+/* Region for the modem trace (conf/debug.conf, CONFIG_NRF_MODEM_LIB_TRACE): 16 kB in the part of the modem's 40 kB
+ * that nothing else uses (after the IPC regions, which end at 0x4568). Nothing uses it in the Release build. */
+&sram0_ns_modem {
+	cpucell_cpuapp_ipc_shm_trace: sram0_ns_modem@4568 {
+		/* Modem trace */
+		reg = <0x4568 DT_SIZE_K(16)>;
+	};
+};

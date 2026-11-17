@@ -11,6 +11,13 @@
  *
  * msg_id identifies the message (the sender increments it), index runs 0 ... count - 1.
  * All chunks except the last carry mtu - 3 data bytes. A message has 1 ... 255 chunks.
+ *
+ * Acknowledgement (LTE: the server answers the last chunk of a message with it when it has nothing else to send):
+ *
+ *   ack = msg_id(1) | index(1) | 0
+ *
+ * It has the form of a chunk with count 0, which a chunk never has, so a receiver tells it from a chunk by that
+ * byte. msg_id and index are those of the chunk it answers (the last one of the message).
  */
 #ifndef SENSEI_LINK_FRAG_H
 #define SENSEI_LINK_FRAG_H
@@ -32,6 +39,14 @@ size_t sensei_frag_count(size_t len, size_t mtu);
  */
 size_t sensei_frag_chunk(uint8_t msg_id, const uint8_t *msg, size_t len, size_t mtu, size_t index, uint8_t *out,
                          size_t cap);
+
+#define SENSEI_FRAG_ACK_SIZE 3u
+
+/* Build the acknowledgement of chunk `index` of message `msg_id` into `out` (3 bytes). */
+void sensei_frag_ack(uint8_t msg_id, uint8_t index, uint8_t out[SENSEI_FRAG_ACK_SIZE]);
+
+/* True if the datagram is an acknowledgement (3 bytes, count 0). msg_id and index are set if not NULL. */
+bool sensei_frag_is_ack(const uint8_t *data, size_t len, uint8_t *msg_id, uint8_t *index);
 
 typedef enum {
   SENSEI_REASM_INCOMPLETE = 0,

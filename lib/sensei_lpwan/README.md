@@ -23,9 +23,9 @@ nRF5340 (master)                          nRF9151 (slave)
 | Folder | What |
 |---|---|
 | `include/sensei_lpwan/lpwan_link.h` | transfer scheme, flags, shared state machine API |
-| `src/` | protocol cores without OS: `link_slave.c` (nRF9151), `lpwan_master.c` (nRF5340), `lpwan_sm.c` (both), `lpwan_timers.c` (3GPP PSM and eDRX timer coding), `lpwan_lora.c` (LoRa payload limit, airtime, send time estimate, what a send gets before it is queued, the send tracking of both sides), `lpwan_dfu.c` (rules of the shield update: offsets, resume, SHA-256, checkpoints, MCUboot header and kind checks, repeats, an abort that undoes the marking, rate limit and link hold; flash and modem behind an ops table), `lpwan_upd.c` (what the client remembers about the update: when a swap may be running, the trial of a new image, the end of a session; pure) |
+| `src/` | protocol cores without OS: `link_slave.c` (nRF9151), `lpwan_master.c` (nRF5340), `lpwan_sm.c` (both), `lpwan_timers.c` (3GPP PSM and eDRX timer coding), `lpwan_lora.c` (LoRa payload limit, airtime, send time estimate, what a send gets before it is queued, the send tracking of both sides), `lpwan_dfu.c` (rules of the shield update: offsets, resume, SHA-256, checkpoints, MCUboot header and kind checks, repeats, an abort that undoes the marking, rate limit and link hold; flash and modem behind an ops table), `lpwan_upd.c` (what the client remembers about the update: when a swap may be running, the trial of a new image, the end of a session; pure), `lpwan_rai.c` (LTE uplink policy: the RAI flag of a chunk, the send sequence of RAI option, send and wait for the answer behind an ops table, the answer of the server, the connection evaluation classes and the decision when to ask; pure) |
 | `zephyr/` | nRF5340 client: `lpwan_client.c` (thread, shield power, shared SPI_A bus, radios, the update session), `lpwan_shell.c` |
-| `tests/` | host tests: master against slave through a simulated SPI with faults, state machine, timer coding, LoRa limits and airtime, a model of the LR1121 (duty cycle, NbTrans, repeats) with the shield and the client around it, `test_lpwan_dfu` (a shield update on a RAM flash, with gaps, resume after a restart, bad images, repeats, abort, the modem path, and over the SPI link with damaged frames), `test_lpwan_dfu_fuzz` (random chunking, lost replies, restarts and power loss in the middle of a flash operation), `test_lpwan_upd` (swap wait, trial, session rules) |
+| `tests/` | host tests: master against slave through a simulated SPI with faults, state machine, timer coding, LoRa limits and airtime, a model of the LR1121 (duty cycle, NbTrans, repeats) with the shield and the client around it, `test_lpwan_dfu` (a shield update on a RAM flash, with gaps, resume after a restart, bad images, repeats, abort, the modem path, and over the SPI link with damaged frames), `test_lpwan_dfu_fuzz` (random chunking, lost replies, restarts and power loss in the middle of a flash operation), `test_lpwan_upd` (swap wait, trial, session rules), `test_lpwan_rai` (RAI flag and sequence on a fake socket, ack or downlink as the answer, evaluation classes and decision) |
 
 ## Client API (nRF5340, `sensei_lpwan/lpwan.h`)
 
@@ -52,8 +52,50 @@ nRF5340 (master)                          nRF9151 (slave)
 - `sensei_lpwan_lora_provision()`: LoRaWAN keys at run time. They are sent to the shield and dropped from RAM (after
   three failed tries too: provision again). The shell command puts the keys in the shell history: bench use only.
 
+- `sensei_lpwan_radio_send_ex(radio, chunk, len, last, done, user)`: like `radio_send` and says if the chunk is the last of its
+  message. See "LTE: RAI, the answer of the server" below.
+- `sensei_lpwan_lte_link_check()` and `sensei_lpwan_lte_info()`: the connection evaluation (energy estimate, RSRP, coverage
+  level) of the LTE modem. See "LTE: connection evaluation".
+
 Power: with LoRa the shield is switched off `SENSEI_LPWAN_IDLE_S` after the last traffic, never while a send is in
 flight or its frame waits in the LR1121 (the LR1121 keeps the LoRaWAN session). With LTE it stays on and the modem sleeps in PSM.
+
+## LTE: RAI, the answer of the server
+
+Release assistance indication (RAI) tells the modem that the uplink is over, so that it leaves the RRC connected state at once
+and not after the inactivity timer of the network (seconds at 70 to 130 mW, see the SENSEI IEQ `firmware/docs/ENERGY.md`).
+Whether the network acts on it depends on the operator.
+
+- The app sets `struct sensei_lpwan_config.lte_rai` (`sensei_LteRai`: `LTE_RAI_OFF`, `LTE_RAI_LAST`, `LTE_RAI_ONE_RESP`) and sends the
+  chunks of a message with `sensei_lpwan_radio_send_ex(..., last, ...)`. Only the last chunk gets the flag (`Send.rai` of the
+  link, `lpwan_rai_for_chunk()`); earlier chunks never do.
+- The shield sets the socket option RAI for that send (`lpwan_rai_send()`, host tested on a fake socket). `LAST`: the option, the
+  send. `ONE_RESP`: the option `RAI_ONE_RESP`, the send, a short wait for the answer (`LPWAN_SHIELD_LTE_ANSWER_WAIT_S`, 8 s), then
+  `RAI_NO_DATA`. The option is also taken back when the wait ends without an answer.
+- **The server answers an LTE uplink with exactly one datagram**: the first pending downlink, or the ack of the SENSEI collector,
+  `msg_id | index | 0` (3 bytes, the form of a chunk with count 0, which no chunk has: `sensei_frag_ack()`). The shield
+  consumes an ack of the chunk it sent (`lpwan_answer_classify()`), forwards a downlink as `DownlinkRx` and counts either as the
+  answer. An ack of another chunk is dropped.
+- With `ONE_RESP` the send is ok only if the answer came: `TxDone.ok` false and `done(-EIO)` otherwise, and the app sends the chunk
+  again (the collector acknowledges a repeated last chunk again and stores the message once). `TxDone.acked` says the answer
+  came; `sensei lpwan status` shows the counts. A server that does not answer (an older collector, or another one) makes every
+  last chunk fail: use `LTE_RAI_LAST` or `OFF` with it.
+- The modem reports what the network supports (`LTE_LC_EVT_RAI_UPDATE`, `%RAI`): `LpwanStatus.rai_support` and the
+  evaluation event. A modem or network without it ignores the option; the shield logs a warning.
+
+## LTE: connection evaluation
+
+`sensei_lpwan_lte_link_check()` is for the app's uplink scheduler before a message that can wait (not alerts, not status). The
+shield runs `AT%CONEVAL` (`lte_lc_conn_eval_params_get()`: energy estimate, RSRP, RSRQ, coverage enhancement level, repetitions)
+on request (`lte_eval`, the result is the `conn_eval` event) and the client keeps the result for `SENSEI_LPWAN_EVAL_VALID_S`
+(600 s).
+
+- `SENSEI_LPWAN_LINK_OK`: send. `_BAD`: the estimate is excessive (`lpwan_energy_is_bad()`; unknown and poor are not bad), the
+  app may hold the data. `_WAIT`: the shield is evaluating, `on_up` follows when it knows.
+- No result (not registered, radio busy, an older shield that answers `LPWAN_UNSUPPORTED`): OK, and not asked again for
+  `SENSEI_LPWAN_EVAL_RETRY_S` (3600 s). `SENSEI_LPWAN_LTE_EVAL=n` makes the check always say OK.
+- `sensei_lpwan_lte_info()` gives the last result (RSRP, CE level, estimate, RAI of the cell, age) for the app's status.
+- Untested on hardware: how the modem answers `%CONEVAL` while it sleeps in PSM.
 
 ## Update of the shield (`sensei_lpwan_dfu_submit()`)
 
@@ -130,7 +172,7 @@ while GAP9 holds the bus and on again after it. Untested on hardware.
   for an hour (`sensei lpwan status` says so, the self-test returns `-EPROTONOSUPPORT`), then asks again from a fresh
   start of the shield: two damaged version bytes in a row look like another version, and the shield may have been updated.
   Bump the protocol version with every change of `lpwan.proto` or of the transfer rules that an older peer would misread
-  (now 2; the update messages (tags 40 to 46, `LpwanVersion` 4 to 7) are additions and did not bump it: an old shield app reports
+  (now 2; the update messages (tags 40 to 46, `LpwanVersion` 4 to 7) and the LTE additions (`Send.rai`, `lte_eval`, `ConnEval`, `TxDone.acked`, `LpwanStatus` 20 to 22) are additions and did not bump it: an old shield app reports
   `dfu_targets` 0, an old client never sends `dfu_confirm`, so a new shield image is not kept; the earlier changes: `SendInfo`, `TxDone.next_max_payload`, `SendInfo.next_max_payload`). `SendInfo.queued_seq`, `LpwanStatus.queued`,
   `late_tx_seq` and `late_tx_ok` are new fields: an older peer ignores them and treats BUSY as a failure.
 

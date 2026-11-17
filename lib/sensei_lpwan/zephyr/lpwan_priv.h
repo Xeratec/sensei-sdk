@@ -36,6 +36,8 @@ struct lpwan_info {
   bool proto_mismatch; /* the shield speaks another protocol version */
   uint32_t recoveries; /* shield power cycles after a lost link */
   uint32_t failures;   /* requests that failed in a row */
+  uint32_t lte_acked;  /* LTE sends the server answered (one-response RAI) */
+  uint32_t lte_noack;  /* ... and those it did not */
 };
 
 void sensei_lpwan_get_info(struct lpwan_info *info);

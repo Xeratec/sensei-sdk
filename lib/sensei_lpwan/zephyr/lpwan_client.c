@@ -190,7 +190,17 @@ static void gap9_listener(enum bus_user u, bool held, void *ctx) {
 
 /* ---- state ---- */
 
-enum cmd_type { CMD_CONNECT, CMD_DISCONNECT, CMD_POWER, CMD_SEND, CMD_SETTINGS, CMD_PROVISION, CMD_VERSION, CMD_DFU };
+enum cmd_type {
+  CMD_CONNECT,
+  CMD_DISCONNECT,
+  CMD_POWER,
+  CMD_SEND,
+  CMD_SETTINGS,
+  CMD_PROVISION,
+  CMD_VERSION,
+  CMD_DFU,
+  CMD_EVAL
+};
 
 struct cmd {
   enum cmd_type type;
@@ -259,6 +269,9 @@ static volatile uint8_t lora_next_max; /* payload the LR1121 reported for the ne
 static uint8_t send_buf[LTE_MTU];
 static size_t send_len;
 static sensei_Radio send_radio;
+static bool send_last;         /* the chunk is the last of its message (RAI) */
+static sensei_LteRai send_rai; /* the flag the request carried */
+static uint32_t lte_acked, lte_noack;
 static int64_t idle_deadline; /* 0: no deadline */
 static uint32_t uplink_ok, uplink_fail;
 
@@ -270,6 +283,21 @@ static int version_err;
 static struct k_spinlock ver_lock;
 static sensei_LpwanVersion shield_ver;
 static bool shield_ver_valid;
+
+/* Diagnostics of the shield from its last status (sensei_lpwan_shield_diag()): asked after each version read, so
+ * the node learns about a reset of the shield. The shield reports a fatal error only once: it is kept here. */
+static struct k_spinlock diag_lock;
+static struct sensei_lpwan_shield_diag shield_diag;
+static bool shield_diag_valid;
+
+/* Connection evaluation of the LTE modem (CONEVAL): the decision state and the last result. */
+static struct k_spinlock eval_lock;
+static struct lpwan_eval_state eval;
+static struct sensei_lpwan_lte_info eval_info; /* of the last valid result */
+static bool eval_info_valid;
+static int64_t eval_info_at;
+static sensei_RaiSupport rai_seen;
+#define EVAL_TIMEOUT_MS 30000u /* the shield evaluates for seconds at most */
 
 /* Update of the shield: the session holds the link (no data uplinks, no power gating) from dfu_begin until it ends
  * (apply, abort, an idle or too long session, or an error that ends it). One request at a time. The rules and the
@@ -450,6 +478,44 @@ static uint32_t op_now(void *c) {
   return (uint32_t)k_uptime_get();
 }
 
+/* ---- connection evaluation ---- */
+
+static void eval_flush(void) {
+  up_radio = lte_nb ? sensei_Radio_RADIO_NBIOT : sensei_Radio_RADIO_LTEM;
+  submit_work(&flush_work); /* the uplink queue asks again */
+}
+
+static void eval_result(const sensei_ConnEval *c) {
+  k_spinlock_key_t k = k_spin_lock(&eval_lock);
+  uint32_t now = (uint32_t)k_uptime_get();
+
+  lpwan_eval_result(&eval, now, c->valid, lpwan_energy_is_bad(c->energy));
+  if (c->rai_support != sensei_RaiSupport_RAI_UNKNOWN) {
+    rai_seen = c->rai_support;
+  }
+  if (c->valid) {
+    eval_info.energy = c->energy;
+    eval_info.rsrp_dbm = (int16_t)c->rsrp_dbm;
+    eval_info.ce_level = (uint8_t)MIN(c->ce_level, 3u);
+    eval_info_at = k_uptime_get();
+    eval_info_valid = true;
+  }
+  k_spin_unlock(&eval_lock, k);
+  LOG_INF("LTE evaluation: %s, energy %d, RSRP %d dBm, CE level %u, RAI of the cell %d",
+          c->valid ? "valid" : "no result", (int)c->energy, (int)c->rsrp_dbm, (unsigned)c->ce_level,
+          (int)c->rai_support);
+  eval_flush();
+}
+
+/* The request failed (an older shield, not connected): count it as an evaluation without result. */
+static void eval_failed(void) {
+  k_spinlock_key_t k = k_spin_lock(&eval_lock);
+
+  lpwan_eval_result(&eval, (uint32_t)k_uptime_get(), false, false);
+  k_spin_unlock(&eval_lock, k);
+  eval_flush();
+}
+
 static void op_on_event(void *c, const sensei_LpwanEvent *evt) {
   /* False: the event does not fit (the radio is not the active one, a tx_done of another send). */
   bool applied = lpwan_sm_event(&sm, evt);
@@ -484,7 +550,15 @@ static void op_on_event(void *c, const sensei_LpwanEvent *evt) {
       LOG_WRN("tx done, seq %u ignored (%s)", (unsigned)evt->tx_done.seq, lpwan_state_name(sm.state));
       break;
     }
-    LOG_INF("tx done, seq %u, %s", (unsigned)evt->tx_done.seq, evt->tx_done.ok ? "ok" : "failed");
+    LOG_INF("tx done, seq %u, %s%s", (unsigned)evt->tx_done.seq, evt->tx_done.ok ? "ok" : "failed",
+            evt->tx_done.acked ? ", answered" : "");
+    if (send_radio != sensei_Radio_RADIO_LORA) {
+      if (evt->tx_done.acked) {
+        lte_acked++;
+      } else if (send_rai == sensei_LteRai_LTE_RAI_ONE_RESP) {
+        lte_noack++;
+      }
+    }
     if (send_radio == sensei_Radio_RADIO_LORA) {
       lora_next_max = (uint8_t)MIN(evt->tx_done.next_max_payload, UINT8_MAX);
     }
@@ -523,6 +597,9 @@ static void op_on_event(void *c, const sensei_LpwanEvent *evt) {
     time_item.unix_s = evt->network_time.unix_time;
     time_item.radio = evt->network_time.radio;
     submit_work(&time_item.work);
+    break;
+  case sensei_LpwanEvent_conn_eval_tag:
+    eval_result(&evt->conn_eval);
     break;
   case sensei_LpwanEvent_error_tag:
     LOG_WRN("nRF9151 error %d: %s", (int)evt->error.code, evt->error.message);
@@ -642,6 +719,31 @@ static void mark_proto_bad(void) {
   proto_retry_at = k_uptime_get() + PROTO_RETRY_MS;
 }
 
+/* Reset cause, boot count and fatal error of the shield (LpwanStatus). A shield without the fields answers zeros. */
+static void read_diag(void) {
+  sensei_LpwanRequest rq = sensei_LpwanRequest_init_zero;
+  sensei_LpwanResponse rs;
+
+  rq.which_body = sensei_LpwanRequest_get_status_tag;
+  if (request(&rq, &rs, REQ_TO) != 0 || rs.which_payload != sensei_LpwanResponse_status_tag) {
+    return;
+  }
+  k_spinlock_key_t k = k_spin_lock(&diag_lock);
+
+  shield_diag.reset_cause = rs.status.reset_cause;
+  shield_diag.boot_count = rs.status.boot_count;
+  if (rs.status.has_fault) {
+    shield_diag.has_fault = true;
+    shield_diag.fault = rs.status.fault;
+  }
+  shield_diag_valid = true;
+  k_spin_unlock(&diag_lock, k);
+  if (rs.status.has_fault) {
+    LOG_WRN("shield: last run ended with a fatal error, reason %u, pc 0x%08x, thread %s",
+            (unsigned)rs.status.fault.reason, (unsigned)rs.status.fault.pc, rs.status.fault.thread);
+  }
+}
+
 static int read_version(sensei_LpwanVersion *out) {
   sensei_LpwanRequest rq = sensei_LpwanRequest_init_zero;
   sensei_LpwanResponse rs;
@@ -669,6 +771,7 @@ static int read_version(sensei_LpwanVersion *out) {
     snprintf(fw_str, sizeof(fw_str), "%u.%u.%u", (unsigned)rs.version.firmware.major,
              (unsigned)rs.version.firmware.minor, (unsigned)rs.version.firmware.patch);
     snprintf(modem_str, sizeof(modem_str), "%.23s", rs.version.modem);
+    read_diag();
   }
   return err;
 }
@@ -1035,6 +1138,9 @@ static void do_send(void) {
   s->radio = send_radio;
   s->port = send_radio == sensei_Radio_RADIO_LORA ? st.lora_port : 0;
   s->confirmed = send_radio == sensei_Radio_RADIO_LORA && st.lora_confirmed;
+  s->rai = send_radio == sensei_Radio_RADIO_LORA ? sensei_LteRai_LTE_RAI_OFF
+                                                 : lpwan_rai_for_chunk((sensei_LteRai)st.lte_rai, send_last);
+  send_rai = s->rai;
   s->payload.size = (pb_size_t)send_len;
   memcpy(s->payload.bytes, send_buf, send_len);
   idle_deadline = 0;
@@ -1064,6 +1170,20 @@ static void do_send(void) {
     uint32_t expected = rs.which_payload == sensei_LpwanResponse_send_tag ? rs.send.expected_ms : 0;
 
     arm_deadline(expected);
+  }
+}
+
+static void do_eval(void) {
+  sensei_LpwanRequest rq = sensei_LpwanRequest_init_zero;
+  sensei_LpwanResponse rs;
+
+  if (!link_up || sm.state != LPWAN_ST_CONNECTED || sm.tech != LPWAN_TECH_LTE) {
+    eval_failed();
+    return;
+  }
+  rq.which_body = sensei_LpwanRequest_lte_eval_tag;
+  if (request(&rq, &rs, REQ_TO) != 0) {
+    eval_failed(); /* refused (an older shield) or no answer: the result is not coming */
   }
 }
 
@@ -1393,6 +1513,9 @@ static void handle_cmd(const struct cmd *c) {
   case CMD_DFU:
     do_dfu();
     break;
+  case CMD_EVAL:
+    do_eval();
+    break;
   case CMD_SETTINGS:
     /* The next connect configures from the new settings. A connected LoRa or LTE link is
      * re-configured when it is released. If the radio is no longer an LPWAN one, let go. */
@@ -1585,6 +1708,11 @@ uint32_t sensei_lpwan_lora_mtu(void) {
 }
 
 int sensei_lpwan_radio_send(sensei_Radio r, const uint8_t *chunk, size_t len, void (*done)(int, void *), void *user) {
+  return sensei_lpwan_radio_send_ex(r, chunk, len, false, done, user);
+}
+
+int sensei_lpwan_radio_send_ex(sensei_Radio r, const uint8_t *chunk, size_t len, bool last, void (*done)(int, void *),
+                               void *user) {
   if (len == 0 || len > sizeof(send_buf)) {
     return -EINVAL;
   }
@@ -1609,6 +1737,7 @@ int sensei_lpwan_radio_send(sensei_Radio r, const uint8_t *chunk, size_t len, vo
   memcpy(send_buf, chunk, len);
   send_len = len;
   send_radio = r;
+  send_last = last;
   send_done = done;
   send_user = user;
   if (post(CMD_SEND, r, false) != 0) {
@@ -1619,6 +1748,53 @@ int sensei_lpwan_radio_send(sensei_Radio r, const uint8_t *chunk, size_t len, vo
 }
 
 /* ---- API ---- */
+
+enum sensei_lpwan_link sensei_lpwan_lte_link_check(void) {
+#ifdef CONFIG_SENSEI_LPWAN_LTE_EVAL
+  enum lpwan_eval_action act;
+  k_spinlock_key_t k = k_spin_lock(&eval_lock);
+  uint32_t now = (uint32_t)k_uptime_get();
+
+  act = lpwan_eval_decide(&eval, now, CONFIG_SENSEI_LPWAN_EVAL_VALID_S * 1000u, EVAL_TIMEOUT_MS,
+                          CONFIG_SENSEI_LPWAN_EVAL_RETRY_S * 1000u);
+  if (act == LPWAN_EVAL_ASK) {
+    eval.pending = true;
+    eval.asked = now;
+  }
+  k_spin_unlock(&eval_lock, k);
+  switch (act) {
+  case LPWAN_EVAL_BAD:
+    return SENSEI_LPWAN_LINK_BAD;
+  case LPWAN_EVAL_WAIT:
+    return SENSEI_LPWAN_LINK_WAIT;
+  case LPWAN_EVAL_ASK:
+    if (post(CMD_EVAL, sensei_Radio_RADIO_BLE, false) == 0) {
+      return SENSEI_LPWAN_LINK_WAIT;
+    }
+    k = k_spin_lock(&eval_lock);
+    eval.pending = false; /* the queue is full: send as usual */
+    k_spin_unlock(&eval_lock, k);
+    return SENSEI_LPWAN_LINK_OK;
+  default:
+    return SENSEI_LPWAN_LINK_OK;
+  }
+#else
+  return SENSEI_LPWAN_LINK_OK;
+#endif
+}
+
+int sensei_lpwan_lte_info(struct sensei_lpwan_lte_info *out) {
+  k_spinlock_key_t k = k_spin_lock(&eval_lock);
+  bool ok = eval_info_valid;
+
+  if (ok) {
+    *out = eval_info;
+    out->rai = rai_seen;
+    out->age_s = (uint32_t)((k_uptime_get() - eval_info_at) / 1000);
+  }
+  k_spin_unlock(&eval_lock, k);
+  return ok ? 0 : -ENODATA;
+}
 
 void sensei_lpwan_set_config(const struct sensei_lpwan_config *c) {
   k_spinlock_key_t k = k_spin_lock(&cfg_lock);
@@ -1699,6 +1875,17 @@ int sensei_lpwan_dfu_submit(const sensei_LpwanRequest *req, sensei_lpwan_dfu_don
 
 bool sensei_lpwan_dfu_active(void) { return atomic_get(&dfu_active) != 0; }
 
+int sensei_lpwan_shield_diag(struct sensei_lpwan_shield_diag *out) {
+  k_spinlock_key_t k = k_spin_lock(&diag_lock);
+  bool ok = shield_diag_valid;
+
+  if (ok) {
+    *out = shield_diag;
+  }
+  k_spin_unlock(&diag_lock, k);
+  return ok ? 0 : -ENODATA;
+}
+
 int sensei_lpwan_shield_version(sensei_LpwanVersion *out) {
   k_spinlock_key_t k = k_spin_lock(&ver_lock);
   bool ok = shield_ver_valid;
@@ -1760,6 +1947,8 @@ void sensei_lpwan_get_info(struct lpwan_info *i) {
   i->proto_mismatch = proto_bad;
   i->recoveries = recoveries;
   i->failures = master.failures;
+  i->lte_acked = lte_acked;
+  i->lte_noack = lte_noack;
   strncpy(i->fw, fw_str, sizeof(i->fw) - 1);
   strncpy(i->modem, modem_str, sizeof(i->modem) - 1);
 }

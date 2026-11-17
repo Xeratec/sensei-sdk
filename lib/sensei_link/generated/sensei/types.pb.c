@@ -20,6 +20,11 @@ PB_BIND(sensei_Empty, sensei_Empty, AUTO)
 PB_BIND(sensei_Version, sensei_Version, AUTO)
 
 
+PB_BIND(sensei_FaultRecord, sensei_FaultRecord, AUTO)
+
+
+
+
 
 
 

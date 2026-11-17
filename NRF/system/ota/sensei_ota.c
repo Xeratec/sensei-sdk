@@ -8,11 +8,14 @@
 
 #include <zephyr/dfu/mcuboot.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/mgmt/mcumgr/mgmt/callbacks.h>
 #include <zephyr/storage/flash_map.h>
+#include <zephyr/sys/atomic.h>
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/reboot.h>
 
 #include "ota/sensei_ota.h"
+#include "ota/sensei_ota_trial.h"
 
 LOG_MODULE_REGISTER(sensei_ota, CONFIG_SENSEI_OTA_LOG_LEVEL);
 
@@ -20,6 +23,28 @@ LOG_MODULE_REGISTER(sensei_ota, CONFIG_SENSEI_OTA_LOG_LEVEL);
 
 static sensei_ota_check_fn check_fn;
 static struct k_work_delayable trial_work;
+static atomic_t link_seen;
+
+void sensei_ota_link_seen(void) { atomic_set(&link_seen, 1); }
+
+/* Any SMP request, on any transport, shows that the image can still be updated. */
+static enum mgmt_cb_return smp_request_cb(uint32_t event, enum mgmt_cb_return prev, int32_t *rc, uint16_t *group,
+                                          bool *abort_more, void *data, size_t data_size) {
+  ARG_UNUSED(event);
+  ARG_UNUSED(prev);
+  ARG_UNUSED(rc);
+  ARG_UNUSED(group);
+  ARG_UNUSED(abort_more);
+  ARG_UNUSED(data);
+  ARG_UNUSED(data_size);
+  sensei_ota_link_seen();
+  return MGMT_CB_OK;
+}
+
+static struct mgmt_callback smp_request_hook = {
+    .callback = smp_request_cb,
+    .event_id = MGMT_EVT_OP_CMD_RECV,
+};
 
 enum sensei_ota_state sensei_ota_state(void) {
   return boot_is_img_confirmed() ? SENSEI_OTA_CONFIRMED : SENSEI_OTA_TRIAL;
@@ -88,21 +113,33 @@ uint32_t sensei_ota_image_id(void) {
 }
 
 static void trial_fn(struct k_work *work) {
-  int64_t up_s = k_uptime_get() / 1000;
-
   if (boot_is_img_confirmed()) { /* confirmed over SMP */
     LOG_INF("image confirmed by the host");
     return;
   }
-  if (IS_ENABLED(CONFIG_SENSEI_OTA_CONFIRM) && up_s >= CONFIG_SENSEI_OTA_CONFIRM_DELAY_S &&
-      (check_fn == NULL || check_fn())) {
+  struct sensei_ota_trial_in in = {
+      .up_s = (uint32_t)(k_uptime_get() / 1000),
+      .confirm_enabled = IS_ENABLED(CONFIG_SENSEI_OTA_CONFIRM),
+      .confirm_delay_s = CONFIG_SENSEI_OTA_CONFIRM_DELAY_S,
+      .timeout_s = CONFIG_SENSEI_OTA_TRIAL_TIMEOUT_S,
+      .need_link = IS_ENABLED(CONFIG_SENSEI_OTA_CONFIRM_NEEDS_LINK),
+      .link_seen = atomic_get(&link_seen) != 0,
+  };
+
+  /* The check may start work (self-tests): call it once the delay is over, not before. */
+  in.healthy = in.confirm_enabled && in.up_s >= in.confirm_delay_s && (check_fn == NULL || check_fn());
+  switch (sensei_ota_trial_step(&in)) {
+  case SENSEI_OTA_TRIAL_CONFIRM:
     if (sensei_ota_confirm() == 0) {
       return;
     }
-  }
-  if (up_s >= CONFIG_SENSEI_OTA_TRIAL_TIMEOUT_S) {
+    break;
+  case SENSEI_OTA_TRIAL_REVERT:
     LOG_ERR("image not confirmed after %d s, resetting to revert", CONFIG_SENSEI_OTA_TRIAL_TIMEOUT_S);
     sys_reboot(SYS_REBOOT_COLD);
+    break;
+  case SENSEI_OTA_TRIAL_WAIT:
+    break;
   }
   k_work_reschedule(&trial_work, K_SECONDS(CHECK_PERIOD_S));
 }
@@ -114,6 +151,7 @@ int sensei_ota_init(sensei_ota_check_fn check) {
   }
   LOG_WRN("image is on trial: confirm within %d s or it reverts", CONFIG_SENSEI_OTA_TRIAL_TIMEOUT_S);
   k_work_init_delayable(&trial_work, trial_fn);
+  mgmt_callback_register(&smp_request_hook);
   k_work_schedule(&trial_work, K_SECONDS(CHECK_PERIOD_S));
   return 0;
 }

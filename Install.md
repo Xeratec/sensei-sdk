@@ -34,26 +34,39 @@ pip install -r $ZEPHYR_BASE/scripts/requirements.txt
 
 # Install the GAP SDK
 
-Refer to https://github.com/Xeratec/Deeploy/blob/pr/gap9/GAP9.md to build a custom Docker image with the GAP SDK installed.
+The GAP9 code (`GAP9/`, the GAP9 side of the examples) builds with **GAP SDK 5.22.3**, in a Docker image tagged
+`gap9:v5.22.3-sensei`. Other SDK versions are not supported.
 
-Next run
+The SDK source is the branch `wiesep/sensei` of the gap-sdk (release-v5.22.3 plus three fixes for NNTool and the
+AutoTiler). The exact commit is pinned in `firmware/west.yml` of the node repository (project `gap-sdk`, group
+`gap9`, access to `pulp-platform/gap-sdk` needed):
+
 ```bash
-cd $GAP_SDK_HOME
-git stash
-git checkout
-git checkout wiesep/dev-v5.19.2
-git apply
+west config manifest.group-filter -- +gap9
+west update gap-sdk
 ```
 
-```sh
+To build the image, see [GAP9.md](https://github.com/Xeratec/Deeploy/blob/pr/gap9/GAP9.md) of Deeploy and
+`firmware/scripts/docker/README.md` of the node repository (section "GAP9 image"). Build the SDK from the pinned
+commit in the image:
+
+```bash
+cd $GAP_SDK_HOME
 make clean
 make all
+```
+
+## Debug probe (OpenOCD)
+
+Install the packages in the container, then build OpenOCD and start it:
+
+```bash
 apt update
 apt install -y autoconf automake bison build-essential curl device-tree-compiler doxygen flex git graphviz gtkwave libfdt-dev libftdi-dev libftdi1 libjpeg-dev libsamplerate-dev libsdl2-dev libsdl2-ttf-dev libsndfile1-dev libtool libusb-1.0-0-dev pkg-config python3-pip qtbase5-dev libqt5charts5-dev rsync sox wget qt6-base-dev libqt6serialport6-dev libgl1-mesa-dev telnet
 make openocd.all
 ```
 
-```sh
+```bash
 cd scripts
 openocd -d0 -c "gdb_port 3333; telnet_port 6666; tcl_port disabled" -f "interface/ftdi/olimex-arm-usb-ocd-h.cfg" -f "tcl/gap9revb.tcl"
 ```

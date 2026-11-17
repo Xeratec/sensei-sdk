@@ -8,7 +8,7 @@ Firmware update for apps that MCUboot starts (sysbuild with `SB_CONFIG_BOOTLOADE
 | mcumgr | selects the image and OS groups, the flash helpers and `REBOOT` | `SENSEI_OTA` |
 | SMP over Bluetooth | the standard GATT SMP service | `SENSEI_OTA_SMP_BT` |
 | SMP on a shared byte stream | mcumgr serial lines on a stream that also carries 0x00-delimited frames of another protocol (USB CDC) | `SENSEI_OTA_SMP_STREAM` |
-| Trial boot | after an update the image runs on trial: `sensei_ota_init()` confirms it when the app's check passes, and resets the node if that does not happen in time, so MCUboot reverts | `SENSEI_OTA_CONFIRM`, `_CONFIRM_DELAY_S`, `_TRIAL_TIMEOUT_S` |
+| Trial boot | after an update the image runs on trial: `sensei_ota_init()` confirms it when the app's check passes and the host has reached the node (an SMP request, or the app calls `sensei_ota_link_seen()`), and resets the node if that does not happen in time, so MCUboot reverts | `SENSEI_OTA_CONFIRM`, `_CONFIRM_NEEDS_LINK`, `_CONFIRM_DELAY_S`, `_TRIAL_TIMEOUT_S` |
 
 API: [`sensei_ota.h`](sensei_ota.h).
 
@@ -27,6 +27,12 @@ static bool healthy(void) { return my_app_is_fine(); }   /* must not block */
 
 sensei_ota_init(healthy);   /* at the end of start-up */
 ```
+
+Why the link counts: a new image that works but has a broken Bluetooth or USB link would otherwise confirm itself
+and could not be updated again. With `SENSEI_OTA_CONFIRM_NEEDS_LINK` (default on) it stays on trial until the host
+has talked to it, so MCUboot reverts it if it was never reachable. Development builds can turn the option off. The
+decision is the pure function in [`sensei_ota_trial.h`](sensei_ota_trial.h); its host test is in `tests/`
+(`make test-host` of the SDK).
 
 The app sets the access to the Bluetooth service with the Zephyr choice `MCUMGR_TRANSPORT_BT_PERM_*` (open by
 default; `RW_ENCRYPT` needs `BT_SMP`). The mcumgr groups beyond image and OS reset (echo, info, ...) are the app's

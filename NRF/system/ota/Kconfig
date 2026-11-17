@@ -22,6 +22,7 @@ menuconfig SENSEI_OTA
 	select NET_BUF
 	select ZCBOR
 	select REBOOT
+	select MCUMGR_MGMT_NOTIFICATION_HOOKS
 	help
 	  Helpers for apps that are started by MCUboot (see NRF/system/ota/README.md): the mcumgr image and
 	  OS groups, the Bluetooth SMP transport, SMP on a shared byte stream (USB CDC), and the trial boot
@@ -63,6 +64,16 @@ config SENSEI_OTA_CONFIRM
 	help
 	  A new image runs on trial. If this is off, only an SMP confirm makes it permanent; without one it
 	  reverts after SENSEI_OTA_TRIAL_TIMEOUT_S.
+
+config SENSEI_OTA_CONFIRM_NEEDS_LINK
+	bool "Confirm only after the host reached the node on the new image"
+	default y
+	depends on SENSEI_OTA_CONFIRM
+	help
+	  A new image confirms itself only after an SMP request or a host session was seen on it (the app
+	  calls sensei_ota_link_seen()). An image that passes the health check but can no longer be reached
+	  over BLE or USB then stays on trial and MCUboot reverts it, as it must for a link that cannot be
+	  updated again. Development builds can turn this off to confirm after the health check alone.
 
 config SENSEI_OTA_CONFIRM_DELAY_S
 	int "Run time before the image is confirmed, s"

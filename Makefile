@@ -6,7 +6,7 @@ help:
 	@echo ""
 	@echo "Targets:"
 	@echo "  format    - Format code using clang-format and yapf"
-	@echo "  test-host - Build and run the host tests of the libraries in lib/ (CMake, ctest)"
+	@echo "  test-host - Build and run the host tests of lib/ and NRF/system/ (CMake, ctest)"
 	@echo "  help      - Display this help message"
 
 format:
@@ -14,11 +14,11 @@ format:
 	@python3 ./scripts/run_clang_format.py -ri .
 	@python3 -m yapf -rpi .
 
-# Every lib/<name>/tests/CMakeLists.txt is a host test suite. Needs CMake, Ninja and, for sensei_secure, OpenSSL 3.
+# Every lib/<name>/tests/CMakeLists.txt and NRF/system/<name>/tests/CMakeLists.txt is a host test suite. Needs CMake, Ninja and, for sensei_secure, OpenSSL 3.
 BUILD_DIR ?= build
 
 test-host:
-	@set -e; for t in lib/*/tests/CMakeLists.txt; do \
+	@set -e; for t in lib/*/tests/CMakeLists.txt NRF/system/*/tests/CMakeLists.txt; do \
 	  src=$$(dirname $$t); name=$$(basename $$(dirname $$src)); \
 	  echo "== $$name"; \
 	  cmake -S $$src -B $(BUILD_DIR)/host/$$name -G Ninja >/dev/null; \

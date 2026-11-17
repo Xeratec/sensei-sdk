@@ -9,7 +9,9 @@
 /*
  * ILPS28QSW pressure and temperature sensor, I2C, one-shot mode.
  * sample_fetch triggers one conversion and waits for it. In between the sensor is powered down.
- * Untested on hardware.
+ * sensei_ilps28qsw_start() and _fetch() split the two steps for schedulers that sleep in between.
+ * The chip is set up at the first call (probe), not at boot, so the driver does not depend on the board rails
+ * being up when Zephyr initialises it. Untested on hardware.
  */
 
 #define DT_DRV_COMPAT st_ilps28qsw
@@ -22,11 +24,14 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/pm/device.h>
 
+#include <sensei/drivers/ilps28qsw.h>
+
 #include "ilps28qsw_reg.h"
 
 LOG_MODULE_REGISTER(ilps28qsw, CONFIG_SENSOR_LOG_LEVEL);
 
-/* Time to wait for one conversion at most (16 averaged samples take well below 20 ms). */
+/* Conversion time with 16 averaged samples (well below 20 ms), and how long sample_fetch waits at most. */
+#define ILPS_CONVERSION_MS 20
 #define ILPS_CONVERSION_TIMEOUT_MS 100
 
 struct ilps_config {
@@ -38,6 +43,8 @@ struct ilps_config {
 struct ilps_data {
   stmdev_ctx_t ctx;
   ilps28qsw_md_t md;
+  bool probed;
+  bool present;
   float press_hpa;
   float temp_c;
 };
@@ -54,26 +61,29 @@ static int32_t ilps_read_reg(void *handle, uint8_t reg, uint8_t *buf, uint16_t l
   return i2c_burst_read_dt(i2c, reg, buf, len);
 }
 
-static int ilps_sample_fetch(const struct device *dev, enum sensor_channel chan) {
+int sensei_ilps28qsw_start(const struct device *dev) {
+  struct ilps_data *data = dev->data;
+  int ret = sensei_ilps28qsw_probe(dev);
+
+  if (ret < 0) {
+    return ret;
+  }
+  return ilps28qsw_trigger_sw(&data->ctx, &data->md) ? -EIO : ILPS_CONVERSION_MS;
+}
+
+int sensei_ilps28qsw_fetch(const struct device *dev) {
   struct ilps_data *data = dev->data;
   ilps28qsw_all_sources_t src = {0};
   ilps28qsw_data_t d;
-  int64_t end = k_uptime_get() + ILPS_CONVERSION_TIMEOUT_MS;
 
-  if (chan != SENSOR_CHAN_ALL && chan != SENSOR_CHAN_PRESS && chan != SENSOR_CHAN_AMBIENT_TEMP) {
-    return -ENOTSUP;
+  if (!data->present) {
+    return -ENODEV;
   }
-  if (ilps28qsw_trigger_sw(&data->ctx, &data->md) != 0) {
+  if (ilps28qsw_all_sources_get(&data->ctx, &src) != 0) {
     return -EIO;
   }
-  do {
-    k_msleep(2);
-    if (ilps28qsw_all_sources_get(&data->ctx, &src) != 0) {
-      return -EIO;
-    }
-  } while (!src.drdy_pres && k_uptime_get() < end);
   if (!src.drdy_pres) {
-    return -ETIMEDOUT;
+    return -EBUSY;
   }
   if (ilps28qsw_data_get(&data->ctx, &data->md, &d) != 0) {
     return -EIO;
@@ -81,6 +91,24 @@ static int ilps_sample_fetch(const struct device *dev, enum sensor_channel chan)
   data->press_hpa = d.pressure.hpa;
   data->temp_c = d.heat.deg_c;
   return 0;
+}
+
+static int ilps_sample_fetch(const struct device *dev, enum sensor_channel chan) {
+  int64_t end = k_uptime_get() + ILPS_CONVERSION_TIMEOUT_MS;
+  int ret;
+
+  if (chan != SENSOR_CHAN_ALL && chan != SENSOR_CHAN_PRESS && chan != SENSOR_CHAN_AMBIENT_TEMP) {
+    return -ENOTSUP;
+  }
+  ret = sensei_ilps28qsw_start(dev);
+  if (ret < 0) {
+    return ret;
+  }
+  do {
+    k_msleep(2);
+    ret = sensei_ilps28qsw_fetch(dev);
+  } while (ret == -EBUSY && k_uptime_get() < end);
+  return ret == -EBUSY ? -ETIMEDOUT : ret;
 }
 
 static void float_to_val(float v, struct sensor_value *val) {
@@ -121,15 +149,15 @@ static int __maybe_unused ilps_pm_action(const struct device *dev, enum pm_devic
   }
 }
 
-static int ilps_init(const struct device *dev) {
+int sensei_ilps28qsw_probe(const struct device *dev) {
   const struct ilps_config *cfg = dev->config;
   struct ilps_data *data = dev->data;
   ilps28qsw_id_t id = {0};
   ilps28qsw_stat_t st = {0};
   ilps28qsw_bus_mode_t bm = {.filter = ILPS28QSW_AUTO};
 
-  if (!i2c_is_ready_dt(&cfg->i2c)) {
-    return -ENODEV;
+  if (data->probed) {
+    return data->present ? 0 : -ENODEV;
   }
   data->ctx.write_reg = ilps_write_reg;
   data->ctx.read_reg = ilps_read_reg;
@@ -143,7 +171,7 @@ static int ilps_init(const struct device *dev) {
 
   if (ilps28qsw_id_get(&data->ctx, &id) != 0 || id.whoami != ILPS28QSW_ID) {
     LOG_ERR("ILPS28QSW not found (id 0x%02x)", id.whoami);
-    return -ENODEV;
+    return -ENODEV; /* try again at the next call */
   }
   if (ilps28qsw_init_set(&data->ctx, ILPS28QSW_RESET) != 0) {
     return -EIO;
@@ -164,7 +192,19 @@ static int ilps_init(const struct device *dev) {
   ilps28qsw_ah_qvar_en_set(&data->ctx, PROPERTY_DISABLE);
   ilps28qsw_init_set(&data->ctx, ILPS28QSW_DRV_RDY);
   ilps28qsw_bus_mode_set(&data->ctx, &bm);
-  return ilps28qsw_mode_set(&data->ctx, &data->md) ? -EIO : 0;
+  if (ilps28qsw_mode_set(&data->ctx, &data->md) != 0) {
+    return -EIO;
+  }
+  data->probed = true;
+  data->present = true;
+  return 0;
+}
+
+static int ilps_init(const struct device *dev) {
+  const struct ilps_config *cfg = dev->config;
+
+  /* No traffic until the first call: the board rails may not be up yet. */
+  return i2c_is_ready_dt(&cfg->i2c) ? 0 : -ENODEV;
 }
 
 #define ILPS_AVG(n)                                                                                                    \

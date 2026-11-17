@@ -59,7 +59,8 @@
 
 LOG_MODULE_REGISTER(main);
 
-static const struct device *const bme_dev = DEVICE_DT_GET_ONE(bosch_bme680);
+/* BME688 driver of the SDK (NRF/drivers/sensor/bme688): forced mode, Bosch API. */
+static const struct device *const bme_dev = DEVICE_DT_GET(DT_NODELABEL(bme688));
 
 struct uart_data_t {
   void *fifo_reserved;

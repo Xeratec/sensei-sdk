@@ -25,9 +25,14 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/usb/usb_device.h>
 
+#include <sensei/drivers/as7331.h>
+#include <sensei/drivers/bh1730.h>
+#include <sensei/drivers/bme688.h>
 #include <sensei/drivers/gnss_m10s.h>
 #include <sensei/drivers/lis2duxs12_extra.h>
 #include <sensei/drivers/psram_aps12804o.h>
+#include <sensei/drivers/scd41.h>
+#include <sensei/drivers/sgp41.h>
 
 #include "pwr/pwr.h"
 
@@ -42,6 +47,11 @@ LOG_MODULE_REGISTER(drivers_test, LOG_LEVEL_INF);
 #define HAVE_LIS2DUXS12 (HAVE(lis2duxs12) && IS_ENABLED(CONFIG_LIS2DUX12))
 #define HAVE_ISM330DHCX (HAVE(ism330dhcx) && IS_ENABLED(CONFIG_ISM330DHCX))
 #define HAVE_ILPS28QSW (HAVE(ilps28qsw) && IS_ENABLED(CONFIG_ILPS28QSW_SENSEI))
+#define HAVE_SCD41 (HAVE(scd41) && IS_ENABLED(CONFIG_SCD41_SENSEI))
+#define HAVE_SGP41 (HAVE(sgp41) && IS_ENABLED(CONFIG_SGP41_SENSEI))
+#define HAVE_BME688 (HAVE(bme688) && IS_ENABLED(CONFIG_BME688_SENSEI))
+#define HAVE_AS7331 (HAVE(as7331) && IS_ENABLED(CONFIG_AS7331_SENSEI))
+#define HAVE_BH1730 (HAVE(bh1730) && IS_ENABLED(CONFIG_BH1730_SENSEI))
 #define HAVE_GNSS (HAVE(gnss) && IS_ENABLED(CONFIG_GNSS_M10S))
 #define HAVE_PSRAM (HAVE(psram) && IS_ENABLED(CONFIG_PSRAM_APS12804O))
 
@@ -207,6 +217,126 @@ static void test_ilps28qsw(void) {
 }
 #endif
 
+/*
+ * The sensor shield sensors: probe, one reading through the sensor API, back to the lowest power state (the
+ * driver powers a sensor down after sensor_sample_fetch() unless a pm_device_runtime_get() reference is held).
+ */
+#if HAVE_SCD41
+static void test_scd41(void) {
+  const struct device *dev = DEVICE_DT_GET(DT_NODELABEL(scd41));
+  struct sensor_value co2, t, rh;
+  char buf[80] = "";
+  int ret = -ENODEV;
+
+  if (device_is_ready(dev)) {
+    ret = sensei_scd41_probe(dev);
+  }
+  if (ret == 0) {
+    ret = sensor_sample_fetch(dev); /* single shot, 5 s */
+    if (ret == 0) {
+      sensor_channel_get(dev, SENSOR_CHAN_CO2, &co2);
+      sensor_channel_get(dev, SENSOR_CHAN_AMBIENT_TEMP, &t);
+      sensor_channel_get(dev, SENSOR_CHAN_HUMIDITY, &rh);
+      snprintf(buf, sizeof(buf), "%d ppm, %.2f C, %.1f %%RH (single shot, rail off after)", co2.val1,
+               sensor_value_to_double(&t), sensor_value_to_double(&rh));
+    }
+  }
+  result("SCD41", ret, buf);
+}
+#endif
+
+#if HAVE_SGP41
+static void test_sgp41(void) {
+  const struct device *dev = DEVICE_DT_GET(DT_NODELABEL(sgp41));
+  struct sensor_value voc, nox;
+  char buf[80] = "";
+  int ret = -ENODEV;
+
+  if (device_is_ready(dev)) {
+    ret = sensei_sgp41_probe(dev);
+  }
+  if (ret == 0) {
+    ret = sensor_sample_fetch(dev); /* conditioning and one measurement */
+    if (ret == 0) {
+      sensor_channel_get(dev, SENSEI_SGP41_CHAN_VOC_RAW, &voc);
+      sensor_channel_get(dev, SENSEI_SGP41_CHAN_NOX_RAW, &nox);
+      snprintf(buf, sizeof(buf), "SRAW_VOC %d, SRAW_NOX %d (%d s conditioning, rail off after)", voc.val1, nox.val1,
+               CONFIG_SGP41_SENSEI_CONDITIONING_S);
+    }
+  }
+  result("SGP41", ret, buf);
+}
+#endif
+
+#if HAVE_BME688
+static void test_bme688(void) {
+  const struct device *dev = DEVICE_DT_GET(DT_NODELABEL(bme688));
+  struct sensor_value t, p, rh, gas;
+  char buf[96] = "";
+  int ret = -ENODEV;
+
+  if (device_is_ready(dev)) {
+    ret = sensor_sample_fetch(dev); /* forced mode, sleeps again by itself */
+    if (ret == 0) {
+      sensor_channel_get(dev, SENSOR_CHAN_AMBIENT_TEMP, &t);
+      sensor_channel_get(dev, SENSOR_CHAN_PRESS, &p);
+      sensor_channel_get(dev, SENSOR_CHAN_HUMIDITY, &rh);
+      sensor_channel_get(dev, SENSOR_CHAN_GAS_RES, &gas);
+      snprintf(buf, sizeof(buf), "%.2f C, %.1f hPa, %.1f %%RH, gas %.0f ohm (forced mode)", sensor_value_to_double(&t),
+               sensor_value_to_double(&p) * 10.0, sensor_value_to_double(&rh), sensor_value_to_double(&gas));
+    }
+  }
+  result("BME688", ret, buf);
+}
+#endif
+
+#if HAVE_AS7331
+static void test_as7331(void) {
+  const struct device *dev = DEVICE_DT_GET(DT_NODELABEL(as7331));
+  struct sensor_value a, b, c;
+  char buf[96] = "";
+  int ret = -ENODEV;
+
+  if (device_is_ready(dev)) {
+    ret = sensei_as7331_probe(dev);
+  }
+  if (ret == 0) {
+    ret = sensor_sample_fetch(dev); /* 2 s */
+    if (ret == 0) {
+      sensor_channel_get(dev, SENSEI_AS7331_CHAN_UVA, &a);
+      sensor_channel_get(dev, SENSEI_AS7331_CHAN_UVB, &b);
+      sensor_channel_get(dev, SENSEI_AS7331_CHAN_UVC, &c);
+      snprintf(buf, sizeof(buf), "UVA %.3f, UVB %.3f, UVC %.3f uW/cm2 (power-down and bus switch open after)",
+               sensor_value_to_double(&a), sensor_value_to_double(&b), sensor_value_to_double(&c));
+    }
+  }
+  result("AS7331", ret, buf);
+}
+#endif
+
+#if HAVE_BH1730
+static void test_bh1730(void) {
+  const struct device *dev = DEVICE_DT_GET(DT_NODELABEL(bh1730));
+  struct sensor_value lux, vis, ir;
+  char buf[80] = "";
+  int ret = -ENODEV;
+
+  if (device_is_ready(dev)) {
+    ret = sensei_bh1730_probe(dev);
+  }
+  if (ret == 0) {
+    ret = sensor_sample_fetch(dev);
+    if (ret == 0) {
+      sensor_channel_get(dev, SENSOR_CHAN_LIGHT, &lux);
+      sensor_channel_get(dev, SENSEI_BH1730_CHAN_VIS_RAW, &vis);
+      sensor_channel_get(dev, SENSEI_BH1730_CHAN_IR_RAW, &ir);
+      snprintf(buf, sizeof(buf), "%d lux (raw %d, IR %d, power-down after)", lux.val1, vis.val1, ir.val1);
+    }
+  }
+  result("BH1730FVC", ret, buf);
+}
+#endif
+
 #if HAVE(pca6416a_20)
 static void test_pca6416(void) {
   const struct device *dev = DEVICE_DT_GET(DT_NODELABEL(pca6416a_20));
@@ -351,7 +481,32 @@ int main(void) {
 #if HAVE_ILPS28QSW
   test_ilps28qsw();
 #else
-  skip("ILPS28QSW", "driver not built (needs CONFIG_SENSEI)");
+  skip("ILPS28QSW", "driver not built (CONFIG_ILPS28QSW_SENSEI)");
+#endif
+#if HAVE_BME688
+  test_bme688();
+#else
+  skip("BME688", "driver not built (CONFIG_BME688_SENSEI)");
+#endif
+#if HAVE_SCD41
+  test_scd41();
+#else
+  skip("SCD41", "driver not built (CONFIG_SCD41_SENSEI and runtime PM)");
+#endif
+#if HAVE_SGP41
+  test_sgp41();
+#else
+  skip("SGP41", "driver not built (CONFIG_SGP41_SENSEI and runtime PM)");
+#endif
+#if HAVE_AS7331
+  test_as7331();
+#else
+  skip("AS7331", "driver not built (CONFIG_AS7331_SENSEI and runtime PM)");
+#endif
+#if HAVE_BH1730
+  test_bh1730();
+#else
+  skip("BH1730FVC", "driver not built (CONFIG_BH1730_SENSEI and runtime PM)");
 #endif
 #if HAVE(pca6416a_20)
   test_pca6416();

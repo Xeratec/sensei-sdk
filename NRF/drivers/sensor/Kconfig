@@ -6,11 +6,9 @@ config ILPS28QSW_SENSEI
 	default y
 	depends on DT_HAS_ST_ILPS28QSW_ENABLED
 	depends on SENSOR
-	depends on SENSEI
 	select I2C
 	help
 	  Driver for the ILPS28QSW on I2C, built on the SDK register library (NRF/system/third_party/st).
-	  Needs CONFIG_SENSEI=y, which compiles the register library.
 
 config LIS2DUXS12_EXTRA
 	bool "LIS2DUXS12 wake-up interrupt and deep power-down"
@@ -20,3 +18,82 @@ config LIS2DUXS12_EXTRA
 	help
 	  Helpers for what the Zephyr LIS2DUX12 driver lacks. They use the register library of the
 	  Zephyr ST HAL (hal_st), which the Zephyr driver already selects.
+
+config SENSEI_SENSIRION_HAL
+	bool
+	select I2C
+	help
+	  Sensirion common code (SCD4x repository) and its Zephyr I2C glue. Selected by the SCD41 and SGP41 drivers.
+
+config SCD41_SENSEI
+	bool "SCD41 CO2 sensor (single shot, power-gated)"
+	depends on DT_HAS_SENSEI_SCD41_ENABLED
+	depends on SENSOR
+	depends on PM_DEVICE_RUNTIME
+	select I2C
+	select REGULATOR
+	select SENSEI_SENSIRION_HAL
+	select SENSEI_SENSOR_MATH
+	help
+	  Driver for the SCD41 on the Sensirion SCD4x library (node "sensei,scd41"). Zephyr's own SCD4x driver
+	  (node "sensirion,scd41") cannot split a single shot into start and fetch and does not switch a rail.
+	  Off by default: it needs CONFIG_PM_DEVICE_RUNTIME=y, which the application sets.
+
+config SGP41_SENSEI
+	bool "SGP41 VOC and NOx sensor (raw ticks, power-gated)"
+	depends on DT_HAS_SENSIRION_SGP41_ENABLED
+	depends on SENSOR
+	depends on PM_DEVICE_RUNTIME
+	select I2C
+	select REGULATOR
+	select SENSEI_SENSIRION_HAL
+	select SENSEI_SENSOR_MATH
+	help
+	  Driver for the SGP41 on the Sensirion SGP41 library. Zephyr has only an SGP40 driver. The VOC and NOx
+	  index come from lib/sensei_gas_index (CONFIG_SENSEI_GAS_INDEX).
+	  Off by default: it needs CONFIG_PM_DEVICE_RUNTIME=y, which the application sets.
+
+config SGP41_SENSEI_CONDITIONING_S
+	int "Conditioning time of sensor_sample_fetch() in s"
+	default 10
+	range 0 10
+	depends on SGP41_SENSEI
+	help
+	  The sensor needs 10 s of conditioning (10 commands, 1 s apart) after a cold start before the NOx raw
+	  value is valid. With 0 only the VOC value is meaningful. The split API of the driver leaves the timing to
+	  the caller.
+
+config BME688_SENSEI
+	bool "BME688 T/RH/p/gas sensor (Bosch API, forced mode)"
+	default y
+	depends on DT_HAS_BOSCH_BME688_ENABLED
+	depends on SENSOR
+	select I2C
+	help
+	  Driver for the BME688 on the Bosch BME68x SensorAPI (node "bosch,bme688"). Zephyr's bme680 driver has
+	  fixed settings and blocks during a measurement. BSEC is not used.
+
+config AS7331_SENSEI
+	bool "AS7331 UV sensor (command mode, power-gated)"
+	depends on DT_HAS_AMS_AS7331_ENABLED
+	depends on SENSOR
+	depends on PM_DEVICE_RUNTIME
+	select I2C
+	select REGULATOR
+	select GPIO
+	select SENSEI_SENSOR_MATH
+	help
+	  Driver for the AS7331 on the AMS register library. Results in uW/cm2. Zephyr has no AS7331 driver.
+	  Off by default: it needs CONFIG_PM_DEVICE_RUNTIME=y, which the application sets.
+
+config BH1730_SENSEI
+	bool "BH1730FVC light sensor (one-time measurement, power-gated)"
+	depends on DT_HAS_SENSEI_BH1730_ENABLED
+	depends on SENSOR
+	depends on PM_DEVICE_RUNTIME
+	select I2C
+	select SENSEI_SENSOR_MATH
+	help
+	  Driver for the BH1730FVC on the ROHM register library (node "sensei,bh1730"). Zephyr's "rohm,bh1730"
+	  driver delivers lux only, blocks during a measurement and has no power-down.
+	  Off by default: it needs CONFIG_PM_DEVICE_RUNTIME=y, which the application sets.

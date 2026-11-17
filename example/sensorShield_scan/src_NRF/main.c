@@ -31,6 +31,7 @@
 
 #include <zephyr/drivers/i2c.h>
 #include <zephyr/drivers/uart.h>
+#include <zephyr/pm/device_runtime.h>
 
 #include <zephyr/logging/log.h>
 #include <zephyr/logging/log_ctrl.h>
@@ -49,6 +50,33 @@ static const struct device *i2c_b = DEVICE_DT_GET(DT_ALIAS(i2cb));
 static const struct device *const uart_dev = DEVICE_DT_GET_ONE(zephyr_cdc_acm_uart);
 
 LOG_MODULE_REGISTER(main);
+
+/* SCD41, SGP41, AS7331 and BH1730 sit behind power or isolation switches: they only answer while powered. */
+static const struct device *const switched_sensors[] = {
+    DEVICE_DT_GET_OR_NULL(DT_NODELABEL(scd41)),
+    DEVICE_DT_GET_OR_NULL(DT_NODELABEL(sgp41)),
+    DEVICE_DT_GET_OR_NULL(DT_NODELABEL(as7331)),
+    DEVICE_DT_GET_OR_NULL(DT_NODELABEL(bh1730)),
+};
+
+static void power_switched_sensors(bool on) {
+  for (size_t i = 0; i < ARRAY_SIZE(switched_sensors); i++) {
+    const struct device *dev = switched_sensors[i];
+
+    if (dev == NULL || !device_is_ready(dev)) {
+      continue;
+    }
+    if (on) {
+      int ret = pm_device_runtime_get(dev);
+
+      if (ret < 0) {
+        LOG_WRN("%s did not power up (%d)", dev->name, ret);
+      }
+    } else {
+      pm_device_runtime_put(dev);
+    }
+  }
+}
 
 #define GAP9_I2C_SLAVE 0
 #define I2C_SLAVE_L2_TEST_ADDRESS (0x1c019000)
@@ -108,7 +136,9 @@ int main(void) {
     i2c_scan(i2c_a);
 
     LOG_INF("Scanning I2C B Interface");
+    power_switched_sensors(true);
     i2c_scan(i2c_b);
+    power_switched_sensors(false);
 
 #if GAP9_I2C_SLAVE
     k_msleep(100);

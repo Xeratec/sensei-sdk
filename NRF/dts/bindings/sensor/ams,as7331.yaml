@@ -1,0 +1,30 @@
+# SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+# SPDX-License-Identifier: Apache-2.0
+---
+description: |
+  ams OSRAM AS7331 UVA, UVB and UVC sensor on I2C (0x74), command mode (one measurement per start). The
+  shield has no rail switch for it, only the I2C isolation switch (bus-switch-supply). Software power-down
+  (PD bit) is the suspend state.
+
+compatible: "ams,as7331"
+
+include: [sensor-device.yaml, i2c-device.yaml, sensei-sensor-supply.yaml]
+
+properties:
+  gain:
+    type: int
+    default: 10
+    description: |
+      CREG1 GAIN value, 0 to 11. The gain is 2048 / 2^value, so 10 is 2x. The default keeps the
+      16-bit result registers from saturating in direct sunlight.
+
+  integration-time:
+    type: int
+    default: 11
+    description: CREG1 TIME value, 0 to 14. The conversion takes 2^value ms, so 11 is 2048 ms.
+
+  ready-gpios:
+    type: phandle-array
+    description: |
+      READY output (open drain, on the sensor shield behind the expander). The driver configures it as an
+      input and as7331_ready() reads it. The measurement result is read when the status register says so.

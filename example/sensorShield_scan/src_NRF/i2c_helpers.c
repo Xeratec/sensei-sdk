@@ -56,7 +56,7 @@ void resole_address_to_name(uint8_t address, char *name) {
     strcpy(name, "ISM330DHCX (IMU)");
     break;
   case 0x76:
-    strcpy(name, "BME680 (Environmental Sensor)");
+    strcpy(name, "BME688 (Environmental Sensor)");
     break;
   case 0x20:
     strcpy(name, "PCA6416A (GPIO Expander)");

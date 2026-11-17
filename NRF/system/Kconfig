@@ -17,14 +17,6 @@ menuconfig SENSEI_PWR
 	help
 	  Enable the SENSEI Power Subsystem.
 
-config SENSEI_SDK_VENDOR_COPIES
-	bool "Build the SDK's own Bosch and Sensirion library copies"
-	default y
-	help
-	  The SDK carries its own copies of the Bosch BME68x and the Sensirion SCD4x, SGP41 and
-	  common libraries for the sensor shield. Turn this off if the application brings the upstream
-	  libraries, to avoid duplicate symbols.
-
 rsource "crypto/Kconfig"
 
 endmenu

@@ -54,6 +54,47 @@
         };
     };
 
+	/*
+	 * Power switches of the sensors. The rails are nRF5340 GPIOs (P0.04, P0.05), the I2C isolation switches
+	 * sit on the expander (P7, P10, P12). The sensor drivers enable them through vdd-supply and
+	 * bus-switch-supply when a sensor is resumed (pm_device_runtime_get) and disable them when it is
+	 * suspended. The startup delays are the power-up waits of the sensors. The gpio_scd41_pwr, gpio_sgp41_pwr
+	 * and gpio_ext_i2c_* labels name the same pins for code that drives them directly; do not use both ways in
+	 * one application. The debug board shield uses P0.04 and P0.05 too: disable these regulators with it.
+	 */
+	scd41_vdd: regulator-scd41-vdd {
+		compatible = "regulator-fixed";
+		regulator-name = "scd41-vdd";
+		enable-gpios = <&gpio0 4 GPIO_ACTIVE_HIGH>;
+		startup-delay-us = <50000>;
+	};
+
+	scd41_i2c_sw: regulator-scd41-i2c-sw {
+		compatible = "regulator-fixed";
+		regulator-name = "scd41-i2c-sw";
+		enable-gpios = <&pca6416a_20 12 GPIO_ACTIVE_HIGH>;
+	};
+
+	sgp41_vdd: regulator-sgp41-vdd {
+		compatible = "regulator-fixed";
+		regulator-name = "sgp41-vdd";
+		enable-gpios = <&gpio0 5 GPIO_ACTIVE_HIGH>;
+		startup-delay-us = <50000>;
+	};
+
+	sgp41_i2c_sw: regulator-sgp41-i2c-sw {
+		compatible = "regulator-fixed";
+		regulator-name = "sgp41-i2c-sw";
+		enable-gpios = <&pca6416a_20 7 GPIO_ACTIVE_HIGH>;
+	};
+
+	as7331_i2c_sw: regulator-as7331-i2c-sw {
+		compatible = "regulator-fixed";
+		regulator-name = "as7331-i2c-sw";
+		enable-gpios = <&pca6416a_20 10 GPIO_ACTIVE_HIGH>;
+		startup-delay-us = <10000>;
+	};
+
 	sensei_pwr: sensei_pwr {
 		compatible = "gpio-leds";
 		gpio_scd41_pwr: gpio_scd41_pwr {
@@ -78,8 +119,9 @@
 
 &i2c0 {
 	status = "okay";
-	bme688@76 {
-		compatible = "bosch,bme680";
+	/* BME688 on I2C_A, 0x76. Not power gated. Driver in NRF/drivers/sensor (Bosch API, forced mode). */
+	bme688: bme688@76 {
+		compatible = "bosch,bme688";
 		reg = <0x76>;
 		status = "okay";
 	};
@@ -103,6 +145,36 @@
         gpio-controller;
         ngpios = < 16 >;
         #gpio-cells = < 2 >;
+    };
+
+    /* SCD41 CO2 sensor on I2C_B, 0x62: rail P0.04, bus switch P12. Driver in NRF/drivers/sensor. */
+    scd41: scd41@62 {
+        compatible = "sensei,scd41";
+        reg = <0x62>;
+        vdd-supply = <&scd41_vdd>;
+        bus-switch-supply = <&scd41_i2c_sw>;
+    };
+
+    /* SGP41 VOC and NOx sensor on I2C_B, 0x59: rail P0.05, bus switch P7. */
+    sgp41: sgp41@59 {
+        compatible = "sensirion,sgp41";
+        reg = <0x59>;
+        vdd-supply = <&sgp41_vdd>;
+        bus-switch-supply = <&sgp41_i2c_sw>;
+    };
+
+    /* AS7331 UV sensor on I2C_B, 0x74: no rail switch, bus switch P10, READY on P4. */
+    as7331: as7331@74 {
+        compatible = "ams,as7331";
+        reg = <0x74>;
+        bus-switch-supply = <&as7331_i2c_sw>;
+        ready-gpios = <&pca6416a_20 4 GPIO_ACTIVE_HIGH>;
+    };
+
+    /* BH1730FVC light sensor on I2C_B, 0x29. No switch: software power-down. */
+    bh1730: bh1730@29 {
+        compatible = "sensei,bh1730";
+        reg = <0x29>;
     };
 
     /* ILPS28QSW pressure sensor on I2C_B, 0x5C. Not power gated. Driver in NRF/drivers/sensor. */

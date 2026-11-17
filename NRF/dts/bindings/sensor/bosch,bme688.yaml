@@ -1,0 +1,40 @@
+# SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+# SPDX-License-Identifier: Apache-2.0
+---
+description: |
+  Bosch BME688 temperature, humidity, pressure and gas sensor on I2C (0x76 or 0x77), driven with the
+  Bosch BME68x SensorAPI in forced mode with one heater step. Not a Zephyr "bosch,bme680" node: that driver
+  has fixed settings and blocks during a measurement. BSEC is not used.
+
+compatible: "bosch,bme688"
+
+include: [sensor-device.yaml, i2c-device.yaml]
+
+properties:
+  heater-temp-c:
+    type: int
+    default: 320
+    description: Heater plate temperature in degC (200 to 400).
+
+  heater-duration-ms:
+    type: int
+    default: 150
+    description: Heater duration in ms (1 to 4032).
+
+  oversampling-temperature:
+    type: int
+    default: 2
+    enum: [0, 1, 2, 4, 8, 16]
+    description: Temperature oversampling (0 skips the measurement).
+
+  oversampling-pressure:
+    type: int
+    default: 4
+    enum: [0, 1, 2, 4, 8, 16]
+    description: Pressure oversampling (0 skips the measurement).
+
+  oversampling-humidity:
+    type: int
+    default: 2
+    enum: [0, 1, 2, 4, 8, 16]
+    description: Humidity oversampling (0 skips the measurement).

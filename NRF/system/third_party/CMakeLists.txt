@@ -1,15 +1,6 @@
 # Copyright (c) 2025 ETH Zurich and University of Bologna
 # SPDX-License-Identifier: Apache-2.0
 
+# The vendor libraries of the sensor shield (Sensirion, Bosch, ST, ROHM, AMS) are compiled by the drivers in
+# NRF/drivers/sensor that use them. See README.md in this folder.
 add_subdirectory(max77654)
-add_subdirectory_ifdef(CONFIG_SHIELD_UT_SENSORSHIELD bh1730fvc)
-add_subdirectory_ifdef(CONFIG_SHIELD_UT_SENSORSHIELD st/ilps28qsw)
-add_subdirectory_ifdef(CONFIG_SHIELD_UT_SENSORSHIELD as7331)
-# The SDK's own copies of the Bosch and Sensirion libraries. An application that brings the
-# upstream libraries sets CONFIG_SENSEI_SDK_VENDOR_COPIES=n to avoid duplicate symbols.
-if(CONFIG_SENSEI_SDK_VENDOR_COPIES)
-  add_subdirectory_ifdef(CONFIG_SHIELD_UT_SENSORSHIELD bosch/bme688)
-  add_subdirectory_ifdef(CONFIG_SHIELD_UT_SENSORSHIELD sensirion/scd41)
-  add_subdirectory_ifdef(CONFIG_SHIELD_UT_SENSORSHIELD sensirion/common)
-  add_subdirectory_ifdef(CONFIG_SHIELD_UT_SENSORSHIELD sensirion/sgp41)
-endif()

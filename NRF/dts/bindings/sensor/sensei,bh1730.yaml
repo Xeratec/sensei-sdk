@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+# SPDX-License-Identifier: Apache-2.0
+---
+description: |
+  ROHM BH1730FVC ambient light sensor on I2C (0x29), one-time measurement of both channels. Not Zephyr's
+  "rohm,bh1730" driver: this one delivers the raw channels, splits start and fetch and uses the power-down
+  state (POWER bit) between measurements.
+
+compatible: "sensei,bh1730"
+
+include: [sensor-device.yaml, i2c-device.yaml]
+
+properties:
+  gain:
+    type: int
+    default: 2
+    enum: [0, 1, 2, 3]
+    description: GAIN register value. 0 is x1, 1 x2, 2 x64 and 3 x128.
+
+  itime:
+    type: int
+    default: 0xED
+    description: |
+      TIMING register value. The integration time is 2.7 ms * (256 - value) per channel; 0xED gives 51 ms.

@@ -1,0 +1,11 @@
+# SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+# SPDX-License-Identifier: Apache-2.0
+---
+description: |
+  Sensirion SGP41 VOC and NOx sensor on I2C (0x59). The driver delivers raw ticks (SRAW_VOC, SRAW_NOX) with
+  the Sensirion SGP41 library; the VOC and NOx index come from lib/sensei_gas_index. Only one instance is
+  possible (the Sensirion library keeps the I2C address in a global).
+
+compatible: "sensirion,sgp41"
+
+include: [sensor-device.yaml, i2c-device.yaml, sensei-sensor-supply.yaml]

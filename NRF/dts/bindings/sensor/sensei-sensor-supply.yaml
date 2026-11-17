@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+# SPDX-License-Identifier: Apache-2.0
+---
+description: |
+  Power switches of a sensor on the SENSEI sensor shield. The driver enables them when the sensor is
+  resumed (pm_device_runtime_get) and disables them when it is suspended (pm_device_runtime_put).
+
+properties:
+  vdd-supply:
+    type: phandle
+    description: |
+      Regulator that powers the sensor (regulator-fixed with the enable GPIO of the rail switch).
+      Enabled first. Put the power-up time of the sensor in its startup-delay-us.
+
+  bus-switch-supply:
+    type: phandle
+    description: |
+      Regulator that closes the I2C isolation switch between the sensor and its bus (regulator-fixed on a
+      GPIO expander pin). Enabled after vdd-supply, disabled before it.

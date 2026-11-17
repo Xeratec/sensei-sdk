@@ -1,0 +1,12 @@
+# SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+# SPDX-License-Identifier: Apache-2.0
+---
+description: |
+  Sensirion SCD41 CO2, temperature and humidity sensor on I2C (0x62), driven in single-shot mode with the
+  Sensirion SCD4x library. A node with this compatible is a different driver from Zephyr's
+  "sensirion,scd41" one: it splits start and fetch, switches the rail and can power down. Only one
+  instance is possible (the Sensirion library keeps the I2C address in a global).
+
+compatible: "sensei,scd41"
+
+include: [sensor-device.yaml, i2c-device.yaml, sensei-sensor-supply.yaml]

@@ -7,6 +7,11 @@ This example probes every IC the SDK has a driver for, prints one reading and pu
 | LIS2DUXS12 | Zephyr and `lis2duxs12_extra` | deep power-down |
 | ISM330DHCX | Zephyr | odr 0 |
 | ILPS28QSW | SDK | one-shot, powers itself down |
+| BME688 | SDK (Bosch API) | forced mode, sleeps by itself |
+| SCD41 | SDK (Sensirion library) | single shot, then rail off (5 s) |
+| SGP41 | SDK (Sensirion library) | conditioning and a measurement, then rail off (about 10 s) |
+| AS7331 | SDK (register library) | measurement, then power-down and bus switch open (about 2 s) |
+| BH1730FVC | SDK (register library) | measurement, then power-down |
 | PCA6416A, TCAL6408 | Zephyr | none |
 | MAX-M10S | SDK | software standby |
 | APS12804O | SDK, node disabled | half-sleep, then off |

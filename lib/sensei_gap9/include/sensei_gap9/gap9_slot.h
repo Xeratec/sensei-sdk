@@ -188,10 +188,46 @@ static inline int sensei_g9_slot_parse(sensei_g9_read_fn rd, void *ctx, uint32_t
 #define SENSEI_G9_SSBL_LO 0x1C100000U
 #define SENSEI_G9_SSBL_HI 0x1C190000U
 
+/* ---- Hand-off record: the slot the SSBL started ---- */
+
+/**
+ * The SSBL starts the other slot when the first one does not load, so the pad alone does not tell the app which slot it
+ * runs from. Right before it launches the app, the SSBL writes this record to L2: 4 words (magic, slot, ~slot, 0).
+ * Address: the top of L2 priv0 (0x1C000000..0x1C010000), 256 bytes below its end. Why it survives until the app reads
+ * it:
+ *   - L2 shared is not usable: the runtime allocator powers down every 128 KiB bank that holds no allocation (GVSoC
+ *     shows it: the SSBL cannot read back a word above its own banks), so a word in the heap is lost. L2 priv0 is not
+ *     power-managed, and the app (CONFIG_MALLOC_NO_L2_PRIV=y) has no heap there. Its sections (.data_fc, the IRQ stack)
+ *     start at 0x1C000004 and use a few KiB;
+ *   - sensei_g9_app_check() refuses an app section that covers the record, so the loader never writes it, and the SSBL
+ *     writes the record after the load;
+ *   - the app reads the record at the start of main().
+ * Nothing else reads or clears it: a reset starts the SSBL again, which writes it again.
+ */
+#define SENSEI_G9_HANDOFF_ADDR 0x1C00FF00U
+#define SENSEI_G9_HANDOFF_SIZE 16u          /* no app section may cover it (sensei_g9_app_check) */
+#define SENSEI_G9_HANDOFF_MAGIC 0x4F483953U /* "S9HO" */
+
+/** Fill the record for `slot`. */
+static inline void sensei_g9_handoff_encode(volatile uint32_t rec[4], uint8_t slot) {
+  rec[1] = slot;
+  rec[2] = ~(uint32_t)slot;
+  rec[3] = 0;
+  rec[0] = SENSEI_G9_HANDOFF_MAGIC; /* the magic last */
+}
+
+/** The slot of a record, or -ENOENT if there is none (reset without the SSBL, JTAG load) or it is damaged. */
+static inline int sensei_g9_handoff_decode(const volatile uint32_t rec[4]) {
+  if (rec[0] != SENSEI_G9_HANDOFF_MAGIC || rec[1] > SENSEI_G9_SLOT_B || rec[2] != ~rec[1]) {
+    return -ENOENT;
+  }
+  return (int)rec[1];
+}
+
 /**
  * Check the descriptor of the app at `app_off` (size `app_size`) before pi_app_bin_load() trusts it: magic, number of
- * areas, no XIP, every area inside the app, no L2 area over the SSBL. The CRC of the section data is not checked here.
- * Returns 0, -EBADMSG (not an app binary), -EINVAL (damaged descriptor) or -EIO.
+ * areas, no XIP, every area inside the app, no L2 area over the SSBL or the hand-off record. The CRC of the section
+ * data is not checked here. Returns 0, -EBADMSG (not an app binary), -EINVAL (damaged descriptor) or -EIO.
  */
 static inline int sensei_g9_app_check(sensei_g9_read_fn rd, void *ctx, uint32_t app_off, uint32_t app_size) {
   uint8_t h[SENSEI_G9_APP_AREA_SIZE];
@@ -233,7 +269,8 @@ static inline int sensei_g9_app_check(sensei_g9_read_fn rd, void *ctx, uint32_t 
       return -EINVAL;
     }
     if (ptr >= SENSEI_G9_L2_BASE && ptr < SENSEI_G9_L2_END) {
-      if (size > SENSEI_G9_L2_END - ptr || (ptr < SENSEI_G9_SSBL_HI && ptr + size > SENSEI_G9_SSBL_LO)) {
+      if (size > SENSEI_G9_L2_END - ptr || (ptr < SENSEI_G9_SSBL_HI && ptr + size > SENSEI_G9_SSBL_LO) ||
+          (ptr < SENSEI_G9_HANDOFF_ADDR + SENSEI_G9_HANDOFF_SIZE && ptr + size > SENSEI_G9_HANDOFF_ADDR)) {
         return -EINVAL;
       }
     }

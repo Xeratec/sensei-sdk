@@ -18,7 +18,7 @@ numbers, status to errno, which job needs the camera bus), so any message schema
 | Folder | Side | What |
 |---|---|---|
 | `include/sensei_gap9/gap9_link.h` | both | frame types, flags, buffer sizes, timing constants |
-| `include/sensei_gap9/gap9_slot.h` | all | A/B firmware slots in the GAP9 MRAM: layout, slot format, checks of the SSBL (header only) |
+| `include/sensei_gap9/gap9_slot.h` | all | A/B firmware slots in the GAP9 MRAM: layout, slot format, checks of the SSBL, hand-off record of the SSBL (header only) |
 | `src/gap9_core.c`, `gap9_core.h` | nRF5340 | protocol state machine: job queue, boot, frames, retries, timeouts, bus lock, idle power-off, hold, reboot (no OS, host tested) |
 | `zephyr/` | nRF5340 | `gap9_link.c` (thread, SPIS3, trigger line, slot line, power, shared SPI_A), `gap9_shell.c`, `gap9_link.overlay` |
 | `gap9/gap9_side.c`, `gap9_side.h` | GAP9 | SPI master, trigger line, hello, fetch, result, bus free (GAP SDK) |

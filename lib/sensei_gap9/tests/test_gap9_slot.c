@@ -239,6 +239,24 @@ static void test_app_check(void) {
   build();
   area(1, 0x900, SENSEI_G9_L2_END - 0x10, 0x100, 0); /* past the L2 */
   CHECK(sensei_g9_app_check(rd, NULL, a, APP_SIZE) == -EINVAL);
+  /* over the hand-off record */
+  {
+    uint32_t h = SENSEI_G9_HANDOFF_ADDR;
+
+    build();
+    area(1, 0x900, h - 0x40, 0x41, 0);
+    CHECK(sensei_g9_app_check(rd, NULL, a, APP_SIZE) == -EINVAL);
+    build();
+    area(1, 0x900, h + SENSEI_G9_HANDOFF_SIZE - 4, 0x100, 0);
+    CHECK(sensei_g9_app_check(rd, NULL, a, APP_SIZE) == -EINVAL);
+    build();
+    area(1, 0x900, 0x1C000004, 0x2000, 0); /* the usual FC data below it */
+    area(0, 0x600, h + SENSEI_G9_HANDOFF_SIZE, 0x100, 0);
+    CHECK(sensei_g9_app_check(rd, NULL, a, APP_SIZE) == 0);
+    build();
+    area(1, 0x900, h - 0x40, 0x40, 0); /* ends at the record */
+    CHECK(sensei_g9_app_check(rd, NULL, a, APP_SIZE) == 0);
+  }
   /* sections that are not loaded: L1, overlay, empty */
   build();
   area(1, 0x900, 0x10000004, 0x100, 0);
@@ -249,7 +267,24 @@ static void test_app_check(void) {
   CHECK(sensei_g9_app_check(rd, NULL, a, APP_SIZE) == 0);
 }
 
+static void test_handoff(void) {
+  volatile uint32_t rec[4] = {0, 0, 0, 0};
+
+  /* in L2 priv0, away from the app's sections that start at its bottom */
+  CHECK(SENSEI_G9_HANDOFF_ADDR >= 0x1C008000u && SENSEI_G9_HANDOFF_ADDR + SENSEI_G9_HANDOFF_SIZE <= 0x1C010000u);
+  CHECK(sensei_g9_handoff_decode(rec) == -ENOENT); /* no record */
+  sensei_g9_handoff_encode(rec, SENSEI_G9_SLOT_A);
+  CHECK(sensei_g9_handoff_decode(rec) == SENSEI_G9_SLOT_A);
+  sensei_g9_handoff_encode(rec, SENSEI_G9_SLOT_B);
+  CHECK(sensei_g9_handoff_decode(rec) == SENSEI_G9_SLOT_B);
+  rec[2] = 0; /* damaged */
+  CHECK(sensei_g9_handoff_decode(rec) == -ENOENT);
+  sensei_g9_handoff_encode(rec, 2); /* not a slot */
+  CHECK(sensei_g9_handoff_decode(rec) == -ENOENT);
+}
+
 int main(void) {
+  test_handoff();
   test_layout();
   test_good();
   test_bad_slot();

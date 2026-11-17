@@ -13,7 +13,8 @@
  * SENSEI second stage bootloader. Starts the firmware of slot A or B of the MRAM (lib/sensei_gap9/include/sensei_gap9/
  * gap9_slot.h). The nRF5340 selects the slot with the level of GAP9 pad 56 (P1.04): low A, high B. A slot that is not
  * a complete image or whose app does not load (header, descriptor, CRC of the sections) is skipped: the other slot
- * boots. If both fail, GAP9 waits (the nRF5340 powers it off after its boot timeout; JTAG recovers it).
+ * boots. If both fail, GAP9 waits (the nRF5340 powers it off after its boot timeout; JTAG recovers it). Before the
+ * launch it writes a hand-off record with the slot that started (the app cannot tell after a fallback).
  *
  * Build flags: SENSEI_SSBL_FORCE_SLOT=0|1 uses that slot instead of the pad (GVSoC does not model it),
  * SENSEI_SSBL_BOOT_SAFETY_US is the watchdog the app disarms in its start-up (runtime system init).
@@ -117,6 +118,8 @@ int main(void) {
       if (pi_app_boot_safety_arm(SENSEI_SSBL_BOOT_SAFETY_US) != PI_OK) {
         printf("watchdog failed\n");
       }
+      /* The slot that started, for the app (gap9_slot.h, SENSEI_G9_HANDOFF_ADDR). */
+      sensei_g9_handoff_encode((volatile uint32_t *)SENSEI_G9_HANDOFF_ADDR, slot);
       printf_deinit();
       pi_app_bin_launch(&app);
     }

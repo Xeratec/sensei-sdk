@@ -43,6 +43,13 @@
           "properties": {
             "volumes": [
               {
+                "name": "app",
+                "partitions": [
+                  "readfs_mram"
+                ],
+                "bootable": true
+              },
+              {
                 "name": "factory",
                 "partitions": [
                   "partition_table",
@@ -51,7 +58,15 @@
                 ]
               }
             ],
-            "size": 32144
+            "size": 32016
+          }
+        },
+        {
+          "name": "readfs_mram",
+          "template": "readfs",
+          "properties": {
+            "files": [],
+            "size": 128
           }
         },
         {

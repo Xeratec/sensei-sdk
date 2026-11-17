@@ -23,8 +23,12 @@ and the launch are the same SDK calls. The partition and volume table, the boot 
      ([`gap9_slot.h`](../../lib/sensei_gap9/include/sensei_gap9/gap9_slot.h), host tested);
    - the app descriptor (area count, no XIP, no section over the SSBL in the upper L2);
    - `pi_app_bin_load()` with the CRC32 of every section.
-3. Arm the 200 ms boot watchdog and launch the app. The SDK runtime disarms it in its start-up, the app needs no code.
-4. If neither slot boots, print and wait. The nRF5340 powers GAP9 off after its boot timeout. JTAG recovers the board.
+3. Write the hand-off record: magic, slot, ~slot at `SENSEI_G9_HANDOFF_ADDR` (L2 priv0, 0x1C00FF00,
+   [`gap9_slot.h`](../../lib/sensei_gap9/include/sensei_gap9/gap9_slot.h)). It names the slot that started, after any fallback; the app
+   reads it at the start of `main()`. L2 shared is no place for it: the runtime powers down banks without allocations.
+   The app check refuses a section that covers the record.
+4. Arm the 200 ms boot watchdog and launch the app. The SDK runtime disarms it in its start-up, the app needs no code.
+5. If neither slot boots, print and wait. The nRF5340 powers GAP9 off after its boot timeout. JTAG recovers the board.
 
 The signature and the SHA-256 of the image are not checked here: the nRF5340 checks them before an update goes live. A
 slot that was damaged later fails its section CRC or its header and is skipped. A running firmware that hangs is not the
@@ -36,12 +40,16 @@ SSBL's business either: the nRF5340 sees no HELLO and boots the other slot.
 
 | Offset | Size | What |
 |---|---|---|
-| 0x000000 | 0x10000 | boot area: FSBL, meta table, SSBL (section fixed to 28 KiB, the SSBL needs 23.7 KiB compressed), partition and volume table (padded) |
+| 0x000000 | 0x10000 | boot area: FSBL, meta table, SSBL (section fixed to 28 KiB, the SSBL needs 23.7 KiB compressed), partition and volume table (padded), a 128 B `readfs_mram` placeholder |
 | 0x010000 | 0x04000 | checkpoint of the OTA writer |
 | 0x014000 | 0xF6000 | slot A |
 | 0x10A000 | 0xF6000 | slot B |
 
 A slot is an MCUboot image whose payload is a container (app binary and readfs of gapy); the format is in `gap9_slot.h`.
+The app mounts its readfs with the stock driver, which looks up a partition `readfs_mram` in the volume `app` of the partition
+table; the placeholder is that entry (its data is never read, the app opens the readfs of its slot). The volume table section is
+shrunk by the same amount so the slots do not move.
+
 The boot area is written by the factory flash only: the SSBL is never updated over the air (the FSBL cannot fall back to
 another SSBL). The sizes of the boot area sections are fixed in the layout so that the slots do not move; the GVSoC test
 checks the offsets.
@@ -62,8 +70,9 @@ images are signed with imgtool by the node's tools.
 
 `tools/ssbl_docker.sh test` runs `test/gvsoc_cases.sh` in Docker: it builds a test app twice, packs two slots, builds the SSBL
 with a forced slot (GVSoC does not model the pad) and runs it. Cases: slot A boots, slot B boots, B with a wrong section CRC,
-B erased, B without TLV areas fall back to A, A with a wrong CRC falls back to B, both damaged. It also checks the layout
-offsets. Prints `SSBL TEST PASS`. The slot checks without GVSoC are in `lib/sensei_gap9/tests`.
+B erased, B without TLV areas fall back to A, A with a wrong CRC falls back to B, both damaged. The test app prints the slot of
+the hand-off record: after a fallback it names the slot that started. It also checks the layout offsets. Prints `SSBL TEST PASS`.
+The slot checks without GVSoC are in `lib/sensei_gap9/tests`.
 
 ## Hardware checks (untested on hardware)
 

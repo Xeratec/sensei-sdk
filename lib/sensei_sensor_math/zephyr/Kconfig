@@ -1,0 +1,10 @@
+# SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+# SPDX-License-Identifier: Apache-2.0
+#
+# Authors:
+# - Philip Wiese <wiesep@iis.ee.ethz.ch>
+
+config SENSEI_SENSOR_MATH
+	bool "SENSEI sensor math (unit conversions of the sensor shield drivers)"
+	help
+	  Conversions and timings of lib/sensei_sensor_math. The shield drivers in NRF/drivers/sensor select it.

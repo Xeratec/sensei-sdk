@@ -12,4 +12,14 @@ config SENSEI
 rsource "drivers/Kconfig"
 rsource "system/Kconfig"
 
+# Portable libraries of lib/
+rsource "../lib/sensei_link/zephyr/Kconfig"
+rsource "../lib/sensei_busarb/zephyr/Kconfig"
+rsource "../lib/sensei_gap9/zephyr/Kconfig"
+rsource "../lib/sensei_lpwan/zephyr/Kconfig"
+rsource "../lib/sensei_delta/zephyr/Kconfig"
+rsource "../lib/sensei_secure/zephyr/Kconfig"
+rsource "../lib/sensei_gas_index/zephyr/Kconfig"
+rsource "../lib/sensei_sensor_math/zephyr/Kconfig"
+
 endmenu

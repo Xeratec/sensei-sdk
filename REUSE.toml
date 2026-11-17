@@ -32,8 +32,9 @@ SPDX-License-Identifier = "CC-BY-ND-4.0"
 
 [[annotations]]
 path = [
-    "NRF/system/third_party/bosch/bme688/*.c",
-    "NRF/system/third_party/bosch/bme688/*.h"
+    "NRF/system/third_party/bosch/bme68x/*.c",
+    "NRF/system/third_party/bosch/bme68x/*.h",
+    "NRF/system/third_party/bosch/bme68x/LICENSE"
 ]
 SPDX-FileCopyrightText = "2023 Bosch Sensortec GmbH"
 SPDX-License-Identifier = "BSD-3-Clause"
@@ -65,9 +66,19 @@ SPDX-License-Identifier = "BSD-3-Clause"
 [[annotations]]
 path = [
   "NRF/system/third_party/sensirion/**/*.c",
-  "NRF/system/third_party/sensirion/**/*.h"
+  "NRF/system/third_party/sensirion/**/*.h",
+  "NRF/system/third_party/sensirion/**/LICENSE"
 ]
 SPDX-FileCopyrightText = "2018 Sensirion AG"
+SPDX-License-Identifier = "BSD-3-Clause"
+
+[[annotations]]
+path = [
+  "lib/sensei_gas_index/third_party/**/*.c",
+  "lib/sensei_gas_index/third_party/**/*.h",
+  "lib/sensei_gas_index/third_party/**/LICENSE"
+]
+SPDX-FileCopyrightText = "2021 Sensirion AG"
 SPDX-License-Identifier = "BSD-3-Clause"
 
 [[annotations]]
@@ -84,3 +95,9 @@ SPDX-License-Identifier = "CC-BY-ND-4.0"
 path = "**/*.png"
 SPDX-FileCopyrightText = "2025 ETH Zurich and University of Bologna"
 SPDX-License-Identifier = "CC-BY-ND-4.0"
+
+# Third party: Semtech LR1121 Modem-E host driver (Clear BSD), vendored in the LPWAN shield app
+[[annotations]]
+path = "NRF/apps/lpwan_shield/third_party/lr1121_modem/**"
+SPDX-FileCopyrightText = "2024 Semtech Corporation"
+SPDX-License-Identifier = "BSD-3-Clause-Clear"

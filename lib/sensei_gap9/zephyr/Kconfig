@@ -1,0 +1,106 @@
+# SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+# SPDX-License-Identifier: Apache-2.0
+#
+# Authors:
+# - Philip Wiese <wiesep@iis.ee.ethz.ch>
+
+menu "SENSEI GAP9"
+
+config SENSEI_GAP9
+	bool "GAP9 link (power, boot, SPI jobs)"
+	select SENSEI_LINK
+	select SENSEI_BUSARB
+	select GPIO
+	select SPI
+	select SPI_SLAVE
+	select SPI_ASYNC
+	select PINCTRL
+	help
+	  Link to the GAP9 of the SENSEI base board: powers it only while jobs are pending, boots it,
+	  exchanges jobs and results over SPI (GAP9 is the master), and hands the camera I2C bus over.
+	  Needs CONFIG_SENSEI_PWR for the GAP9 power rail (gap9_pwr()). The app brings the job format
+	  (struct g9_codec). The devicetree needs
+	  lib/sensei_gap9/zephyr/gap9_link.overlay. Protocol: lib/sensei_gap9/PROTOCOL.md.
+
+config SENSEI_GAP9_QUEUE_DEPTH
+	int "Jobs queued in the link (each costs two job structs of the app in RAM)"
+	default 2
+	range 1 8
+	depends on SENSEI_GAP9
+
+config SENSEI_GAP9_RESULT_RING
+	int "Results buffered for the delivery work queue (each costs one result struct of the app)"
+	default 4
+	range 2 16
+	depends on SENSEI_GAP9
+	help
+	  A job may answer with many result frames (for example JPEG chunks). The link waits when the ring is full.
+
+config SENSEI_GAP9_BOOT_TIMEOUT_MS
+	int "Time from power-on to the GAP9 hello frame (ms)"
+	default 4000
+	depends on SENSEI_GAP9
+	help
+	  One retry with a power cycle follows before the queued jobs fail.
+
+config SENSEI_GAP9_BUSFREE_TIMEOUT_MS
+	int "Detect job: time from start to bus free (ms)"
+	default 4000
+	depends on SENSEI_GAP9
+	help
+	  The camera bus lock is released when this expires.
+
+config SENSEI_GAP9_JOB_TIMEOUT_MS
+	int "Time from job start (or bus free) to the result (ms)"
+	default 8000
+	depends on SENSEI_GAP9
+	help
+	  On expiry the job fails with -ETIMEDOUT and GAP9 is power cycled.
+
+config SENSEI_GAP9_IDLE_OFF_MS
+	int "Delay between the last job and the GAP9 power-off (ms)"
+	default 200
+	depends on SENSEI_GAP9
+
+config SENSEI_GAP9_RESTART_OFF_MS
+	int "Rail off time of a GAP9 power cycle (ms)"
+	default 150
+	depends on SENSEI_GAP9
+
+config SENSEI_GAP9_BUS_WAIT_S
+	int "Longest wait for SPI_A or an LTE transmission before a job is dropped (s)"
+	default 90
+	depends on SENSEI_GAP9
+	help
+	  GAP9 is not powered while the LPWAN client uses SPI_A or LTE is connecting or transmitting
+	  (lib/sensei_busarb). Jobs wait; after this time they fail with -EBUSY.
+
+config SENSEI_GAP9_SHARED_GPIOS
+	bool "Connect the shared GPIO lines (P0.28) while GAP9 is on"
+	depends on SENSEI_GAP9
+	help
+	  Needed only for the GAP9 UART on P1.00 and P1.01 (the GAP9 link uses neither).
+
+config SENSEI_GAP9_THREAD_STACK_SIZE
+	int "GAP9 link thread stack (B)"
+	default 4096
+	depends on SENSEI_GAP9
+
+config SENSEI_GAP9_SHELL
+	bool "Shell commands: sensei gap9 [on|off|ping|status]"
+	depends on SENSEI_GAP9 && SHELL
+	help
+	  Needs a shell root command "sensei" (SHELL_SUBCMD_SET_CREATE(<name>, (sensei)) in the app).
+
+config SENSEI_GAP9_THREAD_PRIORITY
+	int "GAP9 link thread priority"
+	default 4
+	depends on SENSEI_GAP9
+	help
+	  Above the app work queue, so that the SPI turnaround stays short.
+
+module = SENSEI_GAP9
+module-str = SENSEI GAP9
+source "subsys/logging/Kconfig.template.log_config"
+
+endmenu

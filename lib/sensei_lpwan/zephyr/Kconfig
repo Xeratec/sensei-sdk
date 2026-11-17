@@ -1,0 +1,115 @@
+# SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+# SPDX-License-Identifier: Apache-2.0
+#
+# Authors:
+# - Philip Wiese <wiesep@iis.ee.ethz.ch>
+
+config SENSEI_LPWAN_PROTO
+	bool "LPWAN shield link protocol (state machine, master and slave cores, timers)"
+	select SENSEI_LINK
+	help
+	  The protocol of the SPI link between the nRF5340 and the nRF9151 of the LPWAN shield: frames,
+	  the shared state machine and the 3GPP timer coding. Selected by the nRF5340 client
+	  (SENSEI_LPWAN) and used by the nRF9151 app (NRF/apps/lpwan_shield).
+
+menuconfig SENSEI_LPWAN
+	bool "LPWAN shield client (LoRaWAN, LTE-M, NB-IoT over the nRF9151)"
+	select SENSEI_LPWAN_PROTO
+	select SENSEI_BUSARB
+	select GPIO
+	select I2C
+	select SPI
+	select PM_DEVICE
+	select POLL
+	help
+	  SPI master to the nRF9151 on the LPWAN shield. Needs the LPWAN_Shield_v1 shield in the build
+	  (devicetree aliases lpwan-link and lpwan-spi). The shield's pins P0.31 (event line) and P0.27
+	  (nRF21540 TX_EN) clash with energy markers on the same pins. See lib/sensei_lpwan/README.md and
+	  NRF/apps/lpwan_shield/HARDWARE.md.
+
+if SENSEI_LPWAN
+
+config SENSEI_LPWAN_LORA
+	bool "LoRaWAN"
+	default y
+
+config SENSEI_LPWAN_LTE
+	bool "LTE-M and NB-IoT"
+	default y
+
+config SENSEI_LPWAN_POWER_GATING
+	bool "Power the shield only when it is needed (LoRa and BLE scenarios)"
+	default y
+	help
+	  Switch the shield's 3.3 V rail off after SENSEI_LPWAN_IDLE_S without traffic when the
+	  radio is LoRa or BLE. With LTE the rail stays on so the modem keeps its registration
+	  (PSM). A LoRaWAN session survives a power cycle: the LR1121 keeps it in its flash.
+
+config SENSEI_LPWAN_IDLE_S
+	int "Idle time before the shield is powered down or the modem put to sleep, s"
+	default 10
+	range 1 3600
+
+config SENSEI_LPWAN_BOOT_TIMEOUT_MS
+	int "Time for the nRF9151 to boot and report ready, ms"
+	default 3000
+
+config SENSEI_LPWAN_REQUEST_TIMEOUT_MS
+	int "Time to wait for the response to a request, ms"
+	default 500
+
+config SENSEI_LPWAN_JOIN_TIMEOUT_S
+	int "Time to wait for a LoRaWAN join, s"
+	default 180
+
+config SENSEI_LPWAN_LTE_CONNECT_TIMEOUT_S
+	int "Time to wait for LTE registration, s"
+	default 600
+
+config SENSEI_LPWAN_TX_TIMEOUT_S
+	int "Time to wait for a transmit result, s"
+	default 60
+
+config SENSEI_LPWAN_SPI_HZ
+	int "SPI clock, Hz"
+	default 4000000
+	help
+	  The TXB0108 level shifter on the shield is auto-direction and weak: stay at 4 MHz or below.
+
+config SENSEI_LPWAN_BB_MODE_PFM
+	bool "Shield buck-boost in power-save mode (default: forced PWM)"
+	help
+	  Power-save mode saves current at light load but adds ripple at the LTE and LoRa transmit
+	  bursts. Untested on hardware.
+
+config SENSEI_LPWAN_SHELL
+	bool "Shell commands: sensei lpwan status|power|join|connect|disconnect|provision"
+	depends on SHELL
+	help
+	  Needs a shell root command "sensei" (SHELL_SUBCMD_SET_CREATE(<name>, (sensei)) in the app).
+
+config SENSEI_LPWAN_LTE_APN
+	string "LTE access point name (empty: SIM default)"
+	default ""
+
+config SENSEI_LPWAN_EDRX_CYCLE_MS
+	int "eDRX cycle requested when sensei_lpwan_config.lte_edrx is set, ms"
+	default 81920
+
+config SENSEI_LPWAN_EDRX_PTW_MS
+	int "eDRX paging time window requested, ms"
+	default 5120
+
+config SENSEI_LPWAN_STACK_SIZE
+	int "LPWAN client thread stack size"
+	default 3072
+
+config SENSEI_LPWAN_THREAD_PRIORITY
+	int "LPWAN client thread priority (preemptible)"
+	default 7
+
+module = SENSEI_LPWAN
+module-str = LPWAN client
+source "subsys/logging/Kconfig.template.log_config"
+
+endif # SENSEI_LPWAN

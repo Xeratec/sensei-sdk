@@ -1,0 +1,33 @@
+// SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+// SPDX-License-Identifier: Apache-2.0
+//
+// Authors:
+// - Philip Wiese <wiesep@iis.ee.ethz.ch>
+
+// Types of the SENSEI link layer, shared by every SENSEI app. Apps import this file (the node
+// schemas re-export it with "import public"), so C and Python names stay the same.
+// Field numbers are stable: never reuse or renumber, add new fields at the end.
+
+syntax = "proto3";
+
+package sensei;
+
+// Empty request or reply body.
+message Empty {}
+
+// Firmware version.
+message Version {
+  uint32 major = 1;
+  uint32 minor = 2;
+  uint32 patch = 3;
+  // First 4 bytes of the git commit, little endian (0 if unknown).
+  fixed32 git = 4;
+}
+
+// Radio that carries an uplink or downlink.
+enum Radio {
+  RADIO_BLE = 0;
+  RADIO_LORA = 1;
+  RADIO_LTEM = 2;
+  RADIO_NBIOT = 3;
+}

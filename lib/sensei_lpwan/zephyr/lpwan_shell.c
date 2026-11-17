@@ -1,0 +1,102 @@
+/*
+ * SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Authors:
+ * - Philip Wiese <wiesep@iis.ee.ethz.ch>
+ */
+
+/**
+ * @file lpwan_shell.c
+ * @brief Shell: sensei lpwan status | power | join | connect | disconnect | provision.
+ */
+
+#include <stdlib.h>
+#include <string.h>
+
+#include <zephyr/shell/shell.h>
+#include <zephyr/sys/util.h>
+
+#include "lpwan_priv.h"
+#include "sensei_lpwan/lpwan.h"
+
+static int cmd_status(const struct shell *sh, size_t argc, char **argv) {
+  struct lpwan_info i;
+
+  sensei_lpwan_get_info(&i);
+  shell_print(sh, "shield %s, link %s, state %s, tech %s%s", i.shield_on ? "on" : "off", i.link_up ? "up" : "down",
+              lpwan_state_name(i.state), lpwan_tech_name(i.tech),
+              i.tech == LPWAN_TECH_LTE ? (i.lte_mode_nb ? " (NB-IoT)" : " (LTE-M)") : "");
+  shell_print(sh, "nRF9151 firmware '%s', modem '%s'", i.fw, i.modem);
+  shell_print(sh, "transfers %u, bad frames %u, retries %u, events %u", i.transfers, i.bad_frames, i.retries, i.events);
+  shell_print(sh, "uplinks ok %u, failed %u, last result %d", i.uplink_ok, i.uplink_fail, i.last_result);
+  if (i.provisioned_pending) {
+    shell_print(sh, "LoRaWAN keys waiting to be written to the LR1121");
+  }
+  shell_print(sh, "SPI_A bus %s", sensei_lpwan_spi_in_use() ? "in use" : "free");
+  return 0;
+}
+
+static int cmd_power(const struct shell *sh, size_t argc, char **argv) {
+  bool on = strcmp(argv[1], "on") == 0;
+
+  if (!on && strcmp(argv[1], "off") != 0) {
+    shell_error(sh, "power on|off");
+    return -EINVAL;
+  }
+  return sensei_lpwan_cmd_power(on);
+}
+
+static int cmd_join(const struct shell *sh, size_t argc, char **argv) {
+  return sensei_lpwan_cmd_connect(sensei_Radio_RADIO_LORA);
+}
+
+static int cmd_connect(const struct shell *sh, size_t argc, char **argv) {
+  if (strcmp(argv[1], "ltem") == 0) {
+    return sensei_lpwan_cmd_connect(sensei_Radio_RADIO_LTEM);
+  }
+  if (strcmp(argv[1], "nbiot") == 0) {
+    return sensei_lpwan_cmd_connect(sensei_Radio_RADIO_NBIOT);
+  }
+  if (strcmp(argv[1], "lora") == 0) {
+    return sensei_lpwan_cmd_connect(sensei_Radio_RADIO_LORA);
+  }
+  shell_error(sh, "connect lora|ltem|nbiot");
+  return -EINVAL;
+}
+
+static int cmd_disconnect(const struct shell *sh, size_t argc, char **argv) { return sensei_lpwan_cmd_disconnect(); }
+
+static int cmd_provision(const struct shell *sh, size_t argc, char **argv) {
+  sensei_LoraProvision k = sensei_LoraProvision_init_zero;
+  int err;
+
+  if (argc != 4) {
+    shell_error(sh, "provision <dev_eui 16 hex> <join_eui 16 hex> <app_key 32 hex>");
+    return -EINVAL;
+  }
+  if (strlen(argv[1]) != 16 || strlen(argv[2]) != 16 || strlen(argv[3]) != 32 ||
+      hex2bin(argv[1], 16, k.dev_eui, 8) != 8 || hex2bin(argv[2], 16, k.join_eui, 8) != 8 ||
+      hex2bin(argv[3], 32, k.app_key, 16) != 16) {
+    shell_error(sh, "keys must be hex of the right length");
+    return -EINVAL;
+  }
+  err = sensei_lpwan_lora_provision(&k);
+  memset(&k, 0, sizeof(k));
+  if (err) {
+    shell_error(sh, "provision failed: %d", err);
+  } else {
+    shell_print(sh, "keys accepted, joining (see status)");
+  }
+  return err;
+}
+
+SHELL_STATIC_SUBCMD_SET_CREATE(sub_lpwan, SHELL_CMD(status, NULL, "Shield, link and radio state", cmd_status),
+                               SHELL_CMD_ARG(power, NULL, "power on|off", cmd_power, 2, 0),
+                               SHELL_CMD(join, NULL, "Join LoRaWAN", cmd_join),
+                               SHELL_CMD_ARG(connect, NULL, "connect lora|ltem|nbiot", cmd_connect, 2, 0),
+                               SHELL_CMD(disconnect, NULL, "Release the active radio", cmd_disconnect),
+                               SHELL_CMD_ARG(provision, NULL, "provision <dev_eui> <join_eui> <app_key> (hex)",
+                                             cmd_provision, 4, 0),
+                               SHELL_SUBCMD_SET_END);
+SHELL_SUBCMD_ADD((sensei), lpwan, &sub_lpwan, "LPWAN shield (LoRaWAN, LTE-M, NB-IoT)", NULL, 1, 0);

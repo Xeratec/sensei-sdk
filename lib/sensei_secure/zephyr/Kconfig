@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+# SPDX-License-Identifier: Apache-2.0
+#
+# Authors:
+# - Philip Wiese <wiesep@iis.ee.ethz.ch>
+
+config SENSEI_SECURE
+	bool "SENSEI end-to-end envelope (ECDH P-256, HKDF, AES-128-GCM)"
+	depends on SENSEI
+	select SENSEI_CRYPTO
+	select SENSEI_CRYPTO_AEAD
+	select SENSEI_CRYPTO_ECDH
+	select SENSEI_CRYPTO_HKDF
+	help
+	  Envelope library on the SENSEI SDK crypto library (lib/sensei_secure/README.md).

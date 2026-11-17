@@ -1,0 +1,11 @@
+# SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+# SPDX-License-Identifier: Apache-2.0
+#
+# Authors:
+# - Philip Wiese <wiesep@iis.ee.ethz.ch>
+
+config SENSEI_BUSARB
+	bool "Arbitration of the shared SPI_A bus and LTE current peaks"
+	help
+	  One owner at a time for SPI_A (P0.08 to P0.11, shared by GAP9 and the LPWAN shield) and a rule
+	  that GAP9 does not run during an LTE transmission. Selected by SENSEI_GAP9 and SENSEI_LPWAN.

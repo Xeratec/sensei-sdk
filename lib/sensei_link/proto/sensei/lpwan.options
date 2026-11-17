@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+# SPDX-License-Identifier: Apache-2.0
+#
+# Authors:
+# - Philip Wiese <wiesep@iis.ee.ethz.ch>
+
+sensei.LpwanRequest            anonymous_oneof:true
+sensei.LpwanResponse           anonymous_oneof:true
+sensei.LpwanEvent              anonymous_oneof:true
+sensei.LteConfigure.apn        max_size:33
+sensei.LteConfigure.server_host max_size:65
+sensei.LoraProvision.dev_eui   max_size:8 fixed_length:true
+sensei.LoraProvision.join_eui  max_size:8 fixed_length:true
+sensei.LoraProvision.app_key   max_size:16 fixed_length:true
+sensei.Send.payload            max_size:1024
+sensei.DownlinkRx.payload      max_size:1024
+sensei.LpwanVersion.modem      max_size:25
+sensei.LpwanError.message      max_size:49
+
+# String max_size counts the terminating NUL: max_size 65 means 64 characters.

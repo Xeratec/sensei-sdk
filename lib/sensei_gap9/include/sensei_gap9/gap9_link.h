@@ -1,0 +1,56 @@
+/*
+ * SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Authors:
+ * - Philip Wiese <wiesep@iis.ee.ethz.ch>
+ */
+
+/**
+ * @file gap9_link.h
+ * @brief Constants of the nRF5340 <-> GAP9 SPI link, shared by both sides. Plain C, no OS.
+ *        The protocol is described in PROTOCOL.md.
+ */
+
+#ifndef SENSEI_GAP9_LINK_H_
+#define SENSEI_GAP9_LINK_H_
+
+#include "sensei_link/sensei_link.h"
+#include "sensei_link/spi.h"
+
+/* Frame types. 0x10 and 0x11 come from sensei_link.h. */
+#define G9L_TYPE_JOB SENSEI_SPI_GAP9_JOB       /* nRF -> GAP9 (on MISO): the job message */
+#define G9L_TYPE_RESULT SENSEI_SPI_GAP9_RESULT /* GAP9 -> nRF (on MOSI): the result message */
+#define G9L_TYPE_HELLO 0x12u                   /* GAP9 -> nRF: Version, sent once after boot */
+#define G9L_TYPE_POLL 0x13u                    /* GAP9 -> nRF: "send me your frame", header only */
+#define G9L_TYPE_NONE 0x14u                    /* nRF -> GAP9: no job, header only */
+#define G9L_TYPE_BUSFREE 0x15u                 /* GAP9 -> nRF: camera done, payload u32 seq LE */
+
+/* Frame flags (sensei_link/spi.h): ERROR = "the previous frame you sent me was bad",
+ * MORE = "more result frames of the same job follow" (JPEG chunks). */
+#define G9L_FLAG_ERROR SENSEI_SPI_FLAG_ERROR
+#define G9L_FLAG_MORE SENSEI_SPI_FLAG_MORE
+
+/* Buffer sizes. TX: the largest job frame. RX is as long, so that the SPIS byte count tells how
+ * much of the TX frame the master clocked out (GAP9 frames are at most 2082 B). */
+#define G9L_HDR SENSEI_SPI_HEADER_SIZE
+#define G9L_TX_CAP (SENSEI_SPI_HEADER_SIZE + SENSEI_SPI_MAX_PAYLOAD)
+#define G9L_RX_CAP G9L_TX_CAP
+
+/* SPI settings of the GAP9 master: mode 3, 8 bit, MSB first. */
+#define G9L_SPI_HZ_DEFAULT 2000000u
+
+/* GAP9 side timing. */
+#define G9L_TURN_US 300u        /* wait after CS rises before the trigger line is read */
+#define G9L_CS_SETUP_US 10u     /* CS low to first clock */
+#define G9L_ARM_TIMEOUT_MS 1000 /* GAP9 waits this long for the trigger line */
+#define G9L_RETRIES 3           /* tries per frame, GAP9 side and nRF side */
+
+/* nRF side defaults (Kconfig overrides them). */
+#define G9L_BOOT_TIMEOUT_MS 4000
+#define G9L_BUSFREE_TIMEOUT_MS 4000
+#define G9L_JOB_TIMEOUT_MS 8000
+#define G9L_IDLE_OFF_MS 200
+#define G9L_RESTART_OFF_MS 150 /* rail off time of a power cycle */
+
+#endif /* SENSEI_GAP9_LINK_H_ */

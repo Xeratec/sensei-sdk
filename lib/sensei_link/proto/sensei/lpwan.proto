@@ -1,0 +1,167 @@
+// SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+// SPDX-License-Identifier: Apache-2.0
+//
+// Authors:
+// - Philip Wiese <wiesep@iis.ee.ethz.ch>
+
+// nRF5340 (SPI master) to nRF9151 (SPI slave) on the LPWAN shield (lib/sensei_lpwan). The nRF5340
+// sends a LpwanRequest, the nRF9151 answers with a LpwanResponse (same seq) and sends LpwanEvent on
+// its own.
+
+syntax = "proto3";
+
+package sensei;
+
+import "sensei/types.proto";
+
+enum LteMode {
+  LTE_M = 0;
+  LTE_NB_IOT = 1;
+}
+
+enum LoraRegion {
+  REGION_EU868 = 0;
+  REGION_US915 = 1;
+  REGION_AS923 = 2;
+  REGION_AU915 = 3;
+  REGION_KR920 = 4;
+  REGION_IN865 = 5;
+  REGION_RU864 = 6;
+}
+
+enum LoraClass {
+  CLASS_A = 0;
+  CLASS_B = 1;
+  CLASS_C = 2;
+}
+
+enum LpwanResult {
+  LPWAN_OK = 0;
+  LPWAN_BUSY = 1;
+  LPWAN_INVALID = 2;
+  LPWAN_UNSUPPORTED = 3;
+  LPWAN_NOT_CONFIGURED = 4;
+  LPWAN_NOT_JOINED = 5;
+  LPWAN_NOT_CONNECTED = 6;
+  LPWAN_NO_NETWORK = 7;
+  LPWAN_TIMEOUT = 8;
+  LPWAN_DUTY_CYCLE = 9;
+  LPWAN_FAILED = 10;
+}
+
+message LteConfigure {
+  LteMode mode = 1;
+  // Power saving mode: requested periodic TAU and active time, s (0 = off).
+  uint32 psm_tau_s = 2;
+  uint32 psm_active_s = 3;
+  // eDRX cycle and paging time window, ms (0 = off).
+  uint32 edrx_cycle_ms = 4;
+  uint32 edrx_ptw_ms = 5;
+  string apn = 6;
+  string server_host = 7;
+  uint32 server_port = 8;
+  bool udp = 9; // true: UDP, false: TCP
+}
+
+message LoraConfigure {
+  LoraRegion region = 1;
+  LoraClass lora_class = 2;
+  uint32 data_rate = 3; // 0 ... 15
+  bool adr = 4;
+  bool confirmed = 5;
+  uint32 port = 6; // application port, 1 ... 223
+}
+
+// Keys are written at run time and are never stored in the repository. Fixed lengths.
+message LoraProvision {
+  bytes dev_eui = 1;  // 8 B
+  bytes join_eui = 2; // 8 B
+  bytes app_key = 3;  // 16 B
+}
+
+message Send {
+  Radio radio = 1; // RADIO_LORA, RADIO_LTEM or RADIO_NBIOT
+  uint32 port = 2;
+  bytes payload = 3; // <= 1024 B
+  bool confirmed = 4;
+}
+
+message LpwanSleep {
+  uint32 deep = 1; // 0: idle with modem kept registered, 1: deepest state
+}
+
+message LpwanRequest {
+  uint32 seq = 1;
+  oneof body {
+    Empty get_version = 2;
+    Empty get_status = 3;
+    LteConfigure lte_configure = 4;
+    Empty lte_connect = 5;
+    Empty lte_disconnect = 6;
+    LoraConfigure lora_configure = 7;
+    LoraProvision lora_provision = 8;
+    Empty lora_join = 9;
+    Send send = 10;
+    Empty get_time = 11;
+    LpwanSleep sleep = 12;
+  }
+}
+
+message LpwanVersion {
+  Version firmware = 1;
+  string modem = 2; // modem firmware, for example the Modem-E version
+}
+
+message LpwanStatus {
+  bool lte_connected = 1;
+  bool lora_joined = 2;
+  sint32 rssi_dbm = 3;
+  sint32 snr_db = 4;
+  uint32 queued = 5; // messages waiting to be sent
+}
+
+message NetworkTime {
+  fixed32 unix_time = 1;
+  Radio radio = 2;
+}
+
+message LpwanResponse {
+  uint32 seq = 1;
+  LpwanResult result = 2;
+  oneof payload {
+    LpwanVersion version = 3;
+    LpwanStatus status = 4;
+    NetworkTime time = 5;
+  }
+}
+
+message RadioEvent { Radio radio = 1; }
+
+message TxDone {
+  uint32 seq = 1; // seq of the Send request
+  bool ok = 2;
+  uint32 attempts = 3;
+}
+
+message DownlinkRx {
+  Radio radio = 1;
+  uint32 port = 2;
+  bytes payload = 3; // <= 1024 B
+}
+
+message LpwanError {
+  LpwanResult code = 1;
+  string message = 2;
+}
+
+message LpwanEvent {
+  oneof body {
+    RadioEvent joined = 1;
+    RadioEvent connected = 2;
+    RadioEvent disconnected = 3;
+    TxDone tx_done = 4;
+    DownlinkRx downlink_rx = 5;
+    NetworkTime network_time = 6;
+    LpwanError error = 7;
+  }
+}

@@ -1,0 +1,73 @@
+/*
+ * SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Authors:
+ * - Philip Wiese <wiesep@iis.ee.ethz.ch>
+ */
+
+/*
+ * GAP9 link: SPIS3 (nRF5340 slave, GAP9 master) and the trigger line.
+ *
+ * SPI pins P0.08 SCK, P0.09 MOSI, P0.10 MISO, P0.11 CSN go through the base board's SPI mux
+ * (P0.20, SPI_GAP_SEL) to GAP9 SPI1 (pads 33, 38, 39 and CS 34).
+ *
+ * P1.05 is the net GAP_CTRL, wired straight to GAP9 pad 58 (no mux, no buffer, not on the
+ * board-to-board connector). The SDK dtsi names it "GAP9_nIRQ" (input to the nRF5340). The link
+ * uses it the other way round: nRF5340 output, "GAP9 should start a transaction". The node is
+ * redefined here as an active high output. Spare direct lines: P1.04 CS_nRF_GAP (GAP9 pad 56)
+ * and P1.06 EXT_RX_SPI (GAP9 pad 57).
+ *
+ * The LPWAN shield's nRF9151 link may use the same SPI pins. Enabling and parking of SPIS3 is in
+ * gap9_link.c only. Add this file to EXTRA_DTC_OVERLAY_FILE in the app's CMakeLists.txt.
+ */
+
+/ {
+	aliases {
+		gap9-trigger = &gpio_gap9_irq;
+		gap9-spi-sel = &gpio_gap9_spi_ctrl;
+		gap9-i2c-sel = &gpio_gap9_i2c_ctrl;
+		gap9-shared-sel = &gpio_gap9_shared_ctrl;
+		gap9-spis = &spi3;
+	};
+};
+
+&gpio_gap9_irq {
+	gpios = <&gpio1 5 GPIO_ACTIVE_HIGH>;
+	label = "GAP9_trigger";
+};
+
+&pinctrl {
+	spi3_default: spi3_default {
+		group1 {
+			psels = <NRF_PSEL(SPIS_SCK, 0, 8)>,
+				<NRF_PSEL(SPIS_MOSI, 0, 9)>,
+				<NRF_PSEL(SPIS_MISO, 0, 10)>,
+				<NRF_PSEL(SPIS_CSN, 0, 11)>;
+		};
+	};
+
+	spi3_sleep: spi3_sleep {
+		group1 {
+			psels = <NRF_PSEL(SPIS_SCK, 0, 8)>,
+				<NRF_PSEL(SPIS_MOSI, 0, 9)>,
+				<NRF_PSEL(SPIS_MISO, 0, 10)>,
+				<NRF_PSEL(SPIS_CSN, 0, 11)>;
+			low-power-enable;
+		};
+	};
+};
+
+/* The board's GAP9 UART on UARTE3 is not used: SPIS3 takes instance 3. */
+&uart3 {
+	status = "disabled";
+};
+
+&spi3 {
+	compatible = "nordic,nrf-spis";
+	status = "okay";
+	pinctrl-0 = <&spi3_default>;
+	pinctrl-1 = <&spi3_sleep>;
+	pinctrl-names = "default", "sleep";
+	def-char = <0x00>;
+};

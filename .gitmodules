@@ -4,3 +4,6 @@
 [submodule "NRF/system/third_party/max-m10s/ubxlib"]
 	path = NRF/system/third_party/max-m10s/ubxlib
 	url = https://github.com/u-blox/ubxlib.git
+[submodule "lib/sensei_link/third_party/nanopb"]
+	path = lib/sensei_link/third_party/nanopb
+	url = https://github.com/nanopb/nanopb.git

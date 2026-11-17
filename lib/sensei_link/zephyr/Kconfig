@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+# SPDX-License-Identifier: Apache-2.0
+#
+# Authors:
+# - Philip Wiese <wiesep@iis.ee.ethz.ch>
+
+config SENSEI_LINK
+	bool "SENSEI link layer (framing and protobuf glue)"
+	select NANOPB
+	help
+	  COBS and CRC-16 byte-stream framing, the SPI frame header, fragmentation, the nanopb helpers and
+	  the SDK messages (lpwan.proto, types.proto). The generated sources are committed; the nanopb
+	  runtime is the one of the NCS nanopb module (same commit as the SDK submodule, see README).

@@ -1,0 +1,29 @@
+# SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+# SPDX-License-Identifier: Apache-2.0
+#
+# Authors:
+# - Philip Wiese <wiesep@iis.ee.ethz.ch>
+
+config SENSEI_DELTA
+	bool "SENSEI delta coder engine (DPCM + rANS/Huffman)"
+	help
+	  Lossy delta coder for windows of seven sensor channels. The application provides the
+	  tables (struct sensei_delta_tables). See lib/sensei_delta/README.md.
+
+if SENSEI_DELTA
+
+config SENSEI_DELTA_RANS
+	bool "rANS entropy coder"
+	default y
+
+config SENSEI_DELTA_HUFFMAN
+	bool "Huffman entropy coder"
+	default y
+
+config SENSEI_DELTA_PROFILE
+	bool "Cycle profiling hooks (DWT)"
+	help
+	  Defines SENSEI_DELTA_PORT_NRF5340: sensei_delta_prof_cycles[] collects the cycles of
+	  the DPCM and entropy-coder parts of the encoder.
+
+endif # SENSEI_DELTA

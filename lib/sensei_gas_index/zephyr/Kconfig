@@ -1,0 +1,11 @@
+# SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+# SPDX-License-Identifier: Apache-2.0
+#
+# Authors:
+# - Philip Wiese <wiesep@iis.ee.ethz.ch>
+
+config SENSEI_GAS_INDEX
+	bool "SENSEI gas index (Sensirion VOC and NOx index)"
+	help
+	  VOC and NOx index from SGP41 raw ticks (lib/sensei_gas_index). Floating point, needs the C math
+	  library.

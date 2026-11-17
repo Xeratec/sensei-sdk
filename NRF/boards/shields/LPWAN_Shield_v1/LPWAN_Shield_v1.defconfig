@@ -1,0 +1,19 @@
+# Copyright (c) 2026 ETH Zurich and University of Bologna
+# SPDX-License-Identifier: Apache-2.0
+
+if SHIELD_LPWAN_SHIELD_V1
+
+config GPIO
+	default y
+
+config I2C
+	default y
+
+config SPI
+	default y
+
+# The client suspends the SPI master to release the shared SPI_A pins (GAP9 uses them too).
+config PM_DEVICE
+	default y
+
+endif # SHIELD_LPWAN_SHIELD_V1

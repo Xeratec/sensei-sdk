@@ -1,0 +1,72 @@
+// Copyright (c) 2026 ETH Zurich and University of Bologna
+// SPDX-License-Identifier: Apache-2.0
+
+/*
+ * Flash and RAM plan of the TrustZone-M build (same as the nRF9151 DK, MCUboot compatible):
+ * - 0x00000 .. 0x10000: MCUboot (64 kB), unused until OTA is added.
+ * - slot0 (256 kB): secure image (TF-M) and, behind it, slot0_ns (212 kB) with the application.
+ * - slot1 (256 kB) and slot1_ns: staging slot for a later image update.
+ * - 24 kB storage.
+ * RAM: 88 kB secure, 40 kB for the modem library, 128 kB non-secure.
+ */
+
+&flash0 {
+	partitions {
+		compatible = "fixed-partitions";
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		boot_partition: partition@0 {
+			label = "mcuboot";
+			reg = <0x00000000 0x10000>;
+		};
+
+		slot0_partition: partition@10000 {
+			label = "image-0";
+			reg = <0x00010000 0x40000>;
+		};
+
+		slot0_ns_partition: partition@50000 {
+			label = "image-0-nonsecure";
+			reg = <0x00050000 0x35000>;
+		};
+
+		slot1_partition: partition@85000 {
+			label = "image-1";
+			reg = <0x00085000 0x40000>;
+		};
+
+		slot1_ns_partition: partition@c5000 {
+			label = "image-1-nonsecure";
+			reg = <0x000c5000 0x35000>;
+		};
+
+		storage_partition: partition@fa000 {
+			label = "storage";
+			reg = <0x000fa000 0x00006000>;
+		};
+	};
+};
+
+/ {
+	reserved-memory {
+		#address-cells = <1>;
+		#size-cells = <1>;
+		ranges;
+
+		sram0_s: image_s@20000000 {
+			/* Secure image memory */
+			reg = <0x20000000 DT_SIZE_K(88)>;
+		};
+
+		sram0_modem: image_modem@20016000 {
+			/* Modem (shared) memory */
+			reg = <0x20016000 DT_SIZE_K(40)>;
+		};
+
+		sram0_ns: image_ns@20020000 {
+			/* Non-Secure image memory */
+			reg = <0x20020000 DT_SIZE_K(128)>;
+		};
+	};
+};

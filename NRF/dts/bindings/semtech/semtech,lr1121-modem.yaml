@@ -1,0 +1,19 @@
+# Copyright (c) 2026 ETH Zurich and University of Bologna
+# SPDX-License-Identifier: Apache-2.0
+description: Semtech LR1121 transceiver with the LoRa Basics Modem-E firmware, on SPI.
+
+compatible: "semtech,lr1121-modem"
+
+include: spi-device.yaml
+
+properties:
+  reset-gpios:
+    type: phandle-array
+    required: true
+  busy-gpios:
+    type: phandle-array
+    required: true
+  event-gpios:
+    type: phandle-array
+    required: true
+    description: DIO9, rises when the modem has an event.

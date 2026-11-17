@@ -1,0 +1,91 @@
+// Copyright (c) 2026 ETH Zurich and University of Bologna
+// SPDX-License-Identifier: Apache-2.0
+
+#include "sensei_lpwan_nrf9151_pinctrl.dtsi"
+
+/ {
+	model = "SENSEI LPWAN shield nRF9151";
+	compatible = "eth-zurich,sensei-lpwan-nrf9151";
+
+	/* No UART is wired to the nRF9151: console and logging use RTT. */
+	chosen {
+		zephyr,console = &rtt0;
+	};
+
+	rtt0: rtt_chan0 {
+		compatible = "segger,rtt-uart";
+	};
+
+	/* Handshake lines to the nRF5340. Levels are 3.3 V here, 1.8 V on the base board. */
+	lpwan_link: lpwan_link {
+		compatible = "sensei,lpwan-link";
+		/* P0.15 (nRF91_GPIO0) to nRF5340 P0.31: asynchronous event pending. */
+		event-gpios = <&gpio0 15 GPIO_ACTIVE_HIGH>;
+		/* P0.29 (nRF91_GPIO13) to expander P2: high = busy, low = ready for a transfer. */
+		busy-gpios = <&gpio0 29 GPIO_ACTIVE_HIGH>;
+		/* P0.31 (nRF91_GPIO16) from expander P0: master strobe, high while it runs a transfer. */
+		ack-gpios = <&gpio0 31 GPIO_ACTIVE_HIGH>;
+		/* P0.30 (nRF91_GPIO18) from expander P1: spare, reserved for a wake request. */
+		spare-gpios = <&gpio0 30 GPIO_ACTIVE_HIGH>;
+	};
+
+	aliases {
+		lpwan-link = &lpwan_link;
+		lr1121 = &lr1121;
+	};
+};
+
+&gpiote {
+	status = "okay";
+};
+
+&gpio0 {
+	status = "okay";
+};
+
+/* SPIS to the nRF5340. */
+&spi0 {
+	compatible = "nordic,nrf-spis";
+	status = "okay";
+	pinctrl-0 = <&spi0_default>;
+	pinctrl-1 = <&spi0_sleep>;
+	pinctrl-names = "default", "sleep";
+	def-char = <0xff>;
+};
+
+/* SPIM to the LR1121 (Semtech LR1121, running the LoRa Basics Modem-E firmware). */
+&spi1 {
+	compatible = "nordic,nrf-spim";
+	status = "okay";
+	pinctrl-0 = <&spi1_default>;
+	pinctrl-1 = <&spi1_sleep>;
+	pinctrl-names = "default", "sleep";
+	cs-gpios = <&gpio0 1 GPIO_ACTIVE_LOW>;
+
+	lr1121: lr1121@0 {
+		compatible = "semtech,lr1121-modem";
+		reg = <0>;
+		spi-max-frequency = <DT_FREQ_M(8)>;
+		/* P0.00 (nRF91_GPIO14). */
+		reset-gpios = <&gpio0 0 GPIO_ACTIVE_LOW>;
+		/* P0.04 (nRF91_GPIO12): LR1121 BUSY (DIO0). */
+		busy-gpios = <&gpio0 4 GPIO_ACTIVE_HIGH>;
+		/* P0.02 (nRF91_GPIO4): LR1121 DIO9, the Modem-E event line. */
+		event-gpios = <&gpio0 2 GPIO_ACTIVE_HIGH>;
+	};
+};
+
+/* Unused on this board. */
+&uart0 {
+	status = "disabled";
+};
+
+&uart2 {
+	status = "disabled";
+};
+
+&i2c2 {
+	status = "disabled";
+};
+
+#include "sensei_lpwan_nrf9151_partition_conf.dtsi"

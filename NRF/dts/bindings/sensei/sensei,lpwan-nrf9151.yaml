@@ -1,0 +1,7 @@
+# Copyright (c) 2026 ETH Zurich and University of Bologna
+# SPDX-License-Identifier: Apache-2.0
+description: nRF9151 of the SENSEI LPWAN shield, an SPI slave (SPIS) seen from the nRF5340.
+
+compatible: "sensei,lpwan-nrf9151"
+
+include: spi-device.yaml

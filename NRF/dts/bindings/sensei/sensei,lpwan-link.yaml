@@ -1,0 +1,38 @@
+# Copyright (c) 2026 ETH Zurich and University of Bologna
+# SPDX-License-Identifier: Apache-2.0
+description: |
+  Handshake lines between the nRF5340 (SPI master) and the nRF9151 (SPI slave) of the LPWAN shield.
+  The same binding is used on both sides. On the nRF9151 all lines are local GPIOs. On the nRF5340
+  only the event line is a local GPIO; busy, ack and spare are pins of the shield's I/O expander.
+
+compatible: "sensei,lpwan-link"
+
+include: base.yaml
+
+properties:
+  event-gpios:
+    type: phandle-array
+    required: true
+    description: High while an asynchronous event is waiting (nRF9151 output).
+  busy-gpios:
+    type: phandle-array
+    required: true
+    description: High while the nRF9151 is not ready for a transfer (nRF9151 output).
+  ack-gpios:
+    type: phandle-array
+    description: Strobe from the master, high while it runs a transfer (nRF9151 input).
+  spare-gpios:
+    type: phandle-array
+    description: Spare line from the master to the nRF9151.
+  power-gpios:
+    type: phandle-array
+    description: Shield power switch enable (nRF5340 side, expander).
+  level-shifter-gpios:
+    type: phandle-array
+    description: Level shifter output enable (nRF5340 side, expander).
+  bb-mode-gpios:
+    type: phandle-array
+    description: Shield buck-boost mode (nRF5340 side, expander).
+  spi-gap-sel-gpios:
+    type: phandle-array
+    description: GAP9 isolation switch on the shared SPI_A bus (nRF5340 side).

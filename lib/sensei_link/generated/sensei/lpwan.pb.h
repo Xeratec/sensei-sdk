@@ -79,7 +79,9 @@ typedef enum _sensei_DfuFail {
     sensei_DfuFail_DFU_FAIL_DOWNGRADE = 6, /* older than the running image (MCUboot would drop it) */
     sensei_DfuFail_DFU_FAIL_FLASH = 7, /* flash driver error, `detail` is the errno */
     sensei_DfuFail_DFU_FAIL_MODEM = 8, /* modem library error, `detail` is its code */
-    sensei_DfuFail_DFU_FAIL_UNSUPPORTED = 9 /* target not built in */
+    sensei_DfuFail_DFU_FAIL_UNSUPPORTED = 9, /* target not built in */
+    sensei_DfuFail_DFU_FAIL_BOARD = 10, /* an image for another board (the kind TLV is missing or differs) */
+    sensei_DfuFail_DFU_FAIL_RATE = 11 /* too many new transfers in a short time: wait and ask again (result BUSY) */
 } sensei_DfuFail;
 
 /* Struct definitions */
@@ -130,6 +132,11 @@ typedef struct _sensei_DfuBegin {
     bool resume;
 } sensei_DfuBegin;
 
+/* dfu_confirm: image_id is the LpwanVersion.image_id the master saw; the shield confirms only that image. 0: any. */
+typedef struct _sensei_DfuConfirm {
+    uint32_t image_id;
+} sensei_DfuConfirm;
+
 typedef PB_BYTES_ARRAY_T(512) sensei_DfuChunk_data_t;
 typedef struct _sensei_DfuChunk {
     uint32_t offset; /* where `data` goes: the offset of the last answer */
@@ -174,7 +181,7 @@ typedef struct _sensei_LpwanRequest {
         sensei_Empty dfu_apply; /* app: mark for one trial boot (the master then power-cycles the shield); modem: apply */
         sensei_Empty dfu_abort; /* drop the open transfer */
         sensei_Empty dfu_status; /* state and next offset (the resume query) */
-        sensei_Empty dfu_confirm; /* the master accepted the handshake of an image on trial */
+        sensei_DfuConfirm dfu_confirm; /* the master accepted the handshake of an image on trial (sent again until trial ends) */
     };
 } sensei_LpwanRequest;
 
@@ -303,8 +310,8 @@ extern "C" {
 #define _sensei_DfuState_ARRAYSIZE ((sensei_DfuState)(sensei_DfuState_DFU_STATE_FAILED+1))
 
 #define _sensei_DfuFail_MIN sensei_DfuFail_DFU_FAIL_NONE
-#define _sensei_DfuFail_MAX sensei_DfuFail_DFU_FAIL_UNSUPPORTED
-#define _sensei_DfuFail_ARRAYSIZE ((sensei_DfuFail)(sensei_DfuFail_DFU_FAIL_UNSUPPORTED+1))
+#define _sensei_DfuFail_MAX sensei_DfuFail_DFU_FAIL_RATE
+#define _sensei_DfuFail_ARRAYSIZE ((sensei_DfuFail)(sensei_DfuFail_DFU_FAIL_RATE+1))
 
 #define sensei_LteConfigure_mode_ENUMTYPE sensei_LteMode
 
@@ -315,6 +322,7 @@ extern "C" {
 #define sensei_Send_radio_ENUMTYPE sensei_Radio
 
 #define sensei_DfuBegin_target_ENUMTYPE sensei_DfuTarget
+
 
 
 #define sensei_DfuStatus_state_ENUMTYPE sensei_DfuState
@@ -345,6 +353,7 @@ extern "C" {
 #define sensei_LoraProvision_init_default        {{0}, {0}, {0}}
 #define sensei_Send_init_default                 {_sensei_Radio_MIN, 0, {0, {0}}, 0}
 #define sensei_DfuBegin_init_default             {_sensei_DfuTarget_MIN, 0, {0}, 0}
+#define sensei_DfuConfirm_init_default           {0}
 #define sensei_DfuChunk_init_default             {0, {0, {0}}, 0}
 #define sensei_DfuStatus_init_default            {_sensei_DfuState_MIN, _sensei_DfuTarget_MIN, 0, 0, 0, _sensei_DfuFail_MIN, 0}
 #define sensei_LpwanSleep_init_default           {0}
@@ -364,6 +373,7 @@ extern "C" {
 #define sensei_LoraProvision_init_zero           {{0}, {0}, {0}}
 #define sensei_Send_init_zero                    {_sensei_Radio_MIN, 0, {0, {0}}, 0}
 #define sensei_DfuBegin_init_zero                {_sensei_DfuTarget_MIN, 0, {0}, 0}
+#define sensei_DfuConfirm_init_zero              {0}
 #define sensei_DfuChunk_init_zero                {0, {0, {0}}, 0}
 #define sensei_DfuStatus_init_zero               {_sensei_DfuState_MIN, _sensei_DfuTarget_MIN, 0, 0, 0, _sensei_DfuFail_MIN, 0}
 #define sensei_LpwanSleep_init_zero              {0}
@@ -406,6 +416,7 @@ extern "C" {
 #define sensei_DfuBegin_size_tag                 2
 #define sensei_DfuBegin_sha256_tag               3
 #define sensei_DfuBegin_resume_tag               4
+#define sensei_DfuConfirm_image_id_tag           1
 #define sensei_DfuChunk_offset_tag               1
 #define sensei_DfuChunk_data_tag                 2
 #define sensei_DfuChunk_gap_tag                  3
@@ -528,6 +539,11 @@ X(a, STATIC,   SINGULAR, BOOL,     resume,            4)
 #define sensei_DfuBegin_CALLBACK NULL
 #define sensei_DfuBegin_DEFAULT NULL
 
+#define sensei_DfuConfirm_FIELDLIST(X, a) \
+X(a, STATIC,   SINGULAR, FIXED32,  image_id,          1)
+#define sensei_DfuConfirm_CALLBACK NULL
+#define sensei_DfuConfirm_DEFAULT NULL
+
 #define sensei_DfuChunk_FIELDLIST(X, a) \
 X(a, STATIC,   SINGULAR, UINT32,   offset,            1) \
 X(a, STATIC,   SINGULAR, BYTES,    data,              2) \
@@ -590,7 +606,7 @@ X(a, STATIC,   ONEOF,    MESSAGE,  (body,dfu_confirm,dfu_confirm),  46)
 #define sensei_LpwanRequest_body_dfu_apply_MSGTYPE sensei_Empty
 #define sensei_LpwanRequest_body_dfu_abort_MSGTYPE sensei_Empty
 #define sensei_LpwanRequest_body_dfu_status_MSGTYPE sensei_Empty
-#define sensei_LpwanRequest_body_dfu_confirm_MSGTYPE sensei_Empty
+#define sensei_LpwanRequest_body_dfu_confirm_MSGTYPE sensei_DfuConfirm
 
 #define sensei_LpwanVersion_FIELDLIST(X, a) \
 X(a, STATIC,   OPTIONAL, MESSAGE,  firmware,          1) \
@@ -694,6 +710,7 @@ extern const pb_msgdesc_t sensei_LoraConfigure_msg;
 extern const pb_msgdesc_t sensei_LoraProvision_msg;
 extern const pb_msgdesc_t sensei_Send_msg;
 extern const pb_msgdesc_t sensei_DfuBegin_msg;
+extern const pb_msgdesc_t sensei_DfuConfirm_msg;
 extern const pb_msgdesc_t sensei_DfuChunk_msg;
 extern const pb_msgdesc_t sensei_DfuStatus_msg;
 extern const pb_msgdesc_t sensei_LpwanSleep_msg;
@@ -715,6 +732,7 @@ extern const pb_msgdesc_t sensei_LpwanEvent_msg;
 #define sensei_LoraProvision_fields &sensei_LoraProvision_msg
 #define sensei_Send_fields &sensei_Send_msg
 #define sensei_DfuBegin_fields &sensei_DfuBegin_msg
+#define sensei_DfuConfirm_fields &sensei_DfuConfirm_msg
 #define sensei_DfuChunk_fields &sensei_DfuChunk_msg
 #define sensei_DfuStatus_fields &sensei_DfuStatus_msg
 #define sensei_LpwanSleep_fields &sensei_LpwanSleep_msg
@@ -734,6 +752,7 @@ extern const pb_msgdesc_t sensei_LpwanEvent_msg;
 #define SENSEI_SENSEI_LPWAN_PB_H_MAX_SIZE        sensei_LpwanRequest_size
 #define sensei_DfuBegin_size                     44
 #define sensei_DfuChunk_size                     523
+#define sensei_DfuConfirm_size                   5
 #define sensei_DfuStatus_size                    30
 #define sensei_DownlinkRx_size                   1035
 #define sensei_LoraConfigure_size                20

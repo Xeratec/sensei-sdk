@@ -5,22 +5,22 @@
 # - Philip Wiese <wiesep@iis.ee.ethz.ch>
 
 # Sysbuild options of the LPWAN shield app. MCUboot is part of every build (sysbuild.conf, sysbuild/mcuboot.conf,
-# sysbuild.cmake). Same scheme as the nRF5340 node: the public development key in Debug, a private key from the
-# environment in Release.
+# sysbuild.cmake). The public development key in Debug, a private key from the environment in Release. The shield has
+# its own Release key, never the key of the nRF5340 node: an image of the node is then not accepted by the shield,
+# and the other way round.
 
 config SENSEI_RELEASE
 	bool "Release build: sign with the Release key"
 	help
 	  Debug images are signed with MCUboot's public development key: anyone can sign for it, use it in the lab
-	  only. A Release build needs a private key: set SENSEI_SHIELD_MCUBOOT_KEY (path of a PEM file, ECDSA P-256) or,
-	  if that is empty, SENSEI_MCUBOOT_KEY (the key of the nRF5340 node), or pass
+	  only. A Release build needs its own private key: set SENSEI_SHIELD_MCUBOOT_KEY (path of a PEM file, ECDSA P-256;
+	  there is no fallback to SENSEI_MCUBOOT_KEY, the key of the nRF5340 node), or pass
 	  -DSB_CONFIG_BOOT_SIGNATURE_KEY_FILE=<path>. The build stops if the file is missing. Use it together with
 	  -DEXTRA_CONF_FILE=conf/release.conf.
 
 # The Release key comes from the environment (an empty value stops the build, see sysbuild.cmake).
 # Debug keeps MCUboot's default key.
 config BOOT_SIGNATURE_KEY_FILE
-	default "$(SENSEI_SHIELD_MCUBOOT_KEY)" if SENSEI_RELEASE && "$(SENSEI_SHIELD_MCUBOOT_KEY)" != ""
-	default "$(SENSEI_MCUBOOT_KEY)" if SENSEI_RELEASE
+	default "$(SENSEI_SHIELD_MCUBOOT_KEY)" if SENSEI_RELEASE
 
 source "share/sysbuild/Kconfig"

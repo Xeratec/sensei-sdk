@@ -125,9 +125,10 @@ static bool log_scan(struct lpwan_dfu *d, struct lpwan_dfu_ckpt *out) {
   return have;
 }
 
-static void ckpt_clear(struct lpwan_dfu *d) {
+/* Forget the checkpoints. An error means an old checkpoint may still be there. */
+static int ckpt_clear(struct lpwan_dfu *d) {
   if (d->ops == NULL || d->ops->log_erase == NULL) {
-    return;
+    return 0;
   }
   if (d->log_next < 0) {
     struct lpwan_dfu_ckpt dummy;
@@ -135,9 +136,15 @@ static void ckpt_clear(struct lpwan_dfu *d) {
     (void)log_scan(d, &dummy);
   }
   if (d->log_next != 0) {
-    (void)d->ops->log_erase(d->ctx);
+    int e = d->ops->log_erase(d->ctx);
+
+    if (e != 0) {
+      d->log_next = -1; /* unknown: look at it again */
+      return e;
+    }
     d->log_next = 0;
   }
+  return 0;
 }
 
 static void ckpt_save(struct lpwan_dfu *d, uint32_t offset) {
@@ -193,6 +200,14 @@ uint32_t lpwan_dfu_targets(struct lpwan_dfu *d) {
   return t;
 }
 
+void lpwan_dfu_touch(struct lpwan_dfu *d, uint32_t now_ms) {
+  d->timed = true;
+  d->now_ms = now_ms;
+  d->req_ms = now_ms;
+}
+
+bool lpwan_dfu_confirm_allowed(uint32_t want, uint32_t running) { return want == 0 || running == 0 || want == running; }
+
 static void set_fail(struct lpwan_dfu *d, sensei_DfuFail fail, int detail) {
   d->state = sensei_DfuState_DFU_STATE_FAILED;
   d->fail = fail;
@@ -227,6 +242,26 @@ static void refresh(struct lpwan_dfu *d) {
   }
 }
 
+bool lpwan_dfu_holds_link(struct lpwan_dfu *d, uint32_t now_ms, uint32_t hold_ms) {
+  refresh(d);
+  switch (d->state) {
+  case sensei_DfuState_DFU_STATE_IDLE:
+  case sensei_DfuState_DFU_STATE_FAILED:
+  case sensei_DfuState_DFU_STATE_DONE:
+    return false;
+  case sensei_DfuState_DFU_STATE_ERASING:
+    return true; /* the modem works on its own: the radios stay off until it is done */
+  case sensei_DfuState_DFU_STATE_APPLYING:
+    if (d->target == sensei_DfuTarget_DFU_TARGET_MODEM) {
+      return true;
+    }
+    break;
+  default:
+    break;
+  }
+  return !d->timed || (uint32_t)(now_ms - d->req_ms) < hold_ms; /* a sender that is gone lets go */
+}
+
 static void fill(const struct lpwan_dfu *d, sensei_DfuStatus *st) {
   memset(st, 0, sizeof(*st));
   st->state = d->state;
@@ -256,6 +291,19 @@ static bool same_transfer(const struct lpwan_dfu *d, const sensei_DfuBegin *r) {
          d->target == r->target && d->size == r->size && memcmp(d->sha, r->sha256, 32) == 0;
 }
 
+/* App: take the marking for the test boot back. */
+static int undo_mark(struct lpwan_dfu *d) {
+  int e = 0;
+
+  if (d->marked) {
+    e = d->ops != NULL && d->ops->unmark != NULL ? d->ops->unmark(d->ctx) : 0;
+    if (e == 0) {
+      d->marked = false;
+    }
+  }
+  return e;
+}
+
 sensei_LpwanResult lpwan_dfu_begin(struct lpwan_dfu *d, const sensei_DfuBegin *req, sensei_DfuStatus *st) {
   const struct lpwan_dfu_ops *o = req->target == sensei_DfuTarget_DFU_TARGET_MODEM ? d->modem : d->app;
   uint32_t cap = o != NULL && o->capacity != NULL ? o->capacity(d->ctx, req->target) : 0;
@@ -276,6 +324,16 @@ sensei_LpwanResult lpwan_dfu_begin(struct lpwan_dfu *d, const sensei_DfuBegin *r
   if (req->resume && same_transfer(d, req)) {
     return done(d, st); /* the open transfer goes on where it is */
   }
+  if (d->timed && d->opened && (uint32_t)(d->now_ms - d->open_ms) < LPWAN_DFU_OPEN_MIN_MS) {
+    return reject(d, st, sensei_DfuFail_DFU_FAIL_RATE, sensei_LpwanResult_LPWAN_BUSY); /* protects the flash */
+  }
+  e = undo_mark(d);
+  if (e != 0) {
+    set_fail(d, sensei_DfuFail_DFU_FAIL_FLASH, e);
+    return done(d, st);
+  }
+  d->opened = true;
+  d->open_ms = d->now_ms;
   d->ops = o;
   if (req->resume && req->target == sensei_DfuTarget_DFU_TARGET_APP) {
     struct lpwan_dfu_ckpt c;
@@ -297,8 +355,10 @@ sensei_LpwanResult lpwan_dfu_begin(struct lpwan_dfu *d, const sensei_DfuBegin *r
   d->fail = sensei_DfuFail_DFU_FAIL_NONE;
   d->detail = 0;
   sensei_sha256_init(&d->hash);
-  if (!resumed) {
-    ckpt_clear(d);
+  e = resumed ? 0 : ckpt_clear(d);
+  if (e != 0) { /* an old checkpoint may be left: a transfer that cannot be told apart is not started */
+    set_fail(d, sensei_DfuFail_DFU_FAIL_FLASH, e);
+    return done(d, st);
   }
   e = o->open != NULL ? o->open(d->ctx, req->target, req->size, !resumed) : 0;
   if (e < 0) {
@@ -461,6 +521,9 @@ sensei_LpwanResult lpwan_dfu_finish(struct lpwan_dfu *d, sensei_DfuStatus *st) {
   int e;
 
   refresh(d);
+  if (d->state == sensei_DfuState_DFU_STATE_VERIFIED) {
+    return done(d, st); /* a repeat: the answer was lost */
+  }
   if (d->state != sensei_DfuState_DFU_STATE_RECEIVING) {
     return reject(d, st, sensei_DfuFail_DFU_FAIL_STATE, sensei_LpwanResult_LPWAN_INVALID);
   }
@@ -490,7 +553,7 @@ sensei_LpwanResult lpwan_dfu_finish(struct lpwan_dfu *d, sensei_DfuStatus *st) {
     sensei_sha256_final(&h, sum);
   }
   if (memcmp(sum, d->sha, 32) != 0) {
-    ckpt_clear(d); /* what is in the flash is wrong: the next transfer starts at 0 */
+    (void)ckpt_clear(d); /* what is in the flash is wrong: the next transfer starts at 0 */
     set_fail(d, sensei_DfuFail_DFU_FAIL_HASH, 0);
     return done(d, st);
   }
@@ -504,8 +567,11 @@ sensei_LpwanResult lpwan_dfu_finish(struct lpwan_dfu *d, sensei_DfuStatus *st) {
       return done(d, st);
     }
     f = lpwan_dfu_check_header(nh, d->size, rh);
+    if (f == sensei_DfuFail_DFU_FAIL_NONE && o->check_kind != NULL) {
+      f = o->check_kind(d->ctx);
+    }
     if (f != sensei_DfuFail_DFU_FAIL_NONE) {
-      ckpt_clear(d);
+      (void)ckpt_clear(d);
       set_fail(d, f, 0);
       return done(d, st);
     }
@@ -525,9 +591,13 @@ sensei_LpwanResult lpwan_dfu_apply(struct lpwan_dfu *d, sensei_DfuStatus *st) {
   int e;
 
   refresh(d);
+  if (d->state == sensei_DfuState_DFU_STATE_APPLYING) {
+    return done(d, st); /* a repeat: the answer was lost, it is marked (app) or running (modem) */
+  }
   if (d->state != sensei_DfuState_DFU_STATE_VERIFIED) {
     return reject(d, st, sensei_DfuFail_DFU_FAIL_STATE, sensei_LpwanResult_LPWAN_INVALID);
   }
+  d->marked = d->target == sensei_DfuTarget_DFU_TARGET_APP; /* may be half done if it fails */
   e = d->ops->apply != NULL ? d->ops->apply(d->ctx, d->target) : -1;
   if (e != 0) {
     set_fail(
@@ -537,20 +607,28 @@ sensei_LpwanResult lpwan_dfu_apply(struct lpwan_dfu *d, sensei_DfuStatus *st) {
   }
   d->state = sensei_DfuState_DFU_STATE_APPLYING;
   if (d->target == sensei_DfuTarget_DFU_TARGET_APP) {
-    ckpt_clear(d); /* the image is marked: a later transfer must not resume it */
+    (void)ckpt_clear(d); /* the image is marked: a later transfer must not resume it */
   }
   return done(d, st);
 }
 
 sensei_LpwanResult lpwan_dfu_abort(struct lpwan_dfu *d, sensei_DfuStatus *st) {
+  int e;
+
+  refresh(d);
   if (d->state == sensei_DfuState_DFU_STATE_APPLYING && d->target == sensei_DfuTarget_DFU_TARGET_MODEM) {
     return reject(d, st, sensei_DfuFail_DFU_FAIL_STATE, sensei_LpwanResult_LPWAN_BUSY); /* running in the modem */
   }
-  if (d->ops != NULL && d->ops->finish != NULL && d->target == sensei_DfuTarget_DFU_TARGET_MODEM &&
-      d->state == sensei_DfuState_DFU_STATE_RECEIVING) {
-    (void)d->ops->finish(d->ctx, d->target); /* modem: release its write session */
+  e = undo_mark(d); /* app: the second slot is no longer marked for the test boot */
+  if (e != 0) {
+    set_fail(d, sensei_DfuFail_DFU_FAIL_FLASH, e);
+    return done(d, st);
   }
-  ckpt_clear(d);
+  if (d->ops != NULL && d->ops->finish != NULL && d->target == sensei_DfuTarget_DFU_TARGET_MODEM &&
+      d->state != sensei_DfuState_DFU_STATE_IDLE) {
+    (void)d->ops->finish(d->ctx, d->target); /* modem: release its write session (also after a failed write) */
+  }
+  (void)ckpt_clear(d);
   d->state = sensei_DfuState_DFU_STATE_IDLE;
   d->offset = 0;
   d->size = 0;

@@ -16,6 +16,7 @@
 #include <zephyr/sys/reboot.h>
 
 #include "ota/sensei_ota.h"
+#include "ota/sensei_ota_image.h"
 #include "ota/sensei_ota_trial.h"
 
 LOG_MODULE_REGISTER(sensei_ota, CONFIG_SENSEI_OTA_LOG_LEVEL);
@@ -78,53 +79,18 @@ int sensei_ota_confirm(void) {
   return rc;
 }
 
-/* MCUboot image format: 32 B header, image, then the TLV area (magic 0x6907 or 0x6908 + total length, then
- * type, pad, length and value). The SHA-256 of the image is TLV 0x10. */
-#define IMAGE_MAGIC 0x96f3b83dU
-#define TLV_INFO_MAGIC 0x6907
-#define TLV_PROT_INFO_MAGIC 0x6908
-#define TLV_SHA256 0x10
+static int slot0_read(void *ctx, uint32_t off, void *buf, size_t len) {
+  return flash_area_read((const struct flash_area *)ctx, off, buf, len);
+}
 
 uint32_t sensei_ota_image_id(void) {
   const struct flash_area *fa;
-  uint8_t buf[32];
-  uint32_t id = 0;
+  uint32_t id;
 
   if (flash_area_open(FIXED_PARTITION_ID(slot0_partition), &fa) != 0) {
     return 0;
   }
-  if (flash_area_read(fa, 0, buf, sizeof(buf)) == 0 && sys_get_le32(buf) == IMAGE_MAGIC) {
-    off_t pos = sys_get_le16(buf + 8) + (off_t)sys_get_le32(buf + 12); /* header + image */
-
-    for (int area = 0; area < 2 && id == 0; area++) { /* protected TLVs, if any, then the rest */
-      uint8_t hdr[4];
-
-      if (flash_area_read(fa, pos, hdr, sizeof(hdr)) != 0) {
-        break;
-      }
-      uint16_t magic = sys_get_le16(hdr), total = sys_get_le16(hdr + 2);
-      off_t end = pos + total;
-
-      if (magic != TLV_INFO_MAGIC && magic != TLV_PROT_INFO_MAGIC) {
-        break;
-      }
-      for (off_t p = pos + 4; p + 4 <= end; p += 4 + sys_get_le16(hdr + 2)) {
-        uint8_t v[4];
-
-        if (flash_area_read(fa, p, hdr, sizeof(hdr)) != 0) {
-          break;
-        }
-        if (hdr[0] == TLV_SHA256 && sys_get_le16(hdr + 2) == 32 && flash_area_read(fa, p + 4, v, sizeof(v)) == 0) {
-          id = sys_get_le32(v);
-          break;
-        }
-      }
-      if (magic == TLV_INFO_MAGIC) {
-        break;
-      }
-      pos = end;
-    }
-  }
+  id = sensei_image_id(slot0_read, (void *)fa);
   flash_area_close(fa);
   return id;
 }

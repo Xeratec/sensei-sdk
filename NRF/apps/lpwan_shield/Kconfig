@@ -90,6 +90,21 @@ config LPWAN_SHIELD_MODEM_DFU
 	default y
 	depends on LPWAN_SHIELD_DFU && LPWAN_SHIELD_LTE
 
+config LPWAN_SHIELD_MODEM_DFU_STACK
+	int "Stack of the work queue that starts the modem library and runs the modem update"
+	default 3072
+	depends on LPWAN_SHIELD_MODEM_DFU
+
+config LPWAN_SHIELD_DFU_HOLD_S
+	int "Time an update sender may be quiet before the radios are free again, s"
+	default 150
+	range 30 3600
+	depends on LPWAN_SHIELD_DFU
+	help
+	  While a transfer is open the radios stay idle (flash, CPU). If no update request came for this long the sender
+	  is gone: the radios work again. The transfer stays and can be resumed. Longer than the 120 s after which the
+	  nRF5340 ends its update session. A running modem update holds the radios whatever this says.
+
 config LPWAN_SHIELD_CONFIRM_DELAY_S
 	int "Run time before a new app image confirms itself, s"
 	default 5
@@ -97,7 +112,8 @@ config LPWAN_SHIELD_CONFIRM_DELAY_S
 	depends on LPWAN_SHIELD_DFU
 	help
 	  After an update the image runs on trial. It confirms itself when it has run this long and the nRF5340 has
-	  accepted the handshake (dfu_confirm, sent after the protocol version matched).
+	  accepted the handshake (dfu_confirm for this image, sent after the protocol, the update support and a status
+	  request were checked, and sent again until the image has confirmed).
 
 config LPWAN_SHIELD_TRIAL_TIMEOUT_S
 	int "Trial time of a new app image, s"

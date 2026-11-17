@@ -29,6 +29,9 @@ PB_BIND(sensei_Send, sensei_Send, 2)
 PB_BIND(sensei_DfuBegin, sensei_DfuBegin, AUTO)
 
 
+PB_BIND(sensei_DfuConfirm, sensei_DfuConfirm, AUTO)
+
+
 PB_BIND(sensei_DfuChunk, sensei_DfuChunk, 2)
 
 

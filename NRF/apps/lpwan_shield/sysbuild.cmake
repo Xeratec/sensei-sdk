@@ -16,16 +16,30 @@ if(SB_CONFIG_SENSEI_RELEASE AND NOT "${EXTRA_CONF_FILE}" MATCHES "release\\.conf
                       "-DEXTRA_CONF_FILE=conf/release.conf.")
 endif()
 
+# The kind of this board goes into the signed image as a protected TLV (covered by the signature). The shield checks it
+# before it accepts an image (an image of the nRF5340 node must not run on the nRF9151), and the host tools check it
+# too. The app takes the string from these arguments (CMakeLists.txt). The nRF5340 node has the same with its own kind.
+set_config_string(${DEFAULT_IMAGE} CONFIG_MCUBOOT_EXTRA_IMGTOOL_ARGS "--custom-tlv 0xa0 sensei-lpwan-nrf9151")
+
 if(SB_CONFIG_SENSEI_RELEASE)
   # The Release key is private and stays outside git.
   if("${SB_CONFIG_BOOT_SIGNATURE_KEY_FILE}" STREQUAL "")
     message(FATAL_ERROR "Release build: no MCUboot signing key. Set the environment variable "
-                        "SENSEI_SHIELD_MCUBOOT_KEY (or SENSEI_MCUBOOT_KEY) to a PEM file (ECDSA P-256) or pass "
+                        "SENSEI_SHIELD_MCUBOOT_KEY to a PEM file (ECDSA P-256, not the key of the nRF5340 node) or pass "
                         "-DSB_CONFIG_BOOT_SIGNATURE_KEY_FILE=<file>. Make a key with: "
                         "imgtool keygen -k <file> -t ecdsa-p256. See README.md.")
   endif()
   if(NOT EXISTS "${SB_CONFIG_BOOT_SIGNATURE_KEY_FILE}")
     message(FATAL_ERROR "Release build: the MCUboot signing key '${SB_CONFIG_BOOT_SIGNATURE_KEY_FILE}' "
                         "does not exist. See README.md.")
+  endif()
+  # The shield and the nRF5340 node have different keys: a signed image of one is then not valid for the other.
+  if(DEFINED ENV{SENSEI_MCUBOOT_KEY} AND EXISTS "$ENV{SENSEI_MCUBOOT_KEY}")
+    file(SHA256 "$ENV{SENSEI_MCUBOOT_KEY}" node_key_hash)
+    file(SHA256 "${SB_CONFIG_BOOT_SIGNATURE_KEY_FILE}" shield_key_hash)
+    if(node_key_hash STREQUAL shield_key_hash)
+      message(FATAL_ERROR "Release build: the shield key is the same file content as SENSEI_MCUBOOT_KEY (the nRF5340 "
+                          "node). Make a key of its own for the shield: imgtool keygen -k <file> -t ecdsa-p256.")
+    endif()
   endif()
 endif()

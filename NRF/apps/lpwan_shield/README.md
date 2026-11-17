@@ -33,15 +33,19 @@ west build -b sensei_lpwan_nrf9151/nrf9151/ns -- $M -DEXTRA_CONF_FILE=conf/relea
 ```
 
 MCUboot is part of every build (sysbuild). Debug is signed with MCUboot's public development key (anyone can sign for it: lab
-only). Release needs a private ECDSA P-256 key (`imgtool keygen -k key.pem -t ecdsa-p256`) in `SENSEI_SHIELD_MCUBOOT_KEY`, or
-`SENSEI_MCUBOOT_KEY` if that is empty; the build stops without it, and stops if the Release configuration and
-`SB_CONFIG_SENSEI_RELEASE` do not match. Keep the key outside git; MCUboot holds its public half for the life of the shield.
+only). Release needs its own private ECDSA P-256 key (`imgtool keygen -k key.pem -t ecdsa-p256`) in
+`SENSEI_SHIELD_MCUBOOT_KEY`. There is no fallback to the key of the nRF5340 node (`SENSEI_MCUBOOT_KEY`): the build stops
+without it, stops if it is the same key as the node's, and stops if the Release configuration and `SB_CONFIG_SENSEI_RELEASE`
+do not match. Keep the key outside git; MCUboot holds its public half for the life of the shield.
+Both images carry a protected TLV with the board they are made for (`imgtool --custom-tlv 0xa0 sensei-lpwan-nrf9151` here,
+`sensei-ieq-nrf5340` for the node; `sysbuild.cmake`, the signature covers it). The shield refuses an image without its
+kind at `dfu_finish` (`DFU_FAIL_BOARD`), the host tools refuse a file of the wrong kind.
 The SENSEI IEQ node builds it with `make nrf9151` and `make nrf9151-release` (`firmware/Makefile`).
 
 | Build | Flash (non-secure image) | RAM | MCUboot | TF-M |
 |---|---|---|---|---|
-| Release | 101.5 kB | 52 kB | 27.4 kB of 64 kB | 64.3 kB |
-| Debug (RTT log) | 154.0 kB | 60 kB | 27.4 kB of 64 kB | 64.3 kB |
+| Release | 102.7 kB | 54 kB | 27.4 kB of 64 kB | 64.3 kB |
+| Debug (RTT log) | 155.4 kB | 62 kB | 27.4 kB of 64 kB | 64.3 kB |
 
 The non-secure slot is 196.6 kB (188 kB usable) with MCUboot; 212 kB without. Kconfig: `LPWAN_SHIELD_LTE`, `LPWAN_SHIELD_LORA` (both default y).
 Turn one off to save flash.
@@ -213,20 +217,27 @@ The nRF5340 sends the new app, or a modem delta patch, over the SPI link (`dfu_*
   `dfu_application.zip`) is TF-M and app in one image; the gap between them is 0xFF.
 - **App update.** `src/dfu.c` writes slot 1 (`flash_area`), erasing each sector when the transfer reaches it, keeps a checkpoint per
   sector in the first sector of `storage` (a restart of the shield resumes at most one sector back), reads slot 1 back at
-  `dfu_finish` for the SHA-256 and checks the MCUboot header (image, version), and at `dfu_apply` requests one test boot
-  (`boot_request_upgrade`). The nRF5340 then cuts the shield power and powers it again (the shield cannot reset
-  itself reliably in a way the nRF5340 sees, and the nRF5340 owns the power).
+  `dfu_finish` for the SHA-256 and checks the MCUboot header (image, version) and the kind TLV, and at `dfu_apply` erases the
+  trailer of slot 1 and requests one test boot (`boot_request_upgrade`); `dfu_abort` erases the trailer again. The image gets
+  the slot less three sectors (trailer and the free sector of the swap with move). The nRF5340 then cuts the shield power and
+  powers it again (the shield cannot reset itself reliably in a way the nRF5340 sees, and the nRF5340 owns the power).
+  A repeated `finish`, `apply` or `begin` of the open transfer is answered with the state; a new transfer opens at most every 10 s
+  (flash wear); the radios wait only while a sender was heard in the last `LPWAN_SHIELD_DFU_HOLD_S` (150 s) or the modem works.
 - **Trial boot.** The new image answers `get_version` with `trial` set. Only when the nRF5340 accepted the handshake it sends
-  `dfu_confirm`; `dfu_init()` then confirms the image (`boot_write_img_confirmed`) after `LPWAN_SHIELD_CONFIRM_DELAY_S` (5 s) with the
+  `dfu_confirm` (with the image id: another id is refused; sent again until `trial` is false, harmless to repeat);
+  `dfu_init()` then confirms the image (`boot_write_img_confirmed`) after `LPWAN_SHIELD_CONFIRM_DELAY_S` (5 s) with the
   rule of `NRF/system/ota/sensei_ota_trial.h`. Without `dfu_confirm`, or if the nRF5340 refuses the protocol version, the image
   reverts at the next reset or power cycle, and the shield resets by itself after `LPWAN_SHIELD_TRIAL_TIMEOUT_S` (180 s).
-- **Modem.** `nrf_modem_delta_dfu` (target `DFU_TARGET_MODEM`): `lte_modem_init()` starts the modem library if needed, the patch goes in
-  order, the SHA-256 is computed on the way (no resume after a restart of the shield), `dfu_apply` schedules the update and a
-  worker restarts the modem library (result by `NRF_MODEM_LIB_ON_DFU_RES`); `dfu_status` reports it. The modem checks the
-  signature and UUID of the patch itself. Disable with `CONFIG_LPWAN_SHIELD_MODEM_DFU=n`, the whole update with
+- **Modem.** `nrf_modem_delta_dfu` (target `DFU_TARGET_MODEM`): a work queue of its own (`LPWAN_SHIELD_MODEM_DFU_STACK`) starts the
+  modem library if needed and erases the DFU area (state `ERASING` meanwhile), so the link thread keeps answering and feeding its
+  watchdog. The patch goes in order, the SHA-256 is computed on the way (no resume after a restart of the shield), `dfu_apply`
+  schedules the update and the same work queue restarts the modem library; `dfu_status` reports it. Success is
+  `NRF_MODEM_DFU_RESULT_OK`, or, when the library reports nothing, a modem UUID that changed; `VOLTAGE_LOW` is a failure here (the
+  modem tries again at its next start). `dfu_abort` closes the write session, also after a failed write. The nRF5340 keeps the
+  session and the power until the state is DONE or FAILED. The modem checks the signature and UUID of the patch itself. Disable with `CONFIG_LPWAN_SHIELD_MODEM_DFU=n`, the whole update with
   `CONFIG_LPWAN_SHIELD_DFU=n` (then no MCUboot needed: `sysbuild.conf`).
 - **During an update** the shield refuses connect, join and send (`LPWAN_BUSY`); `get_version`, `get_status`, `lte_disconnect`
-  and the `dfu_*` requests work. The link thread runs the update (stack 3 kB) and feeds its watchdog during erases.
+  and the `dfu_*` requests work. The link thread runs the app update (stack 3 kB) and feeds its watchdog during erases.
 - Everything is untested on hardware.
 
 ## Open points

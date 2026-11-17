@@ -24,7 +24,14 @@
  *   back. At `finish` the written bytes are read back and hashed, so the check covers what is in the flash.
  * - MODEM: the delta patch goes to the modem in order. The SHA-256 is computed while it arrives, so a transfer that
  *   the shield forgot (restart) starts again at 0; the modem checks the signature of the patch itself.
- * - A request that does not fit the state is refused and changes nothing, except `abort`.
+ * - A request that does not fit the state is refused and changes nothing, except `abort`. A repeated `finish` (state
+ *   VERIFIED), `apply` (state APPLYING) or `begin` of the open transfer is answered with the state and changes
+ *   nothing: the sender may repeat any request whose answer was lost.
+ * - `abort` undoes everything: the open transfer, the checkpoint, the modem write session and, for the app, the
+ *   marking of the second slot for the test boot (`unmark`).
+ * - Time (optional, `lpwan_dfu_touch`): a new transfer opens at most every LPWAN_DFU_OPEN_MIN_MS (the flash of the
+ *   second slot and the checkpoint sector wear out), and `lpwan_dfu_holds_link` lets go of the radios when the
+ *   sender has been quiet for a while, so a transfer that was given up does not block them for ever.
  */
 
 #ifndef SENSEI_LPWAN_DFU_H_
@@ -47,6 +54,14 @@ extern "C" {
 #define LPWAN_DFU_CHUNK_MAX 512u
 /** Bytes of one checkpoint record in the log (a sector holds LPWAN_DFU_SECTOR / LPWAN_DFU_CKPT_LEN of them). */
 #define LPWAN_DFU_CKPT_LEN 64u
+
+/** Shortest time between two openings of a transfer (begin that is not a repeat), ms. Needs lpwan_dfu_touch(). */
+#define LPWAN_DFU_OPEN_MIN_MS 10000u
+
+/** Kind TLV: a protected TLV of the MCUboot image that says which board the image is for (imgtool --custom-tlv).
+ *  The value is the string, without a terminator. The shield app image carries LPWAN_DFU_KIND_SHIELD. */
+#define LPWAN_DFU_KIND_TLV 0x00A0u
+#define LPWAN_DFU_KIND_SHIELD "sensei-lpwan-nrf9151"
 
 /** Bits of LpwanVersion.dfu_targets. */
 #define LPWAN_DFU_TARGET_APP_BIT 1u
@@ -84,6 +99,10 @@ struct lpwan_dfu_ops {
   int (*read_headers)(void *ctx, uint8_t new_hdr[32], uint8_t running_hdr[32]);
   /** App: mark the image for one trial boot. Modem: start the update (runs on, see apply_state). */
   int (*apply)(void *ctx, sensei_DfuTarget t);
+  /** App: undo `apply` (erase the marking), called by `abort` and by a new transfer. */
+  int (*unmark)(void *ctx);
+  /** App: the finished image is for this board. DFU_FAIL_NONE, or DFU_FAIL_BOARD. NULL: not checked. */
+  sensei_DfuFail (*check_kind)(void *ctx);
   /** Modem: 0 running, 1 done, < 0 failed (detail). App: not used. */
   int (*apply_state)(void *ctx, int *detail);
   /** Called between erases and while reading back, so a watchdog can be fed. */
@@ -109,6 +128,12 @@ struct lpwan_dfu {
   int log_next;         /* next free record in the log, -1: not looked at yet */
   sensei_DfuFail fail;
   int detail;
+  bool marked;      /* app: `apply` was called, the second slot may be marked for the test boot */
+  bool timed;       /* lpwan_dfu_touch() was called: the time rules apply */
+  bool opened;      /* a transfer was opened at open_ms */
+  uint32_t now_ms;  /* time of the request in progress */
+  uint32_t req_ms;  /* time of the last request */
+  uint32_t open_ms; /* time of the last opening */
 };
 
 /** Checkpoint record: where a transfer stands. */
@@ -128,6 +153,17 @@ sensei_LpwanResult lpwan_dfu_finish(struct lpwan_dfu *d, sensei_DfuStatus *st);
 sensei_LpwanResult lpwan_dfu_apply(struct lpwan_dfu *d, sensei_DfuStatus *st);
 sensei_LpwanResult lpwan_dfu_abort(struct lpwan_dfu *d, sensei_DfuStatus *st);
 sensei_LpwanResult lpwan_dfu_status(struct lpwan_dfu *d, sensei_DfuStatus *st);
+
+/** Tell the core the time (any ms clock, wraps after 49 days) before each request. Without it the time rules are off.
+ */
+void lpwan_dfu_touch(struct lpwan_dfu *d, uint32_t now_ms);
+
+/** True while the radios must stay idle: a modem erase or update runs, or a transfer is open and its sender was
+ *  heard in the last `hold_ms` (without lpwan_dfu_touch(): while the transfer is open). */
+bool lpwan_dfu_holds_link(struct lpwan_dfu *d, uint32_t now_ms, uint32_t hold_ms);
+
+/** dfu_confirm: `want` is the image id the master saw (0: any), `running` the id of the running image. */
+bool lpwan_dfu_confirm_allowed(uint32_t want, uint32_t running);
 
 /** Targets the ops table can serve (LPWAN_DFU_TARGET_*_BIT), for LpwanVersion.dfu_targets. */
 uint32_t lpwan_dfu_targets(struct lpwan_dfu *d);

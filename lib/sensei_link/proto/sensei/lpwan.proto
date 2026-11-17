@@ -120,6 +120,8 @@ enum DfuFail {
   DFU_FAIL_FLASH = 7;       // flash driver error, `detail` is the errno
   DFU_FAIL_MODEM = 8;       // modem library error, `detail` is its code
   DFU_FAIL_UNSUPPORTED = 9; // target not built in
+  DFU_FAIL_BOARD = 10;      // an image for another board (the kind TLV is missing or differs)
+  DFU_FAIL_RATE = 11;       // too many new transfers in a short time: wait and ask again (result BUSY)
 }
 
 message DfuBegin {
@@ -130,6 +132,9 @@ message DfuBegin {
   // answer its offset. Else, or if there is none, a new transfer starts at 0.
   bool resume = 4;
 }
+
+// dfu_confirm: image_id is the LpwanVersion.image_id the master saw; the shield confirms only that image. 0: any.
+message DfuConfirm { fixed32 image_id = 1; }
 
 message DfuChunk {
   uint32 offset = 1; // where `data` goes: the offset of the last answer
@@ -167,13 +172,13 @@ message LpwanRequest {
     Empty get_time = 11;
     LpwanSleep sleep = 12;
     // Update of the shield (nRF9151 app or modem). See DfuBegin. Tags 40 to 49 are reserved for it.
-    DfuBegin dfu_begin = 40; // open (or resume) a transfer
-    DfuChunk dfu_chunk = 41; // bytes of the image
-    Empty dfu_finish = 42;   // all bytes sent: check the SHA-256
-    Empty dfu_apply = 43;    // app: mark for one trial boot (the master then power-cycles the shield); modem: apply
-    Empty dfu_abort = 44;    // drop the open transfer
-    Empty dfu_status = 45;   // state and next offset (the resume query)
-    Empty dfu_confirm = 46;  // the master accepted the handshake of an image on trial
+    DfuBegin dfu_begin = 40;     // open (or resume) a transfer
+    DfuChunk dfu_chunk = 41;     // bytes of the image
+    Empty dfu_finish = 42;       // all bytes sent: check the SHA-256
+    Empty dfu_apply = 43;        // app: mark for one trial boot (the master then power-cycles the shield); modem: apply
+    Empty dfu_abort = 44;        // drop the open transfer
+    Empty dfu_status = 45;       // state and next offset (the resume query)
+    DfuConfirm dfu_confirm = 46; // the master accepted the handshake of an image on trial (sent again until trial ends)
   }
 }
 

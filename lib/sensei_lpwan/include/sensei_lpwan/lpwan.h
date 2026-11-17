@@ -150,17 +150,24 @@ int sensei_lpwan_query_version(sensei_LpwanVersion *out, uint32_t timeout_ms);
  * and the flow are in sensei_lpwan/lpwan_dfu.h. What the client adds:
  *
  * - dfu_begin opens a session that holds the link: no data uplink is sent and the shield is not powered down
- *   (sensei_lpwan_radio_ready() is false, sensei_lpwan_radio_send() gives -EBUSY), GAP9 is kept off the shared bus
- *   (BUS_DFU), and an active radio is released first. The session ends with dfu_abort, after the new app was started,
- *   when no transfer is open any more, or after 120 s without a request (the shield keeps the transfer: begin with
- *   `resume` goes on). on_up (radio RADIO_BLE) then tells the app that data may go again.
+ *   (sensei_lpwan_radio_ready() is false, sensei_lpwan_radio_send() gives -EAGAIN, the app waits for on_up), GAP9 is
+ *   kept off the shared bus (BUS_DFU), and an active radio is released first. The session ends with dfu_abort, after
+ *   the new app was started, when no transfer is open any more, after 120 s without a request (the shield keeps the
+ *   transfer: begin with `resume` goes on), or 45 min after it began (then no new session for 10 min). on_up (radio
+ *   RADIO_BLE) tells the app that data may go again.
  * - A request that gets no answer fails with an error code; ask dfu_status for the offset and continue there.
  * - dfu_apply of the app: the shield marks its second slot for a test boot, then the client cuts the shield power,
- * waits 300 ms, switches it on and waits up to 180 s for the new image (MCUboot swaps first). It reports the new
- * version. The new image runs on trial and confirms itself after the client accepted its handshake (protocol version,
- * see LpwanVersion.trial); a new image with another protocol is not accepted and MCUboot goes back to the old one at
- * the next power-up.
- * - Modem: dfu_apply only starts the update (minutes); ask dfu_status until the state is DFU_STATE_DONE or FAILED.
+ *   waits 300 ms, switches it on and waits up to 180 s for the new image (MCUboot swaps first; the bus lease is renewed
+ *   meanwhile). If the answer to dfu_apply is lost the client asks dfu_status and goes on if the image is marked. The
+ *   result carries the new version. The new image runs on trial. The client accepts it (protocol, update support kept,
+ *   dfu_status answers) and sends dfu_confirm with its image id, again at every look (every 5 s) until `trial` is
+ *   false, and keeps the shield powered meanwhile; an image that is not accepted is not confirmed and MCUboot goes back
+ *   to the old one at the next power-up.
+ * - Whenever a swap may be running (first bring-up after the node started, after an apply, after a power cut while an
+ *   image was on trial, after a bring-up that timed out) the client waits for the shield up to 180 s without cutting
+ *   the power. The rules and times are in sensei_lpwan/lpwan_upd.h (host-tested).
+ * - Modem: dfu_apply only starts the update (minutes). The client keeps the session and the power and asks the shield
+ *   itself every 5 s until the state is DFU_STATE_DONE or FAILED; the host may ask too, or be gone.
  */
 struct sensei_lpwan_dfu_result {
   sensei_LpwanResult result; /* the shield's verdict (LPWAN_OK: accepted); the status tells why if it is not */
@@ -170,8 +177,9 @@ struct sensei_lpwan_dfu_result {
 };
 
 /** done(err, res, user) runs on hooks.wq. err 0: the shield answered (see res->result); -EBUSY: another request is in
- *  flight, a send or connect is running, or GAP9 holds the bus; -ENOTSUP: the shield app cannot be updated (old
- * firmware) or lacks the target; -EPROTONOSUPPORT: it speaks another protocol; -ETIMEDOUT, -EIO: the link failed. */
+ *  flight, a send or connect is running, GAP9 holds the bus, or the session was too long (a pause follows); -ENOTSUP:
+ * the shield app cannot be updated (old firmware) or lacks the target; -EPROTONOSUPPORT: it speaks another protocol;
+ * -ETIMEDOUT, -EIO: the link failed. */
 typedef void (*sensei_lpwan_dfu_done_fn)(int err, const struct sensei_lpwan_dfu_result *res, void *user);
 
 /** Relay one dfu_* request (dfu_begin ... dfu_confirm of LpwanRequest). The request is copied. Returns 0 if it was

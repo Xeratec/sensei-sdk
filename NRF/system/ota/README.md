@@ -61,6 +61,15 @@ end with 0x00 and must not start with `0x06 0x09` or `0x04 0x14`. The node app d
 Signing keys and the build type belong to the app's sysbuild files, not to this module. The node's setup is in
 `firmware/nrf5340/{sysbuild.conf,sysbuild.cmake,Kconfig.sysbuild}`.
 
+## Image id and board TLV
+
+`sensei_ota_image.h` (pure, host-tested in `tests/`) finds a TLV in the trailer of a signed MCUboot image through a read
+callback: the image id (first 4 bytes of the SHA-256 TLV, `sensei_ota_image_id()` of the node and of the LPWAN shield app) and
+the board TLV `0xa0`, a protected TLV (covered by the signature) that names the board an image is for. An app adds it in its
+`sysbuild.cmake`: `set_config_string(${DEFAULT_IMAGE} CONFIG_MCUBOOT_EXTRA_IMGTOOL_ARGS "--custom-tlv 0xa0 <board>")`. The shield
+app of this SDK checks it before it accepts an image; the host tools of SENSEI IEQ check it for both boards. MCUboot itself
+ignores it.
+
 ## Not covered
 
 - The network core of the nRF5340: the NCS update path needs the b0n bootloader and the partition manager.

@@ -23,9 +23,9 @@ nRF5340 (master)                          nRF9151 (slave)
 | Folder | What |
 |---|---|
 | `include/sensei_lpwan/lpwan_link.h` | transfer scheme, flags, shared state machine API |
-| `src/` | protocol cores without OS: `link_slave.c` (nRF9151), `lpwan_master.c` (nRF5340), `lpwan_sm.c` (both), `lpwan_timers.c` (3GPP PSM and eDRX timer coding), `lpwan_lora.c` (LoRa payload limit, airtime, send time estimate, what a send gets before it is queued, the send tracking of both sides), `lpwan_dfu.c` (rules of the shield update: offsets, resume, SHA-256, checkpoints, MCUboot header checks; flash and modem behind an ops table) |
+| `src/` | protocol cores without OS: `link_slave.c` (nRF9151), `lpwan_master.c` (nRF5340), `lpwan_sm.c` (both), `lpwan_timers.c` (3GPP PSM and eDRX timer coding), `lpwan_lora.c` (LoRa payload limit, airtime, send time estimate, what a send gets before it is queued, the send tracking of both sides), `lpwan_dfu.c` (rules of the shield update: offsets, resume, SHA-256, checkpoints, MCUboot header and kind checks, repeats, an abort that undoes the marking, rate limit and link hold; flash and modem behind an ops table), `lpwan_upd.c` (what the client remembers about the update: when a swap may be running, the trial of a new image, the end of a session; pure) |
 | `zephyr/` | nRF5340 client: `lpwan_client.c` (thread, shield power, shared SPI_A bus, radios, the update session), `lpwan_shell.c` |
-| `tests/` | host tests: master against slave through a simulated SPI with faults, state machine, timer coding, LoRa limits and airtime, a model of the LR1121 (duty cycle, NbTrans, repeats) with the shield and the client around it, `test_lpwan_dfu` (a shield update on a RAM flash, with gaps, resume after a restart, bad images, the modem path, and over the SPI link with damaged frames) |
+| `tests/` | host tests: master against slave through a simulated SPI with faults, state machine, timer coding, LoRa limits and airtime, a model of the LR1121 (duty cycle, NbTrans, repeats) with the shield and the client around it, `test_lpwan_dfu` (a shield update on a RAM flash, with gaps, resume after a restart, bad images, repeats, abort, the modem path, and over the SPI link with damaged frames), `test_lpwan_dfu_fuzz` (random chunking, lost replies, restarts and power loss in the middle of a flash operation), `test_lpwan_upd` (swap wait, trial, session rules) |
 
 ## Client API (nRF5340, `sensei_lpwan/lpwan.h`)
 
@@ -64,17 +64,26 @@ tags 40 to 46); each answer is a `DfuStatus`. The rules and the flow are in `lpw
 
 - `sensei_lpwan_dfu_submit(request, done, user)`: one request at a time, the answer on the hook work queue
   (`struct sensei_lpwan_dfu_result`: verdict, status, version). `-ENOTSUP` for a shield app without update support
-  (`LpwanVersion.dfu_targets` is 0), `-EBUSY` while a send or connect runs or GAP9 holds the bus.
-- `dfu_begin` opens a session that holds the link: `sensei_lpwan_radio_ready()` is false and `radio_send` gives `-EBUSY`, the
-  shield is not powered down, `BUS_DFU` keeps GAP9 off the bus, an active radio is released. It ends with `dfu_abort`, after a
-  restart into the new app, when no transfer is open any more, or after 120 s without a request. `on_up(RADIO_BLE)` tells
-  the app that data may go again. The shield keeps its transfer, `dfu_begin` with `resume` continues it (also after a power cycle: checkpoints).
+  (`LpwanVersion.dfu_targets` is 0), `-EBUSY` while a send or connect runs, GAP9 holds the bus, or the last session was too long.
+- `dfu_begin` opens a session that holds the link: `sensei_lpwan_radio_ready()` is false and `radio_send` gives `-EAGAIN` (the
+  app waits for `on_up`, no failure is counted), the shield is not powered down, `BUS_DFU` keeps GAP9 off the bus, an active
+  radio is released. It ends with `dfu_abort`, after a restart into the new app, when no transfer is open any more, after 120 s
+  without a request, or 45 min after it began (no new transfer for 10 min then: a sender that renews it for ever must not hold
+  the uplinks and GAP9). `on_up(RADIO_BLE)` tells the app that data may go again. The shield keeps its transfer, `dfu_begin`
+  with `resume` continues it (also after a power cycle: checkpoints).
 - Requests may take seconds on the shield (a flash erase): the client waits 8 s per SPI try. `sensei_lpwan_shield_version()`
   gives the version of the last handshake (the node's Status).
 - `dfu_apply` of the app: the client cuts the shield power, waits 300 ms, switches it on and waits up to 180 s for the new
-  image (MCUboot swaps first). A new image on trial (`LpwanVersion.trial`) gets `dfu_confirm` only after the protocol version
-  matched, in this and in every later handshake; the shield is kept on for 15 s so that it can confirm itself. Otherwise MCUboot
-  goes back to the old image at the next reset.
+  image (MCUboot swaps first; the `BUS_DFU` lease is renewed meanwhile). If the answer is lost it asks `dfu_status` and goes on
+  when the image is marked. The client owns the trial of the new image (`LpwanVersion.trial`): it accepts it when the protocol
+  matches, the update support is kept and `dfu_status` answers, sends `dfu_confirm` with the image id, repeats it every 5 s
+  and keeps the shield on until `trial` is false (at most 200 s; the image resets itself after 180 s). Otherwise MCUboot goes
+  back to the old image at the next reset or power cycle.
+- A swap may be running whenever the shield is switched on after the node started, after an apply, after a power cut during a
+  trial, and after a bring-up that timed out: the client then waits up to 180 s for the shield and does not cut the power
+  (`lpwan_upd.h`; a short wait of 3 s would cut it again and again in the middle of the 25 to 45 s swap).
+- Modem: the client keeps the session and the power while the modem erases or updates, and asks `dfu_status` every 5 s
+  itself, so the update ends cleanly also when the host is gone.
 
 SPI_A (P0.08 to P0.11) is shared with GAP9. The client takes it for each exchange through `sensei_busarb` (internal, not
 part of the API); it also claims the bus during LTE registration and transmission, because GAP9 must not run then. The

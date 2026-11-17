@@ -29,10 +29,22 @@ target_sources(app PRIVATE
   src/service.c
 )
 target_include_directories(app PRIVATE src)
-# The trial rule of the OTA helpers (pure header, no Zephyr dependency): "ota/sensei_ota_trial.h".
+# The trial rule and the image TLVs of the OTA helpers (pure headers, no Zephyr dependency): "ota/sensei_ota_trial.h",
+# "ota/sensei_ota_image.h".
 target_include_directories(app PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../../system)
 
 target_sources_ifdef(CONFIG_LPWAN_SHIELD_DFU app PRIVATE src/dfu.c)
+
+if(CONFIG_LPWAN_SHIELD_DFU)
+  # The kind of this board: sysbuild.cmake adds it to the signed image as a protected TLV (imgtool --custom-tlv 0xa0),
+  # and the app takes the string from the same imgtool arguments, so the two cannot differ.
+  if(CONFIG_MCUBOOT_EXTRA_IMGTOOL_ARGS MATCHES "--custom-tlv 0x[aA]0 ([^ ]+)")
+    target_compile_definitions(app PRIVATE LPWAN_SHIELD_IMAGE_KIND="${CMAKE_MATCH_1}")
+  else()
+    message(FATAL_ERROR "The image kind TLV is missing in CONFIG_MCUBOOT_EXTRA_IMGTOOL_ARGS "
+                        "('${CONFIG_MCUBOOT_EXTRA_IMGTOOL_ARGS}'): build with sysbuild (sysbuild.cmake sets it).")
+  endif()
+endif()
 
 target_sources_ifdef(CONFIG_LPWAN_SHIELD_LTE app PRIVATE src/lte.c)
 

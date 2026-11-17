@@ -14,7 +14,6 @@
 #define HKDF_OKM 36u
 #define DIR_UP 0u
 #define DIR_DOWN 1u
-#define MAX_HEADER SENSEI_SECURE_HEADER_NODE
 #define CTR_MAX 0xFFFFFFFFu
 
 static const uint8_t hkdf_salt[] = {'S', 'E', 'N', 'S', 'E', 'I', '-', 'E', '2', 'E', '-', 'v', '1'};
@@ -58,9 +57,11 @@ static int kind_dir(unsigned kind) {
   }
 }
 
-static void make_nonce(uint8_t nonce[NONCE_SIZE], unsigned dir, uint32_t counter) {
+/* direction (1) | 0 0 0 | sender (4) | counter (4). The sender is 0 for the node (one sender per key). */
+static void make_nonce(uint8_t nonce[NONCE_SIZE], unsigned dir, uint32_t sender, uint32_t counter) {
   memset(nonce, 0, NONCE_SIZE);
   nonce[0] = (uint8_t)dir;
+  put32(nonce + 4, sender);
   put32(nonce + 8, counter);
 }
 
@@ -145,37 +146,48 @@ void sensei_secure_replay_update(struct sensei_secure_replay *r, uint32_t counte
 /* ---- session ---- */
 
 int sensei_secure_init(struct sensei_secure *s, const struct sensei_secure_crypto *c, enum sensei_secure_role role,
-                       const struct sensei_secure_keys *keys, uint32_t tx_reserved, uint32_t rx_highest,
-                       uint32_t ctr_step) {
+                       const struct sensei_secure_keys *keys, uint32_t tx_sender, uint32_t tx_reserved,
+                       uint32_t ctr_step, const struct sensei_secure_rx_state *rx, size_t n_rx,
+                       const struct sensei_secure_store *store) {
   const uint8_t *tx = role == SENSEI_SECURE_ROLE_NODE ? keys->k_up : keys->k_down;
-  const uint8_t *rx = role == SENSEI_SECURE_ROLE_NODE ? keys->k_down : keys->k_up;
-  void *user = s->user;
-  int (*ptx)(void *, uint32_t) = s->persist_tx;
-  void (*prx)(void *, uint32_t) = s->persist_rx;
+  const uint8_t *rxk = role == SENSEI_SECURE_ROLE_NODE ? keys->k_down : keys->k_up;
 
-  if (keys->key_id == 0 || ctr_step == 0) {
+  memset(s, 0, sizeof(*s));
+  if (keys->key_id == 0 || ctr_step == 0 || n_rx > SENSEI_SECURE_MAX_SENDERS || (n_rx && !rx) ||
+      (role == SENSEI_SECURE_ROLE_BACKEND) == (tx_sender == 0)) {
     return SENSEI_SECURE_ERR_STATE;
   }
-  memset(s, 0, sizeof(*s));
-  s->user = user;
-  s->persist_tx = ptx;
-  s->persist_rx = prx;
-  s->c = c;
-  s->role = role;
+  for (size_t i = 0; i < n_rx; i++) {
+    for (size_t j = 0; j < i; j++) {
+      if (rx[j].sender == rx[i].sender) {
+        return SENSEI_SECURE_ERR_STATE;
+      }
+    }
+  }
   if (c->aead_import(c->ctx, tx, &s->k_tx) != 0) {
     return SENSEI_SECURE_ERR_CRYPTO;
   }
-  if (c->aead_import(c->ctx, rx, &s->k_rx) != 0) {
+  if (c->aead_import(c->ctx, rxk, &s->k_rx) != 0) {
     (void)c->key_destroy(c->ctx, s->k_tx);
     s->k_tx = 0;
     return SENSEI_SECURE_ERR_CRYPTO;
   }
+  s->c = c;
+  s->role = role;
+  if (store) {
+    s->store = *store;
+  }
   s->key_id = keys->key_id;
+  s->tx_sender = tx_sender;
   s->tx_last = tx_reserved;
   s->tx_reserved = tx_reserved;
   s->ctr_step = ctr_step;
-  s->rx.highest = rx_highest;
-  s->rx.bitmap = rx_highest ? ~(uint64_t)0 : 0;
+  for (size_t i = 0; i < n_rx; i++) {
+    s->peers[i].sender = rx[i].sender;
+    s->peers[i].rx.highest = rx[i].highest;
+    s->peers[i].rx.bitmap = rx[i].highest ? ~(uint64_t)0 : 0;
+  }
+  s->n_peers = n_rx;
   s->open = true;
   return 0;
 }
@@ -189,29 +201,52 @@ void sensei_secure_close(struct sensei_secure *s) {
   s->open = false;
 }
 
+static struct sensei_secure_peer *find_peer(struct sensei_secure *s, uint32_t sender) {
+  for (size_t i = 0; i < s->n_peers; i++) {
+    if (s->peers[i].sender == sender) {
+      return &s->peers[i];
+    }
+  }
+  return NULL;
+}
+
+uint32_t sensei_secure_rx_highest(const struct sensei_secure *s, uint32_t sender) {
+  for (size_t i = 0; i < s->n_peers; i++) {
+    if (s->peers[i].sender == sender) {
+      return s->peers[i].rx.highest;
+    }
+  }
+  return 0;
+}
+
 struct hdr {
   unsigned dir, kind;
   bool has_node;
   uint64_t node_id;
-  uint32_t key_id, counter;
+  uint32_t key_id, sender, counter;
   size_t size;
 };
 
 static int parse(const uint8_t *in, size_t len, struct hdr *h) {
-  if (!sensei_secure_is_sealed(in, len) || ((in[0] >> 2) & 3u) != SENSEI_SECURE_VERSION) {
+  size_t n;
+
+  if (!sensei_secure_is_sealed(in, len)) {
     return SENSEI_SECURE_ERR_FORMAT;
   }
   h->dir = in[0] & 1u;
   h->has_node = (in[0] & 2u) != 0;
   h->kind = in[1];
-  h->size = h->has_node ? SENSEI_SECURE_HEADER_NODE : SENSEI_SECURE_HEADER;
-  if (len < h->size + SENSEI_SECURE_TAG_SIZE || kind_dir(h->kind) != (int)h->dir) {
+  n = (h->has_node ? SENSEI_SECURE_HEADER_NODE : SENSEI_SECURE_HEADER) +
+      (h->dir == DIR_DOWN ? SENSEI_SECURE_SENDER_SIZE : 0u);
+  h->size = n;
+  if (len < n + SENSEI_SECURE_TAG_SIZE || kind_dir(h->kind) != (int)h->dir) {
     return SENSEI_SECURE_ERR_FORMAT;
   }
   h->node_id = h->has_node ? get64(in + 2) : 0;
-  h->key_id = get32(in + h->size - 8);
-  h->counter = get32(in + h->size - 4);
-  return 0;
+  h->key_id = get32(in + (h->has_node ? 10 : 2));
+  h->sender = h->dir == DIR_DOWN ? get32(in + n - 8) : 0;
+  h->counter = get32(in + n - 4);
+  return h->dir == DIR_DOWN && h->sender == 0 ? SENSEI_SECURE_ERR_FORMAT : 0;
 }
 
 uint32_t sensei_secure_peek_key_id(const uint8_t *buf, size_t len) {
@@ -224,7 +259,8 @@ int sensei_secure_seal(struct sensei_secure *s, enum sensei_secure_kind kind, co
                        const uint8_t *pt, size_t pt_len, uint8_t *out, size_t out_cap) {
   uint8_t nonce[NONCE_SIZE];
   unsigned dir = s->role == SENSEI_SECURE_ROLE_NODE ? DIR_UP : DIR_DOWN;
-  size_t hs = node_id ? SENSEI_SECURE_HEADER_NODE : SENSEI_SECURE_HEADER;
+  size_t hs =
+      (node_id ? SENSEI_SECURE_HEADER_NODE : SENSEI_SECURE_HEADER) + (dir == DIR_DOWN ? SENSEI_SECURE_SENDER_SIZE : 0u);
   size_t n = 0;
   uint32_t ctr;
 
@@ -241,7 +277,7 @@ int sensei_secure_seal(struct sensei_secure *s, enum sensei_secure_kind kind, co
   if (ctr > s->tx_reserved) {
     uint32_t res = (CTR_MAX - ctr < s->ctr_step - 1) ? CTR_MAX : ctr + s->ctr_step - 1;
 
-    if (s->persist_tx && s->persist_tx(s->user, res) != 0) {
+    if (s->store.tx && s->store.tx(s->store.user, res) != 0) {
       return SENSEI_SECURE_ERR_STORE;
     }
     s->tx_reserved = res;
@@ -251,9 +287,12 @@ int sensei_secure_seal(struct sensei_secure *s, enum sensei_secure_kind kind, co
   if (node_id) {
     put64(out + 2, *node_id);
   }
-  put32(out + hs - 8, s->key_id);
+  put32(out + (node_id ? 10 : 2), s->key_id);
+  if (dir == DIR_DOWN) {
+    put32(out + hs - 8, s->tx_sender);
+  }
   put32(out + hs - 4, ctr);
-  make_nonce(nonce, dir, ctr);
+  make_nonce(nonce, dir, s->tx_sender, ctr);
   if (s->c->aead_encrypt(s->c->ctx, s->k_tx, nonce, out, hs, pt, pt_len, out + hs, out_cap - hs, &n) != 0) {
     return SENSEI_SECURE_ERR_CRYPTO;
   }
@@ -263,8 +302,10 @@ int sensei_secure_seal(struct sensei_secure *s, enum sensei_secure_kind kind, co
 
 int sensei_secure_open(struct sensei_secure *s, enum sensei_secure_kind want, const uint64_t *own_id, const uint8_t *in,
                        size_t in_len, uint8_t *out, size_t out_cap, size_t *out_len, enum sensei_secure_kind *kind) {
+  static const struct sensei_secure_replay none = {0, 0};
   uint8_t nonce[NONCE_SIZE];
   unsigned dir = s->role == SENSEI_SECURE_ROLE_NODE ? DIR_DOWN : DIR_UP;
+  struct sensei_secure_peer *peer;
   struct hdr h;
   size_t n = 0;
   int err;
@@ -288,21 +329,33 @@ int sensei_secure_open(struct sensei_secure *s, enum sensei_secure_kind want, co
   if (own_id && h.has_node && h.node_id != *own_id) {
     return SENSEI_SECURE_ERR_NODE;
   }
-  err = sensei_secure_replay_check(&s->rx, h.counter);
+  peer = find_peer(s, h.sender);
+  if (!peer && s->n_peers == SENSEI_SECURE_MAX_SENDERS) {
+    return SENSEI_SECURE_ERR_SENDER;
+  }
+  err = sensei_secure_replay_check(peer ? &peer->rx : &none, h.counter);
   if (err) {
     return err;
   }
   if (out_cap < in_len - h.size - SENSEI_SECURE_TAG_SIZE) {
     return SENSEI_SECURE_ERR_SPACE;
   }
-  make_nonce(nonce, dir, h.counter);
+  make_nonce(nonce, dir, h.sender, h.counter);
   if (s->c->aead_decrypt(s->c->ctx, s->k_rx, nonce, in, h.size, in + h.size, in_len - h.size, out, out_cap, &n) != 0) {
     return SENSEI_SECURE_ERR_AUTH;
   }
-  if (h.counter > s->rx.highest && s->persist_rx) {
-    s->persist_rx(s->user, h.counter);
+  if (h.counter > (peer ? peer->rx.highest : 0u) && s->store.rx &&
+      s->store.rx(s->store.user, h.sender, h.counter) != 0) {
+    wipe(out, n); /* refused: do not hand out the plaintext */
+    return SENSEI_SECURE_ERR_STORE;
   }
-  sensei_secure_replay_update(&s->rx, h.counter);
+  if (!peer) {
+    peer = &s->peers[s->n_peers++];
+    peer->sender = h.sender;
+    peer->rx.highest = 0;
+    peer->rx.bitmap = 0;
+  }
+  sensei_secure_replay_update(&peer->rx, h.counter);
   *out_len = n;
   if (kind) {
     *kind = (enum sensei_secure_kind)h.kind;

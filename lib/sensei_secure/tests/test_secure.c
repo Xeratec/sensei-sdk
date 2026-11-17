@@ -33,12 +33,25 @@ static struct sensei_secure_keys keys_for(enum sensei_secure_role role) {
   return k;
 }
 
+#define BSENDER 0x01020304u
+
+/* A session. rx_hi: persisted highest counter of rx_sender (0: nothing persisted). The struct is filled with
+ * garbage first: init must not read it. */
+static void open_full(struct sensei_secure *s, enum sensei_secure_role role, uint32_t sender, uint32_t tx_res,
+                      uint32_t rx_sender, uint32_t rx_hi, uint32_t step, const struct sensei_secure_store *store) {
+  struct sensei_secure_keys k = keys_for(role);
+  struct sensei_secure_rx_state rx = {rx_sender, rx_hi};
+
+  memset(s, 0xA5, sizeof(*s));
+  CHECK(sensei_secure_init(s, C, role, &k, sender, tx_res, step, rx_hi ? &rx : NULL, rx_hi ? 1 : 0, store) == 0);
+}
+
+/* Backend sessions seal as BSENDER and a node tracks the sender of the backend. */
 static void open_session(struct sensei_secure *s, enum sensei_secure_role role, uint32_t tx_res, uint32_t rx_hi,
                          uint32_t step) {
-  struct sensei_secure_keys k = keys_for(role);
+  const int backend = role == SENSEI_SECURE_ROLE_BACKEND;
 
-  memset(s, 0, sizeof(*s));
-  CHECK(sensei_secure_init(s, C, role, &k, tx_res, rx_hi, step) == 0);
+  open_full(s, role, backend ? BSENDER : 0, tx_res, backend ? 0 : BSENDER, rx_hi, step, NULL);
 }
 
 static void test_keys(void) {
@@ -66,18 +79,20 @@ static void test_vectors(void) {
     enum sensei_secure_kind kind = 0;
     int m;
 
-    open_session(&tx, is_up(v->kind) ? SENSEI_SECURE_ROLE_NODE : SENSEI_SECURE_ROLE_BACKEND, v->counter - 1, 0, 1);
-    open_session(&rx, is_up(v->kind) ? SENSEI_SECURE_ROLE_BACKEND : SENSEI_SECURE_ROLE_NODE, 0, 0, 1);
+    open_full(&tx, is_up(v->kind) ? SENSEI_SECURE_ROLE_NODE : SENSEI_SECURE_ROLE_BACKEND, v->sender, v->counter - 1, 0,
+              0, 1, NULL);
+    open_full(&rx, is_up(v->kind) ? SENSEI_SECURE_ROLE_BACKEND : SENSEI_SECURE_ROLE_NODE, is_up(v->kind) ? BSENDER : 0,
+              0, 0, 0, 1, NULL);
     m = sensei_secure_seal(&tx, (enum sensei_secure_kind)v->kind, v->has_node_id ? &v->node_id : NULL, v->plain,
                            v->plain_len, out, sizeof(out));
     CHECK(m == (int)v->sealed_len);
-    CHECK(m == (int)sensei_secure_sealed_size(v->plain_len, v->has_node_id));
+    CHECK(m == (int)sensei_secure_sealed_size(v->plain_len, v->has_node_id, !is_up(v->kind)));
     CHECK(m > 0 && memcmp(out, v->sealed, v->sealed_len) == 0);
     CHECK(sensei_secure_is_sealed(v->sealed, v->sealed_len));
     CHECK(sensei_secure_peek_key_id(v->sealed, v->sealed_len) == VEC_SEC_KEY_ID);
     CHECK(sensei_secure_open(&rx, 0, NULL, v->sealed, v->sealed_len, pt, sizeof(pt), &n, &kind) == 0);
     CHECK(n == v->plain_len && (v->plain_len == 0 || memcmp(pt, v->plain, n) == 0) && kind == v->kind);
-    CHECK(rx.rx.highest == v->counter);
+    CHECK(sensei_secure_rx_highest(&rx, v->sender) == v->counter);
     sensei_secure_close(&tx);
     sensei_secure_close(&rx);
   }
@@ -96,7 +111,7 @@ static void test_tamper(void) {
       bad[b] ^= 0x01;
       CHECK(sensei_secure_open(&rx, 0, NULL, bad, v->sealed_len, pt, sizeof(pt), &n, NULL) < 0);
     }
-    CHECK(rx.rx.highest == 0 && rx.rx.bitmap == 0); /* nothing was recorded */
+    CHECK(rx.n_peers == 0); /* nothing was recorded */
     CHECK(sensei_secure_open(&rx, 0, NULL, v->sealed, v->sealed_len - 1, pt, sizeof(pt), &n, NULL) < 0);
     CHECK(sensei_secure_open(&rx, 0, NULL, v->sealed, 5, pt, sizeof(pt), &n, NULL) < 0);
     CHECK(sensei_secure_open(&rx, 0, NULL, v->sealed, v->sealed_len, pt, sizeof(pt), &n, NULL) == 0);
@@ -144,7 +159,7 @@ static void test_errors(void) {
     CHECK(sensei_secure_derive(C, own, SENSEI_SECURE_ROLE_NODE, pub, vec_sec_backend_pub, &k) == 0);
     C->key_destroy(C->ctx, own);
     memset(&other, 0, sizeof(other));
-    CHECK(sensei_secure_init(&other, C, SENSEI_SECURE_ROLE_BACKEND, &k, 0, 0, 1) == 0);
+    CHECK(sensei_secure_init(&other, C, SENSEI_SECURE_ROLE_BACKEND, &k, BSENDER, 0, 1, NULL, 0, NULL) == 0);
     CHECK(k.key_id != VEC_SEC_KEY_ID);
     m = sensei_secure_seal(&node, SENSEI_SECURE_KIND_UPLINK, NULL, pt, 3, env, sizeof(env));
     CHECK(sensei_secure_open(&other, 0, NULL, env, (size_t)m, pt, sizeof(pt), &n, NULL) == SENSEI_SECURE_ERR_KEY_ID);
@@ -202,15 +217,15 @@ static void test_replay_window(void) {
   CHECK(sensei_secure_open(&back, 0, NULL, env[36], (size_t)len[36], pt, sizeof(pt), &n, NULL) ==
         SENSEI_SECURE_ERR_REPLAY);
   CHECK(sensei_secure_open(&back, 0, NULL, env[50], (size_t)len[50], pt, sizeof(pt), &n, NULL) == 0);
-  CHECK(back.rx.highest == 100);
+  CHECK(sensei_secure_rx_highest(&back, 0) == 100);
   sensei_secure_close(&node);
   sensei_secure_close(&back);
 }
 
 static struct {
   int tx_calls, rx_calls;
-  uint32_t tx_last, rx_last;
-  int fail;
+  uint32_t tx_last, rx_sender, rx_last;
+  int fail, rx_fail;
 } st;
 
 static int p_tx(void *u, uint32_t r) {
@@ -223,11 +238,18 @@ static int p_tx(void *u, uint32_t r) {
   return 0;
 }
 
-static void p_rx(void *u, uint32_t h) {
+static int p_rx(void *u, uint32_t sender, uint32_t h) {
   (void)u;
+  if (st.rx_fail) {
+    return -1;
+  }
   st.rx_calls++;
+  st.rx_sender = sender;
   st.rx_last = h;
+  return 0;
 }
+
+static const struct sensei_secure_store STORE = {p_tx, p_rx, NULL};
 
 static void test_counters(void) {
   struct sensei_secure node, back;
@@ -237,14 +259,7 @@ static void test_counters(void) {
   int m;
 
   memset(&st, 0, sizeof(st));
-  memset(&node, 0, sizeof(node));
-  memset(&back, 0, sizeof(back));
-  node.persist_tx = p_tx;
-  node.persist_rx = p_rx;
-  open_session(&node, SENSEI_SECURE_ROLE_NODE, 0, 0, 1);
-  node.persist_tx = p_tx;
-  node.persist_rx = p_rx;
-  node.ctr_step = 4;
+  open_full(&node, SENSEI_SECURE_ROLE_NODE, 0, 0, 0, 0, 4, &STORE);
   for (int i = 1; i <= 9; i++) {
     m = sensei_secure_seal(&node, SENSEI_SECURE_KIND_UPLINK, NULL, msg, sizeof(msg), env, sizeof(env));
     CHECK(m > 0 && node.tx_last == (uint32_t)i);
@@ -263,18 +278,19 @@ static void test_counters(void) {
 
   /* reboot: resume above the stored high-water mark */
   sensei_secure_close(&node);
-  open_session(&node, SENSEI_SECURE_ROLE_NODE, st.tx_last, 0, 4);
+  open_full(&node, SENSEI_SECURE_ROLE_NODE, 0, st.tx_last, 0, 0, 4, &STORE);
   m = sensei_secure_seal(&node, SENSEI_SECURE_KIND_UPLINK, NULL, msg, 4, env, sizeof(env));
   CHECK(m > 0 && node.tx_last == 13);
-  open_session(&back, SENSEI_SECURE_ROLE_BACKEND, 0, 12, 1);
-  CHECK(sensei_secure_open(&back, 0, NULL, env, (size_t)m, pt, sizeof(pt), &n, NULL) == 0 && back.rx.highest == 13);
+  open_session(&back, SENSEI_SECURE_ROLE_BACKEND, 0, 0, 1);
+  CHECK(sensei_secure_open(&back, 0, NULL, env, (size_t)m, pt, sizeof(pt), &n, NULL) == 0);
+  CHECK(sensei_secure_rx_highest(&back, 0) == 13);
   sensei_secure_close(&back);
 
   /* receive side of the node: persisted highest, window treated as seen after a reboot */
   {
     struct sensei_secure b2, n2;
     uint8_t e5[60], e11[60], e12[60];
-    int l5, l11, l12;
+    int l5 = 0, l11 = 0, l12 = 0;
 
     open_session(&b2, SENSEI_SECURE_ROLE_BACKEND, 0, 0, 1);
     for (int i = 1; i <= 12; i++) {
@@ -291,24 +307,154 @@ static void test_counters(void) {
         l12 = l;
       }
     }
-    open_session(&n2, SENSEI_SECURE_ROLE_NODE, 0, 11, 4);
-    n2.persist_rx = p_rx;
+    open_full(&n2, SENSEI_SECURE_ROLE_NODE, 0, 0, BSENDER, 11, 4, &STORE);
     st.rx_calls = 0;
     CHECK(sensei_secure_open(&n2, 0, NULL, e11, (size_t)l11, pt, sizeof(pt), &n, NULL) == SENSEI_SECURE_ERR_REPLAY);
     CHECK(sensei_secure_open(&n2, 0, NULL, e5, (size_t)l5, pt, sizeof(pt), &n, NULL) == SENSEI_SECURE_ERR_REPLAY);
     CHECK(sensei_secure_open(&n2, SENSEI_SECURE_KIND_DOWNLINK, NULL, e12, (size_t)l12, pt, sizeof(pt), &n, NULL) == 0);
-    CHECK(st.rx_calls == 1 && st.rx_last == 12);
+    CHECK(st.rx_calls == 1 && st.rx_sender == BSENDER && st.rx_last == 12);
+
+    /* a failing store refuses the message, leaves no plaintext, and the window does not move */
+    sensei_secure_close(&n2);
+    open_full(&n2, SENSEI_SECURE_ROLE_NODE, 0, 0, BSENDER, 4, 4, &STORE);
+    st.rx_fail = 1;
+    memset(pt, 0, sizeof(pt));
+    CHECK(sensei_secure_open(&n2, 0, NULL, e12, (size_t)l12, pt, sizeof(pt), &n, NULL) == SENSEI_SECURE_ERR_STORE);
+    for (size_t i = 0; i < 4; i++) {
+      CHECK(pt[i] == 0);
+    }
+    CHECK(sensei_secure_rx_highest(&n2, BSENDER) == 4);
+    st.rx_fail = 0;
+    CHECK(sensei_secure_open(&n2, 0, NULL, e12, (size_t)l12, pt, sizeof(pt), &n, NULL) == 0); /* retry works */
+    CHECK(sensei_secure_rx_highest(&n2, BSENDER) == 12);
     sensei_secure_close(&n2);
     sensei_secure_close(&b2);
   }
 
   /* counter exhausted */
   sensei_secure_close(&node);
-  open_session(&node, SENSEI_SECURE_ROLE_NODE, 0xFFFFFFFEu, 0, 4);
+  open_full(&node, SENSEI_SECURE_ROLE_NODE, 0, 0xFFFFFFFEu, 0, 0, 4, NULL);
   CHECK(sensei_secure_seal(&node, SENSEI_SECURE_KIND_UPLINK, NULL, msg, 4, env, sizeof(env)) > 0);
   CHECK(sensei_secure_seal(&node, SENSEI_SECURE_KIND_UPLINK, NULL, msg, 4, env, sizeof(env)) ==
         SENSEI_SECURE_ERR_STATE);
   sensei_secure_close(&node);
+}
+
+/* Two senders use the same counters: different nonces, each has its own window on the node. */
+static void test_senders(void) {
+  struct sensei_secure a, b, node;
+  uint8_t ea[8][60], eb[8][60], pt[60], msg[4] = {1, 2, 3, 4};
+  int la[8], lb[8];
+  size_t n;
+
+  open_full(&a, SENSEI_SECURE_ROLE_BACKEND, 0xAAAA0001u, 0, 0, 0, 1, NULL);
+  open_full(&b, SENSEI_SECURE_ROLE_BACKEND, 0xBBBB0002u, 0, 0, 0, 1, NULL);
+  open_full(&node, SENSEI_SECURE_ROLE_NODE, 0, 0, 0, 0, 1, NULL);
+  for (int i = 0; i < 8; i++) {
+    la[i] = sensei_secure_seal(&a, SENSEI_SECURE_KIND_DOWNLINK, NULL, msg, 4, ea[i], sizeof(ea[i]));
+    lb[i] = sensei_secure_seal(&b, SENSEI_SECURE_KIND_DOWNLINK, NULL, msg, 4, eb[i], sizeof(eb[i]));
+    CHECK(la[i] == 4 + 30 && lb[i] == la[i]);
+    /* same key, same counter, same plaintext: different sender, different nonce, different ciphertext */
+    CHECK(memcmp(ea[i], eb[i], (size_t)la[i]) != 0);
+    CHECK(memcmp(ea[i] + 14, eb[i] + 14, 4 + 4) != 0); /* ciphertext and tag */
+  }
+  /* counter 1 of both is accepted, a replay of either is not, counters of one do not block the other */
+  CHECK(sensei_secure_open(&node, 0, NULL, ea[0], (size_t)la[0], pt, sizeof(pt), &n, NULL) == 0);
+  CHECK(sensei_secure_open(&node, 0, NULL, eb[0], (size_t)lb[0], pt, sizeof(pt), &n, NULL) == 0);
+  CHECK(sensei_secure_open(&node, 0, NULL, ea[0], (size_t)la[0], pt, sizeof(pt), &n, NULL) == SENSEI_SECURE_ERR_REPLAY);
+  CHECK(sensei_secure_open(&node, 0, NULL, eb[0], (size_t)lb[0], pt, sizeof(pt), &n, NULL) == SENSEI_SECURE_ERR_REPLAY);
+  CHECK(sensei_secure_open(&node, 0, NULL, ea[5], (size_t)la[5], pt, sizeof(pt), &n, NULL) == 0);
+  CHECK(sensei_secure_open(&node, 0, NULL, eb[1], (size_t)lb[1], pt, sizeof(pt), &n, NULL) == 0);
+  CHECK(sensei_secure_rx_highest(&node, 0xAAAA0001u) == 6 && sensei_secure_rx_highest(&node, 0xBBBB0002u) == 2);
+  /* the sender field is covered by the tag: a message cannot be moved to another sender's window */
+  {
+    uint8_t forged[60];
+
+    memcpy(forged, eb[3], (size_t)lb[3]);
+    memcpy(forged + 6, ea[3] + 6, 4); /* the sender field */
+    CHECK(sensei_secure_open(&node, 0, NULL, forged, (size_t)lb[3], pt, sizeof(pt), &n, NULL) ==
+          SENSEI_SECURE_ERR_AUTH);
+  }
+  /* sender 0 in a downlink is not an envelope */
+  {
+    uint8_t zero[60];
+
+    memcpy(zero, ea[2], (size_t)la[2]);
+    memset(zero + 6, 0, 4);
+    CHECK(sensei_secure_open(&node, 0, NULL, zero, (size_t)la[2], pt, sizeof(pt), &n, NULL) ==
+          SENSEI_SECURE_ERR_FORMAT);
+  }
+  sensei_secure_close(&a);
+  sensei_secure_close(&b);
+  sensei_secure_close(&node);
+}
+
+/* The table holds SENSEI_SECURE_MAX_SENDERS senders; the next one is refused (also a forged one cannot take a slot). */
+static void test_sender_table(void) {
+  struct sensei_secure node, back;
+  uint8_t env[60], pt[60], msg[4] = {1, 2, 3, 4};
+  size_t n;
+  int m;
+
+  open_full(&node, SENSEI_SECURE_ROLE_NODE, 0, 0, 0, 0, 1, NULL);
+  for (uint32_t i = 1; i <= SENSEI_SECURE_MAX_SENDERS + 1; i++) {
+    open_full(&back, SENSEI_SECURE_ROLE_BACKEND, 0x1000u + i, 0, 0, 0, 1, NULL);
+    m = sensei_secure_seal(&back, SENSEI_SECURE_KIND_DOWNLINK, NULL, msg, 4, env, sizeof(env));
+    if (i <= SENSEI_SECURE_MAX_SENDERS) {
+      CHECK(sensei_secure_open(&node, 0, NULL, env, (size_t)m, pt, sizeof(pt), &n, NULL) == 0);
+    } else {
+      CHECK(sensei_secure_open(&node, 0, NULL, env, (size_t)m, pt, sizeof(pt), &n, NULL) == SENSEI_SECURE_ERR_SENDER);
+    }
+    sensei_secure_close(&back);
+  }
+  CHECK(node.n_peers == SENSEI_SECURE_MAX_SENDERS);
+  /* a known sender still works */
+  open_full(&back, SENSEI_SECURE_ROLE_BACKEND, 0x1001u, 1, 0, 0, 1, NULL);
+  m = sensei_secure_seal(&back, SENSEI_SECURE_KIND_DOWNLINK, NULL, msg, 4, env, sizeof(env));
+  CHECK(sensei_secure_open(&node, 0, NULL, env, (size_t)m, pt, sizeof(pt), &n, NULL) == 0);
+  sensei_secure_close(&back);
+  sensei_secure_close(&node);
+}
+
+/* init: bad arguments, and the struct is never read before it is cleared. */
+static void test_init(void) {
+  struct sensei_secure s;
+  struct sensei_secure_keys k = keys_for(SENSEI_SECURE_ROLE_BACKEND);
+  struct sensei_secure_rx_state dup[2] = {{5, 1}, {5, 2}};
+
+  memset(&s, 0xFF, sizeof(s));
+  CHECK(sensei_secure_init(&s, C, SENSEI_SECURE_ROLE_BACKEND, &k, 0, 0, 1, NULL, 0, NULL) == SENSEI_SECURE_ERR_STATE);
+  CHECK(!s.open && s.n_peers == 0 && s.store.tx == NULL && s.store.rx == NULL); /* cleared, not trusted */
+  CHECK(sensei_secure_init(&s, C, SENSEI_SECURE_ROLE_NODE, &k, 7, 0, 1, NULL, 0, NULL) == SENSEI_SECURE_ERR_STATE);
+  CHECK(sensei_secure_init(&s, C, SENSEI_SECURE_ROLE_NODE, &k, 0, 0, 1, dup, 2, NULL) == SENSEI_SECURE_ERR_STATE);
+  CHECK(sensei_secure_init(&s, C, SENSEI_SECURE_ROLE_NODE, &k, 0, 0, 1, NULL, SENSEI_SECURE_MAX_SENDERS + 1, NULL) ==
+        SENSEI_SECURE_ERR_STATE);
+  CHECK(sensei_secure_init(&s, C, SENSEI_SECURE_ROLE_NODE, &k, 0, 0, 0, NULL, 0, NULL) == SENSEI_SECURE_ERR_STATE);
+}
+
+/* Plain protobuf never looks sealed: Settings patches that start with field 20, 21, 36, 37, 52 or 53 (varints) start
+ * with 0xA0 or 0xA8. The version bits keep them apart. */
+static void test_is_sealed_markers(void) {
+  uint8_t buf[60];
+
+  memset(buf, 0, sizeof(buf));
+  for (unsigned first = 0; first < 256; first++) {
+    buf[0] = (uint8_t)first;
+    CHECK(sensei_secure_is_sealed(buf, sizeof(buf)) == (first >= 0xAC && first <= 0xAF));
+  }
+  buf[0] = 0xA0; /* uplink_s, camera_stream, sound_alert_db */
+  buf[1] = 0x2C;
+  CHECK(!sensei_secure_is_sealed(buf, sizeof(buf)));
+  buf[0] = 0xA8; /* radio, jpeg_quality, sound_bands */
+  buf[1] = 0x01;
+  CHECK(!sensei_secure_is_sealed(buf, sizeof(buf)));
+  /* an envelope of the old version (1: 0xA4 ... 0xA7) is refused */
+  buf[0] = 0xA4;
+  CHECK(!sensei_secure_is_sealed(buf, sizeof(buf)));
+  CHECK(sensei_secure_peek_key_id(buf, sizeof(buf)) == 0);
+  /* too short */
+  buf[0] = 0xAC;
+  CHECK(!sensei_secure_is_sealed(buf, SENSEI_SECURE_OVERHEAD - 1));
 }
 
 /* Random key pairs on both sides agree. */
@@ -339,6 +485,10 @@ int main(void) {
   test_errors();
   test_replay_window();
   test_counters();
+  test_senders();
+  test_sender_table();
+  test_init();
+  test_is_sealed_markers();
   test_fresh_keys();
   return CHECK_DONE();
 }

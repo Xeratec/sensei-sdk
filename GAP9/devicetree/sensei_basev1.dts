@@ -195,7 +195,7 @@
                     rwds = "GAP9_PADMUX(12,0,-1)";
                 };
             };
-            micro: micro //Microphone (T5838)
+            micro: micro //Microphone (T5838), SAI1: CLK pad 52 (SCK), DATA pad 54 (SDI), THSEL pad 53 (WS), WAKE pad 51 (GPIO51)
             {
                 status = "okay";
                 sys
@@ -208,13 +208,13 @@
                 pads
                 {
                     sai_clk = "GAP9_PADMUX(52,0,-1)";  // SAI1_SCK
-                    sai_data = "GAP9_PADMUX(54,0,-1)";  // SAI1_SDO
+                    sai_data = "GAP9_PADMUX(54,0,-1)";  // SAI1_SDI (schematic net MIC_DATA, pad 54 is SDI; SDO is pad 55)
                 };
                 defs
                 {
                     sai_itf = <1>;
-                    pdm_direction = "0b10";  // Mic A is wired on SDO channel. -> Bit 1 is set to 1 (RX)
-                    pdm_channel = <3>; // SAI input PDM left channel id
+                    pdm_direction = "0b01";  // The microphone is wired on the SDI pin: bit 0 set (RX)
+                    pdm_channel = <1>;       // SDI left channel (L/R pin of the T5838 low). SDI right would be 0
                 };
             };
 

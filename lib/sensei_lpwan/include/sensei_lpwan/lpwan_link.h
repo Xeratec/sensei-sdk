@@ -108,7 +108,7 @@ void lpwan_sm_init(lpwan_sm_t *sm);
  * `send` records req->seq as the send in flight: the caller has set it before (the master side with
  * lpwan_master_next_seq()), so a tx_done that arrives while the request is still on the wire matches.
  *
- *   get_version, get_status             any state
+ *   get_version, get_status, diag_ack   any state
  *   lte_configure, lora_configure,
  *   lora_provision                      IDLE
  *   lte_connect, lora_join              IDLE, tech NONE, then CONNECTING (tech LTE or LORA)

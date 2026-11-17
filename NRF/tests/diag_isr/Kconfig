@@ -1,0 +1,9 @@
+# SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+# SPDX-License-Identifier: Apache-2.0
+
+mainmenu "SENSEI diagnostics, faults in interrupts"
+
+config TEST_ISR_STACK_OVERFLOW
+	bool "Overflow the interrupt stack on the first boot (the core locks up) instead of the three fault cases"
+
+source "Kconfig.zephyr"

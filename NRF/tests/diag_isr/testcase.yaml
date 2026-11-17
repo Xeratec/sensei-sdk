@@ -1,0 +1,31 @@
+# SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+# SPDX-License-Identifier: Apache-2.0
+---
+# mps2/an521 (Cortex-M33 in QEMU) has the stack guards (MSPLIM, PSPLIM) that the nRF5340 has. QEMU keeps the RAM over the
+# reset, as the nRF keeps the retained RAM. The crashes are on purpose.
+common:
+  platform_allow:
+    - mps2/an521/cpu0
+  tags: sensei diag
+  timeout: 60
+  ignore_faults: true
+  harness: console
+tests:
+  # Four boots: a fault in an interrupt, a stack overflow of a thread, k_panic() in an interrupt; each one is checked
+  # in the next boot.
+  sensei.diag.fault.isr:
+    harness_config:
+      type: one_line
+      regex:
+        - "DIAG ISR TEST PASSED"
+  # An overflow of the interrupt stack: the fault handler has no stack left and the core locks up. QEMU stops there
+  # (the nRF resets with CPU_LOCKUP, which the reset cause maps to FAULT: lib/sensei_diag host test). The test only
+  # shows that the case runs up to the overflow.
+  sensei.diag.fault.isr_stack:
+    ignore_qemu_crash: true
+    extra_configs:
+      - CONFIG_TEST_ISR_STACK_OVERFLOW=y
+    harness_config:
+      type: one_line
+      regex:
+        - "DIAG ISR STACK OVERFLOW STARTED"

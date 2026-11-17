@@ -58,6 +58,19 @@ config SENSEI_OTA_STREAM_MTU
 	help
 	  Must not exceed MCUMGR_TRANSPORT_NETBUF_SIZE + 2.
 
+config SENSEI_OTA_RECOVERY_NEEDS_USB
+	bool "Refuse a reset into the MCUboot recovery unless USB power is present"
+	default y
+	depends on MCUMGR_GRP_OS_RESET_BOOT_MODE
+	select MCUMGR_GRP_OS_RESET_HOOK
+	help
+	  The SMP reset command can carry a boot mode (MCUMGR_GRP_OS_RESET_BOOT_MODE): boot mode 1 starts the MCUboot
+	  serial recovery, which waits on USB without a time-out, so a node that nobody connects stays off the air.
+	  Without this option any peer on Bluetooth (in Debug any device, in Release any bonded one) can do that. With
+	  it the reset hook answers "access denied" to a reset with a boot mode other than 0 unless USB power is
+	  present (nRF5340: USBREG VBUSDETECT; an app that senses USB power in another way defines sensei_ota_usb_power()). A normal
+	  reset and a reset over USB still work. Needs MCUMGR_GRP_OS_RESET_HOOK, which this option selects.
+
 config SENSEI_OTA_CONFIRM
 	bool "Confirm the new image after the app's check passed"
 	default y

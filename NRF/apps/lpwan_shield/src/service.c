@@ -121,7 +121,8 @@ void svc_emit_radio(pb_size_t tag, sensei_Radio radio) {
   svc_emit(&e);
 }
 
-static void emit_tx_done(uint32_t seq, bool ok, uint32_t attempts, uint32_t next_max_payload, bool acked) {
+static void emit_tx_done(uint32_t seq, bool ok, uint32_t attempts, uint32_t next_max_payload, bool acked,
+                         bool unconfirmed) {
   sensei_LpwanEvent e = sensei_LpwanEvent_init_zero;
 
   e.which_body = sensei_LpwanEvent_tx_done_tag;
@@ -130,15 +131,16 @@ static void emit_tx_done(uint32_t seq, bool ok, uint32_t attempts, uint32_t next
   e.tx_done.attempts = attempts;
   e.tx_done.next_max_payload = next_max_payload;
   e.tx_done.acked = acked;
+  e.tx_done.unconfirmed = unconfirmed;
   svc_emit(&e);
 }
 
 void svc_emit_tx_done(uint32_t seq, bool ok, uint32_t attempts, uint32_t next_max_payload) {
-  emit_tx_done(seq, ok, attempts, next_max_payload, false);
+  emit_tx_done(seq, ok, attempts, next_max_payload, false, false);
 }
 
-void svc_emit_tx_done_ack(uint32_t seq, bool ok, uint32_t attempts, bool acked) {
-  emit_tx_done(seq, ok, attempts, 0, acked);
+void svc_emit_tx_done_ack(uint32_t seq, bool ok, uint32_t attempts, bool acked, bool unconfirmed) {
+  emit_tx_done(seq, ok, attempts, 0, acked, unconfirmed);
 }
 
 void svc_emit_downlink(sensei_Radio radio, uint32_t port, const uint8_t *data, size_t len) {
@@ -357,6 +359,7 @@ static bool allowed_during_dfu(const sensei_LpwanRequest *req) {
   switch (req->which_body) {
   case sensei_LpwanRequest_get_version_tag:
   case sensei_LpwanRequest_get_status_tag:
+  case sensei_LpwanRequest_diag_ack_tag:
   case sensei_LpwanRequest_lte_disconnect_tag:
     return true;
   default:
@@ -387,6 +390,8 @@ static void on_request(struct link_slave *s, const sensei_LpwanRequest *req, voi
       fill_version(&rsp);
     } else if (req->which_body == sensei_LpwanRequest_get_status_tag) {
       fill_status(&rsp);
+    } else if (req->which_body == sensei_LpwanRequest_diag_ack_tag) {
+      diag_ack();
     } else if (is_dfu_request(req)) {
 #ifdef CONFIG_LPWAN_SHIELD_DFU
       res = dfu_handle(req, &rsp);

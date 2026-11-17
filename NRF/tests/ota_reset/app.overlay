@@ -1,0 +1,25 @@
+/*
+ * SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/* native_sim has no retained RAM: the test driver of NRF/tests/diag keeps it in an array. The boot mode is one byte,
+ * as in the SENSEI boards (GPREGRET1). */
+/ {
+	retained: test-retained-mem {
+		compatible = "sensei,test-retained-mem";
+		size = <1024>;
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		boot_mode0: boot_mode@0 {
+			compatible = "zephyr,retention";
+			status = "okay";
+			reg = <0x0 0x1>;
+		};
+	};
+
+	chosen {
+		zephyr,boot-mode = &boot_mode0;
+	};
+};

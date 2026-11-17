@@ -123,11 +123,23 @@ int sensei_lpwan_radio_send(sensei_Radio radio, const uint8_t *chunk, size_t len
 /**
  * Like sensei_lpwan_radio_send() and says whether the chunk is the last of its message. For LTE the last chunk gets the
  * RAI flag of the configuration (`lte_rai`): with LTE_RAI_ONE_RESP the shield waits for the answer of the server (the
- * collector's ack or a downlink) and done() reports -EIO if none came, so the caller retries the chunk. Other chunks
- * and the other radios are as without the flag.
+ * collector's ack or a downlink; 10 s on LTE-M, 30 s on NB-IoT, from send()). If none comes the chunk was still sent:
+ * done() reports 0 and sensei_lpwan_send_unconfirmed() is true inside the callback ("sent, unconfirmed"). The caller
+ * must not resend the chunk at once and must not treat the message as delivered. Other chunks and the other radios
+ * are as without the flag.
+ *
+ * Acks are best effort for plain nodes: they are not authenticated, so a forged 3-byte ack (or any datagram) that
+ * arrives during the wait counts as the answer.
  */
 int sensei_lpwan_radio_send_ex(sensei_Radio radio, const uint8_t *chunk, size_t len, bool last,
                                void (*done)(int err, void *user), void *user);
+
+/**
+ * True if the send whose done() runs now (call it inside the callback) went out but got no answer within the wait
+ * (LTE_RAI_ONE_RESP only; see sensei_lpwan_radio_send_ex()). Counted in the shield status (lte_no_answer) and in
+ * `sensei lpwan status`. False for every other send and for a send that failed.
+ */
+bool sensei_lpwan_send_unconfirmed(void);
 
 /** What to do before a data uplink on LTE (from the connection evaluation, %CONEVAL). */
 enum sensei_lpwan_link {
@@ -140,13 +152,15 @@ enum sensei_lpwan_link {
  * Check the LTE link before a data uplink (not for alerts and status). The first call after the last result expired
  * (`SENSEI_LPWAN_EVAL_VALID_S`) asks the shield and returns WAIT; the result is an event, on_up(LTE) follows and the
  * next call answers from it. A shield without the evaluation, or one that gives no result, is not asked again for
- * `SENSEI_LPWAN_EVAL_RETRY_S`: OK meanwhile. Call on the hook work queue (the app's).
+ * `SENSEI_LPWAN_EVAL_RETRY_S` (an hour if the shield says the evaluation is unsupported): OK meanwhile. A request whose
+ * answer does not come within 30 s counts as a failed evaluation too. Call on the hook work queue (the app's).
  */
 enum sensei_lpwan_link sensei_lpwan_lte_link_check(void);
 
 /** The last evaluation of the LTE link, for the Status of the node and the shell. */
 struct sensei_lpwan_lte_info {
   sensei_EnergyEstimate energy;
+  bool rsrp_valid; /* false: the modem gave no valid RSRP; rsrp_dbm is 0 then and means nothing */
   int16_t rsrp_dbm;
   uint8_t ce_level; /* 0 ... 3 */
   sensei_RaiSupport rai;
@@ -230,7 +244,9 @@ bool sensei_lpwan_dfu_active(void);
 /** The version the shield reported at the last handshake (the node puts it in Status). -ENODATA: not read yet. */
 int sensei_lpwan_shield_version(sensei_LpwanVersion *out);
 
-/** Diagnostics of the shield, read with its status after each version read. */
+/** Diagnostics of the shield, read with its status after each version read, after a restart that the shield reported
+ *  and before the client cuts the power of a shield that stopped answering. The shield keeps its fault record until the
+ *  client has it (it acks), so one lost answer does not lose it. */
 struct sensei_lpwan_shield_diag {
   uint32_t reset_cause; /**< SENSEI_RESET_* bits of the shield's last start, 0: an older shield */
   uint32_t boot_count;  /**< boots of the shield since its retained RAM was lost */

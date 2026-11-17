@@ -15,6 +15,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/logging/log_ctrl.h>
+#include <zephyr/sys/atomic.h>
 #include <zephyr/sys/reboot.h>
 
 #include "diag/sensei_diag_rt.h"
@@ -41,6 +42,13 @@ BUILD_ASSERT(SENSEI_RESET_PIN == RESET_PIN && SENSEI_RESET_SOFTWARE == RESET_SOF
              "SENSEI_RESET_* differ from the hwinfo RESET_* flags");
 
 #ifdef DIAG_RETENTION
+/* The fatal handler writes the record from any context, also from an interrupt or while a lock is held: the retention
+ * and the retained memory drivers must not take a mutex. SENSEI_DIAG only implies the options, a configuration that
+ * switches them off again must not build. */
+BUILD_ASSERT(!IS_ENABLED(CONFIG_RETENTION_MUTEXES) && !IS_ENABLED(CONFIG_RETAINED_MEM_MUTEXES),
+             "the fatal handler writes the fault record from interrupts: set RETENTION_MUTEX_FORCE_DISABLE=y and "
+             "RETAINED_MEM_MUTEX_FORCE_DISABLE=y");
+
 static const struct device *const fault_dev = DEVICE_DT_GET(DT_CHOSEN(sensei_diag_fault));
 static const struct device *const state_dev = DEVICE_DT_GET(DT_CHOSEN(sensei_diag_state));
 
@@ -83,6 +91,7 @@ static struct sensei_diag_fault boot_fault;
 static bool boot_fault_valid;
 static volatile uint16_t last_job;
 static volatile uint32_t image_id;
+static atomic_t capturing; /* a capture is running: a fault inside it (the uptime read) does not start another */
 
 int sensei_diag_boot(void) {
   uint32_t hw = 0;
@@ -162,11 +171,17 @@ void sensei_diag_capture_ext(uint8_t reason, uint32_t pc, uint32_t lr, uint32_t 
       .pc = pc,
       .lr = lr,
       .status = status,
-      .uptime_s = (uint32_t)(k_uptime_get() / 1000),
       .image_id = image_id,
       .boot_count = boots,
   };
   uint8_t b[SENSEI_DIAG_FAULT_BYTES];
+
+  /* The handler may run with the timer lock held (a fault in the timer code): k_uptime_get() then asserts or hangs. A
+   * nested fault must not replace the record of the first one, so the record is written first, with uptime 0, and
+   * the uptime is added by a second write. A fault in the second step finds `capturing` set and returns. */
+  if (!atomic_cas(&capturing, 0, 1)) {
+    return;
+  }
 
   strncpy(f.thread, thread != NULL && thread[0] != '\0' ? thread : "?", sizeof(f.thread) - 1);
 #ifdef CONFIG_SENSEI_DIAG_COREDUMP
@@ -176,6 +191,10 @@ void sensei_diag_capture_ext(uint8_t reason, uint32_t pc, uint32_t lr, uint32_t 
 #endif
   sensei_diag_fault_pack(&f, b);
   (void)store_write(FAULT_STORE, b, sizeof(b));
+  f.uptime_s = (uint32_t)(k_uptime_get() / 1000);
+  sensei_diag_fault_pack(&f, b);
+  (void)store_write(FAULT_STORE, b, sizeof(b));
+  atomic_set(&capturing, 0);
 }
 
 void sensei_diag_capture(unsigned int reason, const struct arch_esf *esf) {

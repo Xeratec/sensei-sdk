@@ -34,6 +34,7 @@ sensei_LpwanResult lpwan_sm_admit(lpwan_sm_t *sm, const sensei_LpwanRequest *req
   switch (req->which_body) {
   case sensei_LpwanRequest_get_version_tag:
   case sensei_LpwanRequest_get_status_tag:
+  case sensei_LpwanRequest_diag_ack_tag:
   case sensei_LpwanRequest_dfu_status_tag:
   case sensei_LpwanRequest_dfu_confirm_tag:
     return sensei_LpwanResult_LPWAN_OK;

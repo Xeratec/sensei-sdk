@@ -5,8 +5,8 @@
 # Authors:
 # - Philip Wiese <wiesep@iis.ee.ethz.ch>
 
-# Runs the Zephyr tests of the SDK (NRF/tests) with Twister on native_sim and, in Docker, on QEMU (qemu_cortex_m3, for
-# the fault capture test). No hardware needed.
+# Runs the Zephyr tests of the SDK (NRF/tests) with Twister on native_sim and, in Docker, on QEMU (qemu_cortex_m3 and
+# mps2/an521/cpu0, for the fault capture tests). No hardware needed.
 #
 #   scripts/twister.sh [--host] [-- <twister arguments>]
 #
@@ -20,7 +20,7 @@
 #   SENSEI_NCS_WORKSPACE  west workspace of NCS v3.4.1 with a venv or west in PATH
 #                         (default: ~/Documents/work/Tools/sensei-ncs-v3.4.1). Mounted read-only.
 #   TWISTER_OUT           output folder (default: <sdk>/build/twister). Deleted at the start.
-#   TWISTER_PLATFORM      platforms, separated by spaces (default: native_sim/native/64 qemu_cortex_m3; with --host
+#   TWISTER_PLATFORM      platforms, separated by spaces (default: native_sim/native/64 qemu_cortex_m3 mps2/an521/cpu0; with --host
 #                         native_sim/native/64 only)
 #   TWISTER_IMAGE         Docker image (default sensei-twister:ncs-3.4.1)
 #
@@ -44,7 +44,7 @@ fi
 if [ "$host" = 1 ]; then
   platform="${TWISTER_PLATFORM:-native_sim/native/64}"
 else
-  platform="${TWISTER_PLATFORM:-native_sim/native/64 qemu_cortex_m3}"
+  platform="${TWISTER_PLATFORM:-native_sim/native/64 qemu_cortex_m3 mps2/an521/cpu0}"
 fi
 [ "${1:-}" = "--" ] && shift
 

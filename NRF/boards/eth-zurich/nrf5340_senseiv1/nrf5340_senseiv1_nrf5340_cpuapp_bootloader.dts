@@ -91,7 +91,18 @@ zephyr_udc0: &usbd {
 /* The same RAM plan as the application: MCUboot must not touch the retained RAM. Boot mode for serial recovery. */
 #include "nrf5340_senseiv1_retained.dtsi"
 
-/* MCUboot only needs the boot mode (GPREGRET1): no drivers for the diagnostics areas (saves about 0.5 kB). */
+/* MCUboot only needs the boot mode (GPREGRET1): no drivers for the diagnostics areas (saves about 0.5 kB).
+ *
+ * This file is used only when the board is named with the variant (nrf5340_senseiv1/nrf5340/cpuapp/bootloader). The
+ * sysbuild of the node builds MCUboot for the plain cpuapp board (nrf5340_senseiv1/nrf5340/cpuapp), so there the
+ * diagnostics areas stay enabled and cost about 0.5 kB (RETAINED_MEM_ZEPHYR_RAM). To drop them there, the app's
+ * sysbuild/mcuboot.overlay (sysbuild picks it up by name) disables the same four nodes:
+ *
+ *   &diag_retained { status = "disabled"; };
+ *   &diag_fault { status = "disabled"; };
+ *   &diag_state { status = "disabled"; };
+ *   &diag_dump { status = "disabled"; };
+ */
 &diag_retained {
 	status = "disabled";
 };

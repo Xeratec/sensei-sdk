@@ -16,6 +16,7 @@ Firmware update for apps that MCUboot starts (sysbuild with `SB_CONFIG_BOOTLOADE
 | mcumgr | selects the image and OS groups, the flash helpers and `REBOOT` | `SENSEI_OTA` |
 | SMP over Bluetooth | the standard GATT SMP service | `SENSEI_OTA_SMP_BT` |
 | SMP on a shared byte stream | mcumgr serial lines on a stream that also carries 0x00-delimited frames of another protocol (USB CDC) | `SENSEI_OTA_SMP_STREAM` |
+| Recovery reset | the SMP reset command with a boot mode other than 0 (reset into the MCUboot serial recovery) is refused unless USB power is present; a normal reset always works | `SENSEI_OTA_RECOVERY_NEEDS_USB` |
 | Trial boot | after an update the image runs on trial: `sensei_ota_init()` confirms it when the app's check passes and an SMP request came in on the image (hook registered at boot, `SYS_INIT`), and resets the node if that does not happen in time, so MCUboot reverts | `SENSEI_OTA_CONFIRM`, `_CONFIRM_NEEDS_LINK`, `_CONFIRM_DELAY_S`, `_TRIAL_TIMEOUT_S` |
 
 API: [`sensei_ota.h`](sensei_ota.h).
@@ -50,6 +51,16 @@ the image list) after the reboot, or the image reverts. The decision is the pure
 The app sets the access to the Bluetooth service with the Zephyr choice `MCUMGR_TRANSPORT_BT_PERM_*` (open by
 default; `RW_ENCRYPT` needs `BT_SMP`). The mcumgr groups beyond image and OS reset (echo, info, ...) are the app's
 choice.
+
+**Recovery reset.** With `MCUMGR_GRP_OS_RESET_BOOT_MODE` (retention boot mode) the SMP reset command takes a `boot_mode`;
+boot mode 1 makes MCUboot start its serial recovery on USB, where it waits without a time-out and the node is off the air.
+Anyone who can send SMP (any Bluetooth device in Debug, any bonded one in Release) could park a node that way.
+`SENSEI_OTA_RECOVERY_NEEDS_USB` (default on, selects `MCUMGR_GRP_OS_RESET_HOOK`) registers a hook for
+`MGMT_EVT_OP_OS_MGMT_RESET` that answers `MGMT_ERR_EACCESSDENIED` to a boot mode other than 0 unless USB power is present
+(`sensei_ota_usb_power()`: `VBUSDETECT` of the nRF5340, weak, an app may define its own). The hook sees the request, not the
+transport, so VBUS is the test: whoever has the cable plugged in can ask. A reset into the recovery over Bluetooth from a node
+on battery is refused, a normal reset and any reset over USB work. The rule is the pure function in
+[`sensei_ota_reset.h`](sensei_ota_reset.h), with a host test in `tests/`. Untested on hardware: VBUSDETECT on the SENSEI board.
 
 Shared stream: call `sensei_smp_stream_init(tx, user)` once, then pass every received byte to
 `sensei_smp_stream_feed()`. It returns the bytes that belong to the other protocol. The other protocol's frames must

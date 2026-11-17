@@ -54,14 +54,24 @@ config LPWAN_SHIELD_RAI
 	  network acts on it depends on the operator: see LpwanStatus.rai_support. Without it the option is never set.
 
 config LPWAN_SHIELD_LTE_ANSWER_WAIT_S
-	int "Time to wait for the answer of the server after the last chunk (one-response RAI), s"
-	default 8
-	range 1 30
+	int "Time to wait for the answer of the server after the last chunk (one-response RAI), LTE-M, s"
+	default 10
+	range 1 35
 	depends on LPWAN_SHIELD_RAI
 	help
-	  The collector answers every LTE uplink with one datagram (a downlink or a 3-byte ack). Without an answer in this
-	  time the send fails (the client retries) and the modem is told that nothing more is expected. NB-IoT with many
-	  repetitions may need longer than LTE-M.
+	  The collector answers every LTE uplink with one datagram (a downlink or a 3-byte ack). The time counts from
+	  send(), so it includes the RRC set-up of the modem (about 3 s on LTE-M). Without an answer in this time the send
+	  is reported as "sent, unconfirmed" (TxDone.unconfirmed, ok is true), not as a failure, and the modem is told
+	  that nothing more is expected. The wait ends early when the coverage is lost.
+
+config LPWAN_SHIELD_LTE_ANSWER_WAIT_NBIOT_S
+	int "The same for NB-IoT, s"
+	default 30
+	range 1 35
+	depends on LPWAN_SHIELD_RAI
+	help
+	  NB-IoT at coverage level 1 and 2 repeats every transmission, so a 1 kB uplink and its answer can take 10 to 30 s.
+	  Both waits plus 10 s must stay below LPWAN_SHIELD_SEND_TIMEOUT_S.
 
 config LPWAN_SHIELD_LTE_EVAL
 	bool "Connection evaluation (%CONEVAL) on request of the client"

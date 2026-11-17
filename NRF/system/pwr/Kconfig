@@ -64,12 +64,29 @@ config SENSEI_PWR_CHECK
 config SENSEI_PWR_RAM_POWERDOWN
 	bool "Power down RAM that the image does not use (nRF5340 application core)"
 	depends on SENSEI && SOC_NRF5340_CPUAPP && !BUILD_WITH_TFM
+	# newlib's malloc() grows the heap into all RAM after the image (sbrk)
+	depends on !NEWLIB_LIBC
 	# The libc arena (-1) is all RAM after the image: malloc() would use powered-down RAM
 	depends on COMMON_LIBC_MALLOC_ARENA_SIZE != -1
 	select RAM_POWER_DOWN_LIBRARY
 	help
 	  Adds sensei_pwr_ram_powerdown(), to be called at the end of the start-up. It powers down the 4 kB
-	  sections between the end of the image RAM and the end of the application RAM, except retained RAM and
-	  other devicetree memory regions and the shared memory with the network core. Saves the retention current
-	  of those sections in sleep (about 20 to 40 nA per section, estimate). Needs CONFIG_COMMON_LIBC_MALLOC_ARENA_SIZE
-	  other than -1: set 0 when nothing calls malloc().
+	  sections between the end of the image RAM and the end of the chosen zephyr,sram (power_down_unused_ram() of
+	  the nRF Connect SDK). Retained RAM, the other devicetree memory regions and the shared memory with the
+	  network core lie above that range; the build checks it. Saves the retention current of those sections in
+	  sleep (about 20 to 40 nA per section, estimate). Needs CONFIG_COMMON_LIBC_MALLOC_ARENA_SIZE other than -1
+	  (set 0 when nothing calls malloc()) and not newlib.
+	  A watchdog, lockup or pin reset does not power the RAM on again: the bootloader must do it
+	  (SENSEI_PWR_RAM_ON_BOOT in MCUboot), else a smaller trial image that powered more RAM down leaves the image
+	  it reverts to on RAM that is off.
+
+config SENSEI_PWR_RAM_ON_BOOT
+	bool "Power on all RAM at the start of the boot (MCUboot)"
+	default y if MCUBOOT && SOC_NRF5340_CPUAPP
+	depends on SOC_NRF5340_CPUAPP && !BUILD_WITH_TFM
+	help
+	  A PRE_KERNEL_1 hook powers on all 8 RAM blocks (VMC). Only a software reboot of the nRF Connect SDK does it
+	  (NRF_FORCE_RAM_ON_REBOOT); after a watchdog, lockup or pin reset the sections that SENSEI_PWR_RAM_POWERDOWN
+	  switched off stay off. MCUboot runs after every reset, so the hook there gives the next image all its RAM,
+	  also when a trial image reverts to the old one. On by default in MCUboot (needs no SENSEI option); costs
+	  about 100 B. The module is built without CONFIG_SENSEI.

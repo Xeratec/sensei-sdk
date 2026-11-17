@@ -9,7 +9,7 @@ Authors:
 # Zephyr tests
 
 Ztest suites that run on `native_sim/native/64` with Twister, so the Zephyr side of the SDK is checked without
-hardware. One suite (`diag_fault`) runs on QEMU (`qemu_cortex_m3`) because it needs a real fault and a reset. One
+hardware. Two suites (`diag_fault`, `diag_isr`) run on QEMU (`qemu_cortex_m3`, `mps2/an521/cpu0`) because they need a real fault and a reset. One
 folder per suite, all under this tree (the pure C logic of the libraries has host tests in `lib/<name>/tests`, see
 `make test-host`).
 
@@ -23,6 +23,8 @@ folder per suite, all under this tree (the pure C logic of the libraries has hos
 | `ubx` | `sensei.drivers.gnss.ubx` | u-blox UBX parser |
 | `diag` | `sensei.diag` | `NRF/system/diag` on native_sim with a RAM-array retained memory driver: boot counter, reset cause, fault record taken once, damaged and foreign RAM |
 | `diag_fault` | `sensei.diag.fault` | Fault capture on QEMU (`qemu_cortex_m3`): `k_oops()` and an undefined instruction reset the board, the record and the coredump are checked after each reboot |
+| `ota_reset` | `sensei.ota.reset` | The SMP reset hook of `NRF/system/ota` in the mcumgr callback chain (native_sim): a reset into the MCUboot recovery without USB power (as over Bluetooth) is refused, a normal reset and a reset with USB power go through |
+| `diag_isr` | `sensei.diag.fault.isr`, `sensei.diag.fault.isr_stack` | Fault capture on QEMU (`mps2/an521/cpu0`, Cortex-M33 with stack guards): a fault and `k_panic()` in an interrupt, a thread stack overflow; an overflow of the interrupt stack (the core locks up, QEMU stops) |
 
 Why one tree: Twister needs the SDK as Zephyr module (`-x=EXTRA_ZEPHYR_MODULES=<sdk>/NRF`), so all suites
 need the NRF module anyway, and one `-T NRF/tests` finds them.
@@ -37,7 +39,7 @@ scripts/twister.sh --host                    # no Docker: Linux with gcc, a west
 
 The script is described in its header. Docker needs the image `sensei-twister:ncs-3.4.1` (built on first use from
 `scripts/docker/twister.Dockerfile`; its base is `sensei-nrf:ncs-3.4.1` of the node repository; it adds the host compiler for
-native_sim and QEMU for `qemu_cortex_m3`, and builds the ARM test with the Zephyr SDK of the base image) and an NCS v3.4.1
+native_sim and QEMU for `qemu_cortex_m3` and `mps2/an521/cpu0`, and builds the ARM test with the Zephyr SDK of the base image) and an NCS v3.4.1
 west workspace (`SENSEI_NCS_WORKSPACE`, default `~/Documents/work/Tools/sensei-ncs-v3.4.1`), mounted read-only.
 Output goes to `build/twister`. A fresh workspace for the tests alone: `scripts/west-twister.yml`. CI does that:
 `.github/workflows/twister.yml` (native_sim only: it has no Zephyr SDK or QEMU; `TWISTER_PLATFORM` adds platforms).

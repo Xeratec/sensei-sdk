@@ -34,9 +34,16 @@ Both are independent of `CONFIG_SENSEI_PWR` (no PMIC needed).
   says whether runtime PM is on.
 - `CONFIG_SENSEI_PWR_RAM_POWERDOWN`, `pwr/pwr_ram.h`: `sensei_pwr_ram_powerdown()` powers down the 4 kB RAM sections of the
   nRF5340 application core between the end of the image RAM and the end of `zephyr,sram` (uses the nRF Connect SDK
-  library `ram_pwrdn`). Left alone: every devicetree `zephyr,memory-region` node (retained RAM), the chosen
-  `zephyr,ipc_shm` and the partial section at the end. Call it last in `main()`. Needs a libc arena other than -1
-  (`CONFIG_COMMON_LIBC_MALLOC_ARENA_SIZE=0` when nothing calls `malloc()`). Untested on hardware.
+  library `ram_pwrdn`, `power_down_unused_ram()`). That call knows no other region, so the build checks that every devicetree
+  `zephyr,memory-region` node, every `zephyr,retained-ram` node and the chosen `zephyr,ipc_shm` lie at or above the end of
+  `zephyr,sram` (the SENSEI boards do: `nrf5340_senseiv1_retained.dtsi`); a board that does not cannot use it. Call it last in
+  `main()`. Needs a libc arena other than -1 (`CONFIG_COMMON_LIBC_MALLOC_ARENA_SIZE=0` when nothing calls `malloc()`) and not
+  newlib (its `malloc()` grows into all free RAM). Untested on hardware.
+- `CONFIG_SENSEI_PWR_RAM_ON_BOOT`: a `PRE_KERNEL_1` hook that powers on all 8 RAM blocks. On by default in MCUboot (nRF5340
+  application core), where it needs no SENSEI option. Why: a watchdog, lockup or pin reset does not power RAM on again (only
+  the software reboot of the nRF Connect SDK does), so a trial image that powered down more RAM than the old one and then hung
+  would leave the old image, which MCUboot starts after the revert, on RAM that is off. MCUboot runs after every reset and
+  gives every image all its RAM. About 100 B. Untested on hardware (check: T4.11, a watchdog reset of a smaller trial image).
 
 ## Start-up order
 

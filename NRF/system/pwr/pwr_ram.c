@@ -27,66 +27,29 @@
 
 extern char _image_ram_end[];
 
-struct range {
-  uintptr_t start, end;
-};
+/*
+ * power_down_unused_ram() of the nRF Connect SDK powers down every whole section from the end of the image RAM to the
+ * end of the chosen zephyr,sram. It knows no other region, so each one must lie above that range: the memory regions
+ * of the devicetree (linker regions, the retained RAM), the retained RAM and the shared memory with the network core.
+ * The boards put the retained RAM and the shared memory after the image RAM (nrf5340_senseiv1_retained.dtsi). A board
+ * that does not must not use this module.
+ */
+#define ABOVE_SRAM(n)                                                                                                  \
+  COND_CODE_1(DT_NODE_HAS_PROP(n, reg),                                                                                \
+              (BUILD_ASSERT(DT_REG_ADDR(n) >= SRAM_END, "a memory region lies inside the RAM that is powered down");), \
+              ())
+#define ABOVE_SRAM_PARENT(n) ABOVE_SRAM(DT_PARENT(n))
 
-#define KEEP_NODE(n) {DT_REG_ADDR(n), DT_REG_ADDR(n) + DT_REG_SIZE(n)},
-#define KEEP_IF_REG(n) COND_CODE_1(DT_NODE_HAS_PROP(n, reg), (KEEP_NODE(n)), ())
-#define KEEP_PARENT(n) KEEP_IF_REG(DT_PARENT(n))
-
-/* RAM that is not part of the image but must keep its power */
-static const struct range keep[] = {{0, 0}, /* keeps the array non-empty */
-                                    DT_FOREACH_STATUS_OKAY(zephyr_memory_region, KEEP_IF_REG)
-                                        DT_FOREACH_STATUS_OKAY(zephyr_retained_ram, KEEP_PARENT)
+DT_FOREACH_STATUS_OKAY(zephyr_memory_region, ABOVE_SRAM)
+DT_FOREACH_STATUS_OKAY(zephyr_retained_ram, ABOVE_SRAM_PARENT)
 #if DT_HAS_CHOSEN(zephyr_ipc_shm)
-                                            KEEP_NODE(DT_CHOSEN(zephyr_ipc_shm))
+ABOVE_SRAM(DT_CHOSEN(zephyr_ipc_shm))
 #endif
-};
 
 size_t sensei_pwr_ram_powerdown(void) {
-  struct range gap[ARRAY_SIZE(keep) + 1];
-  size_t n = 1;
-  size_t bytes = 0;
+  uintptr_t first = ROUND_UP((uintptr_t)_image_ram_end, SECTION);
+  uintptr_t last = ROUND_DOWN(MIN((uintptr_t)SRAM_END, (uintptr_t)RAM_END), SECTION);
 
-  gap[0].start = (uintptr_t)_image_ram_end;
-  gap[0].end = MIN((uintptr_t)SRAM_END, (uintptr_t)RAM_END);
-
-  /* gap = [image end, RAM end) minus every keep range */
-  for (size_t k = 0; k < ARRAY_SIZE(keep); k++) {
-    size_t n0 = n;
-
-    if (keep[k].start >= keep[k].end) {
-      continue;
-    }
-    for (size_t i = 0; i < n0; i++) {
-      struct range *g = &gap[i];
-
-      if (keep[k].end <= g->start || keep[k].start >= g->end) {
-        continue;
-      }
-      if (keep[k].start > g->start && keep[k].end < g->end) {
-        gap[n].start = keep[k].end;
-        gap[n].end = g->end;
-        n++;
-        g->end = keep[k].start;
-      } else if (keep[k].start > g->start) {
-        g->end = keep[k].start;
-      } else if (keep[k].end < g->end) {
-        g->start = keep[k].end;
-      } else {
-        g->end = g->start;
-      }
-    }
-  }
-  for (size_t i = 0; i < n; i++) {
-    uintptr_t a = ROUND_UP(gap[i].start, SECTION);
-    uintptr_t b = ROUND_DOWN(gap[i].end, SECTION);
-
-    if (a < b) {
-      power_down_ram(a, b);
-      bytes += b - a;
-    }
-  }
-  return bytes;
+  power_down_unused_ram();
+  return last > first ? last - first : 0;
 }

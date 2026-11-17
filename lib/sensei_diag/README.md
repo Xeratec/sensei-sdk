@@ -12,7 +12,7 @@ Pure part of the field diagnostics in `NRF/system/diag`. Plain C, no Zephyr, so 
 host tools use the same layout.
 
 - **Reset cause bits** (`SENSEI_RESET_*`): bits 0 to 16 are the `RESET_*` flags of the Zephyr hwinfo API
-  (checked at build time in `NRF/system/diag`), bit 24 `FAULT` (a fault record was found), bit 25 `UNKNOWN` (no hwinfo).
+  (checked at build time in `NRF/system/diag`), bit 24 `FAULT` (a fault record was found, or the core locked up: `LOCKUP` leaves no record), bit 25 `UNKNOWN` (no hwinfo).
   `sensei_diag_reset_map()` maps the hwinfo flags: the nRF reset reason register is empty after a power-on or brown-out
   reset and hwinfo then gives no flag, so no flags means `POR` (a brown-out cannot be told apart).
   `sensei_diag_reset_format()` gives the text (`SOFT|FAULT`).

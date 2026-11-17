@@ -68,6 +68,15 @@ int sensei_ota_confirm(void);
 /** First 4 bytes of the SHA-256 of the running image (the image id of mcumgr), little endian; 0 if unknown. */
 uint32_t sensei_ota_image_id(void);
 
+#ifdef CONFIG_SENSEI_OTA_RECOVERY_NEEDS_USB
+/**
+ * USB power is present. The SMP reset into the MCUboot recovery (boot mode other than 0) is accepted only then
+ * (sensei_ota_reset.h). The default reads VBUSDETECT of the nRF5340; it is a weak function: an app that senses the
+ * USB power in another way (the charger input) defines its own. Called from the mcumgr work queue.
+ */
+bool sensei_ota_usb_power(void);
+#endif
+
 #ifdef CONFIG_SENSEI_OTA_SMP_STREAM
 /**
  * Output of the SMP stream transport: one mcumgr serial line (2 byte marker, base64, '\n'). Called on

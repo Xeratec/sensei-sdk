@@ -17,8 +17,8 @@
  * an LTE message; the shield sets the socket option RAI before that send:
  *
  * - LTE_RAI_ONE_RESP: the server answers with one datagram (the collector always does: a downlink or a 3-byte ack).
- *   Send, wait for the answer (short wait), then RAI_NO_DATA: nothing more is expected in either direction. The send
- *   is ok only if the answer came.
+ *   Send, wait for the answer, then RAI_NO_DATA: nothing more is expected in either direction. The send is ok when it
+ *   went out; without an answer it is reported as "sent, unconfirmed" (TxDone.unconfirmed), not as a failure.
  * - LTE_RAI_LAST: nothing follows the chunk. Send; the send is ok when it went out.
  * - LTE_RAI_OFF (and every chunk that is not the last one): no RAI, the send is ok when it went out.
  *
@@ -86,8 +86,12 @@ struct lpwan_rai_out {
 void lpwan_rai_send(const struct lpwan_rai_io *io, void *ctx, sensei_LteRai flag, const uint8_t *data, size_t len,
                     uint32_t wait_ms, struct lpwan_rai_out *out);
 
-/** The send is ok: it went out and, if an answer was waited for, it came. */
-bool lpwan_rai_send_ok(sensei_LteRai flag, uint32_t wait_ms, const struct lpwan_rai_out *out);
+/** The send is ok: it went out. A missing answer does not fail it (see lpwan_rai_unconfirmed()). */
+bool lpwan_rai_send_ok(const struct lpwan_rai_out *out);
+
+/** Sent, but the answer that was waited for did not come: TxDone.unconfirmed. The answer may be lost or late; the
+ *  client decides (the node does not resend the chunk at once and does not count the message as delivered). */
+bool lpwan_rai_unconfirmed(sensei_LteRai flag, uint32_t wait_ms, const struct lpwan_rai_out *out);
 
 /** A datagram the shield received after a send. */
 enum lpwan_answer {
@@ -103,6 +107,25 @@ enum lpwan_answer {
 enum lpwan_answer lpwan_answer_classify(const uint8_t *data, size_t len, bool has_chunk, uint8_t chunk_msg_id,
                                         uint8_t chunk_index);
 
+/** Key of the chunk that waits for its answer: a marker and the first two bytes of the chunk (the fragment header).
+ *  0: no chunk waits (the chunk is shorter than two bytes). The receive path keeps it while a send waits. */
+uint32_t lpwan_answer_key(const uint8_t *chunk, size_t len);
+
+/** What the receive path does with a datagram while the send with `key` waits (key 0: none waits). */
+struct lpwan_rx {
+  bool downlink; /* pass it to the node */
+  bool answer;   /* it ends the wait */
+};
+
+/**
+ * - the ack of the waiting chunk: ends the wait, is not for the node;
+ * - an ack of another chunk (late): dropped, the wait goes on;
+ * - anything else: a downlink for the node, and it ends the wait. Best effort: acks of plain nodes carry no MAC, so
+ *   any datagram that arrives during the wait counts as the answer.
+ * When no send waits (key 0) a late ack is dropped and a downlink is passed on.
+ */
+struct lpwan_rx lpwan_rx_decide(const uint8_t *data, size_t len, uint32_t key);
+
 /** Energy estimate of %CONEVAL (5 ... 9) as the enum of the link; ENERGY_UNKNOWN for anything else. */
 sensei_EnergyEstimate lpwan_energy_from_modem(int modem_value);
 
@@ -112,18 +135,23 @@ bool lpwan_energy_is_bad(sensei_EnergyEstimate e);
 /**
  * What the client does with the connection evaluation before a send that can wait. It keeps the last result for
  * `valid_ms`, asks the shield when it has none, waits `timeout_ms` for the answer, and after a failed evaluation (no
- * result, an older shield) does not ask again for `retry_ms`: then the send goes ahead. Times are uptime in ms (wrap
- * safe).
+ * result, an older shield, or no answer within `timeout_ms`) does not ask again for `retry_ms`: then the send goes
+ * ahead. Times are uptime in ms (wrap safe).
  */
 struct lpwan_eval_state {
-  bool have;      /* a result is stored */
-  uint32_t at;    /* when it came */
-  bool bad;       /* it said bad */
-  bool pending;   /* the shield was asked, no event yet */
-  uint32_t asked; /* when */
-  bool failed;    /* the last evaluation gave nothing */
+  bool have;        /* a result is stored */
+  uint32_t at;      /* when it came */
+  bool bad;         /* it said bad */
+  bool pending;     /* the shield was asked, no event yet */
+  uint32_t asked;   /* when */
+  bool failed;      /* the last evaluation gave nothing */
+  bool unsupported; /* ... because the shield cannot (an older shield, no CONEVAL in its build): held longer */
   uint32_t failed_at;
 };
+
+/** How long an "unsupported" shield is not asked again, ms. Any other failure waits `retry_ms` of lpwan_eval_decide().
+ */
+#define LPWAN_EVAL_UNSUPPORTED_MS 3600000u
 
 enum lpwan_eval_action {
   LPWAN_EVAL_OK,   /* send now: the result is good, or there is none and it is not asked for */
@@ -137,6 +165,9 @@ enum lpwan_eval_action lpwan_eval_decide(const struct lpwan_eval_state *s, uint3
 
 /** Store the answer: valid false (or a failed request) counts as a failed evaluation. */
 void lpwan_eval_result(struct lpwan_eval_state *s, uint32_t now, bool valid, bool bad);
+
+/** The shield refused the request as unsupported: a failed evaluation that is held for LPWAN_EVAL_UNSUPPORTED_MS. */
+void lpwan_eval_unsupported(struct lpwan_eval_state *s, uint32_t now);
 
 /** RSRP in dBm from the index of the modem (-17 ... 97, 0 is not used): (index - 140) below 0, else (index - 141). */
 int lpwan_rsrp_dbm(int idx);

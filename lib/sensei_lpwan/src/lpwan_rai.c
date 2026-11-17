@@ -52,11 +52,31 @@ void lpwan_rai_send(const struct lpwan_rai_io *io, void *ctx, sensei_LteRai flag
   set_rai(io, ctx, p.after, out);
 }
 
-bool lpwan_rai_send_ok(sensei_LteRai flag, uint32_t wait_ms, const struct lpwan_rai_out *out) {
-  if (!out->sent) {
-    return false;
+bool lpwan_rai_send_ok(const struct lpwan_rai_out *out) { return out->sent; }
+
+bool lpwan_rai_unconfirmed(sensei_LteRai flag, uint32_t wait_ms, const struct lpwan_rai_out *out) {
+  return out->sent && !out->answered && flag == sensei_LteRai_LTE_RAI_ONE_RESP && wait_ms != 0;
+}
+
+uint32_t lpwan_answer_key(const uint8_t *chunk, size_t len) {
+  return len >= 2 ? (1u << 16) | ((uint32_t)chunk[0] << 8) | chunk[1] : 0;
+}
+
+struct lpwan_rx lpwan_rx_decide(const uint8_t *data, size_t len, uint32_t key) {
+  struct lpwan_rx r = {false, false};
+
+  switch (lpwan_answer_classify(data, len, key != 0, (uint8_t)(key >> 8), (uint8_t)key)) {
+  case LPWAN_ANSWER_ACK:
+    r.answer = true;
+    break;
+  case LPWAN_ANSWER_OLD_ACK:
+    break;
+  default:
+    r.downlink = true;
+    r.answer = key != 0; /* a downlink is an answer too (best effort: any datagram while a send waits counts) */
+    break;
   }
-  return flag != sensei_LteRai_LTE_RAI_ONE_RESP || wait_ms == 0 || out->answered;
+  return r;
 }
 
 enum lpwan_answer lpwan_answer_classify(const uint8_t *data, size_t len, bool has_chunk, uint8_t chunk_msg_id,
@@ -112,10 +132,15 @@ enum lpwan_eval_action lpwan_eval_decide(const struct lpwan_eval_state *s, uint3
   if (s->have && (uint32_t)(now - s->at) < valid_ms) {
     return s->bad ? LPWAN_EVAL_BAD : LPWAN_EVAL_OK;
   }
-  if (s->pending && (uint32_t)(now - s->asked) < timeout_ms) {
-    return LPWAN_EVAL_WAIT;
+  if (s->pending) {
+    if ((uint32_t)(now - s->asked) < timeout_ms) {
+      return LPWAN_EVAL_WAIT;
+    }
+    /* No answer in time: a failed evaluation that ended at asked + timeout. The data may go; asking again waits for
+     * retry_ms, so a lost event does not make the client ask (and wake the modem) every time. */
+    return (uint32_t)(now - s->asked - timeout_ms) < retry_ms ? LPWAN_EVAL_OK : LPWAN_EVAL_ASK;
   }
-  if (s->failed && (uint32_t)(now - s->failed_at) < retry_ms) {
+  if (s->failed && (uint32_t)(now - s->failed_at) < (s->unsupported ? LPWAN_EVAL_UNSUPPORTED_MS : retry_ms)) {
     return LPWAN_EVAL_OK;
   }
   return LPWAN_EVAL_ASK;
@@ -128,8 +153,17 @@ void lpwan_eval_result(struct lpwan_eval_state *s, uint32_t now, bool valid, boo
     s->at = now;
     s->bad = bad;
     s->failed = false;
+    s->unsupported = false;
   } else {
     s->failed = true;
+    s->unsupported = false;
     s->failed_at = now;
   }
+}
+
+void lpwan_eval_unsupported(struct lpwan_eval_state *s, uint32_t now) {
+  s->pending = false;
+  s->failed = true;
+  s->unsupported = true;
+  s->failed_at = now;
 }

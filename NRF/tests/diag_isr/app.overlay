@@ -1,0 +1,45 @@
+/*
+ * SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/* Retained RAM at the end of the 4 MB of mps2/an521: the same areas as the SENSEI boards
+ * (NRF/boards/eth-zurich/nrf5340_senseiv1/nrf5340_senseiv1_retained.dtsi), without the coredump area. */
+/ {
+	sram@383ffc00 {
+		compatible = "zephyr,memory-region", "mmio-sram";
+		reg = <0x383ffc00 DT_SIZE_K(1)>;
+		ranges = <0x0 0x383ffc00 DT_SIZE_K(1)>;
+		zephyr,memory-region = "RetainedMem";
+		status = "okay";
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		retainedmem {
+			compatible = "zephyr,retained-ram";
+			status = "okay";
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			diag_fault: diag_fault@0 {
+				compatible = "zephyr,retention";
+				status = "okay";
+				reg = <0x0 0x40>;
+			};
+			diag_state: diag_state@40 {
+				compatible = "zephyr,retention";
+				status = "okay";
+				reg = <0x40 0x10>;
+			};
+		};
+	};
+
+	chosen {
+		sensei,diag-fault = &diag_fault;
+		sensei,diag-state = &diag_state;
+	};
+};
+
+&ssram2_3 {
+	reg = <0x38000000 (DT_SIZE_M(4) - DT_SIZE_K(1))>;
+};

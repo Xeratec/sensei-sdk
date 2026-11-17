@@ -68,12 +68,13 @@ static volatile bool want_connected;
 static volatile bool connect_cancelled; /* lte_disconnect() asked the connect in progress to stop */
 static int sock = -1;
 static int32_t last_rsrp_dbm;
+static bool last_rsrp_valid; /* the modem gave a valid RSRP at the last look; else the status says "no value" */
 
 /* The answer of the server to the last chunk (LTE_RAI_ONE_RESP): the receive thread gives the semaphore, the worker
- * waits for it. wait_key is (1 << 16 | msg_id << 8 | index) of the chunk that waits, 0: none. */
+ * waits for it. wait_key is lpwan_answer_key() of the chunk that waits, 0: none. */
 static K_SEM_DEFINE(answer_sem, 0, 1);
 static atomic_t wait_key;
-static atomic_t n_answers, n_no_answer;
+static atomic_t n_answers, n_no_answer; /* answered / sent but unconfirmed (TxDone.unconfirmed) */
 static volatile sensei_RaiSupport rai_support;
 
 static struct k_thread lte_thread, rx_thread;
@@ -338,9 +339,35 @@ static int io_send(void *ctx, const uint8_t *data, size_t len) {
   return zsock_send(sock, data, len, 0) == (ssize_t)len ? 0 : -EIO;
 }
 
+/* The wait ends early when the coverage is lost or the node asked for a disconnect: no answer can come then. */
+#define WAIT_SLICE_MS 1000U
+
 static bool io_wait_answer(void *ctx, uint32_t timeout_ms) {
   ARG_UNUSED(ctx);
-  return k_sem_take(&answer_sem, K_MSEC(timeout_ms)) == 0;
+  while (timeout_ms > 0) {
+    uint32_t slice = MIN(timeout_ms, WAIT_SLICE_MS);
+
+    if (k_sem_take(&answer_sem, K_MSEC(slice)) == 0) {
+      return true;
+    }
+    timeout_ms -= slice;
+    if (!registered || !want_connected) {
+      break;
+    }
+  }
+  return false;
+}
+
+/* Time the server gets to answer, from the send(): the modem sets the RRC connection up first (about 3 s on LTE-M,
+ * more with the repetitions of NB-IoT at coverage level 1 and 2: 10 to 30 s for 1 kB). So it depends on the radio. */
+static uint32_t answer_wait_ms(void) {
+#ifdef CONFIG_LPWAN_SHIELD_RAI
+  return (cfg.mode == sensei_LteMode_LTE_NB_IOT ? CONFIG_LPWAN_SHIELD_LTE_ANSWER_WAIT_NBIOT_S
+                                                : CONFIG_LPWAN_SHIELD_LTE_ANSWER_WAIT_S) *
+         1000U;
+#else
+  return 0;
+#endif
 }
 
 static const struct lpwan_rai_io rai_io = {.set_rai = io_set_rai, .send = io_send, .wait_answer = io_wait_answer};
@@ -349,11 +376,34 @@ static const struct lpwan_rai_io rai_io = {.set_rai = io_set_rai, .send = io_sen
 BUILD_ASSERT(LPWAN_RAI_OPT_NO_DATA == RAI_NO_DATA && LPWAN_RAI_OPT_LAST == RAI_LAST &&
              LPWAN_RAI_OPT_ONE_RESP == RAI_ONE_RESP);
 
+/* The send ends with its result before the watchdog of service.c fails it (SEND_TIMEOUT_S), with 10 s for the socket.
+ */
+#ifdef CONFIG_LPWAN_SHIELD_RAI
+BUILD_ASSERT(CONFIG_LPWAN_SHIELD_LTE_ANSWER_WAIT_S + 10 <= CONFIG_LPWAN_SHIELD_SEND_TIMEOUT_S &&
+                 CONFIG_LPWAN_SHIELD_LTE_ANSWER_WAIT_NBIOT_S + 10 <= CONFIG_LPWAN_SHIELD_SEND_TIMEOUT_S,
+             "the answer wait must be shorter than the send timeout");
+#endif
+
+/* The modem trace region (debug.conf) is hand-placed in app.overlay: it must follow the IPC regions of the modem
+ * library, lie inside the modem RAM and be as large as the library expects. */
+#if defined(CONFIG_NRF_MODEM_LIB_TRACE) && !defined(CONFIG_PARTITION_MANAGER_ENABLED)
+#define TRACE_NODE DT_NODELABEL(cpucell_cpuapp_ipc_shm_trace)
+#define RX_NODE DT_NODELABEL(cpucell_cpuapp_ipc_shm_heap)
+#define MODEM_NODE DT_NODELABEL(sram0_ns_modem)
+BUILD_ASSERT(DT_REG_ADDR(TRACE_NODE) >= DT_REG_ADDR(RX_NODE) + DT_REG_SIZE(RX_NODE),
+             "modem trace region overlaps the IPC regions of the modem library");
+BUILD_ASSERT(DT_REG_ADDR(TRACE_NODE) + DT_REG_SIZE(TRACE_NODE) <= DT_REG_ADDR(MODEM_NODE) + DT_REG_SIZE(MODEM_NODE),
+             "modem trace region is outside the modem RAM");
+BUILD_ASSERT(DT_REG_SIZE(TRACE_NODE) >= CONFIG_NRF_MODEM_LIB_SHMEM_TRACE_SIZE,
+             "modem trace region is smaller than NRF_MODEM_LIB_SHMEM_TRACE_SIZE");
+#endif
+
 static void worker_send(const struct msg *m) {
   struct lpwan_rai_out out = {0};
   sensei_LteRai flag = m->rai;
   uint32_t wait_ms = 0;
   uint32_t attempts = 0;
+  bool unconfirmed;
 
   if (!registered) {
     svc_emit_tx_done(m->seq, false, 0, 0); /* coverage lost: fail at once, the master retries later */
@@ -364,15 +414,15 @@ static void worker_send(const struct msg *m) {
   } else if (!cfg.udp && flag == sensei_LteRai_LTE_RAI_ONE_RESP) {
     flag = sensei_LteRai_LTE_RAI_LAST; /* the answer of a TCP server is a stream, not one datagram */
   }
-  if (flag == sensei_LteRai_LTE_RAI_ONE_RESP && m->len >= 2) {
-    wait_ms = CONFIG_LPWAN_SHIELD_LTE_ANSWER_WAIT_S * 1000U;
+  if (flag == sensei_LteRai_LTE_RAI_ONE_RESP && lpwan_answer_key(m->data, m->len) != 0) {
+    wait_ms = answer_wait_ms();
     k_sem_reset(&answer_sem);
-    atomic_set(&wait_key, (1 << 16) | (m->data[0] << 8) | m->data[1]);
+    atomic_set(&wait_key, (atomic_val_t)lpwan_answer_key(m->data, m->len));
   } else if (flag == sensei_LteRai_LTE_RAI_ONE_RESP) {
     flag = sensei_LteRai_LTE_RAI_LAST; /* no chunk header to match an answer with */
   }
   /* A send that failed is tried once more on a new socket. A datagram that went out is not sent again, also if the
-   * answer did not come: the client decides. */
+   * answer did not come: that is reported as "sent, unconfirmed" and the client decides. */
   for (int i = 0; i < 2 && !out.sent; i++) {
     attempts++;
     if (sock < 0 && open_socket() != 0) {
@@ -388,13 +438,14 @@ static void worker_send(const struct msg *m) {
     }
   }
   atomic_set(&wait_key, 0);
+  unconfirmed = lpwan_rai_unconfirmed(flag, wait_ms, &out);
   if (wait_ms != 0 && out.sent) {
     (void)atomic_inc(out.answered ? &n_answers : &n_no_answer);
-    if (!out.answered) {
-      LOG_WRN("no answer of the server within %u s", (unsigned)(wait_ms / 1000));
+    if (unconfirmed) {
+      LOG_WRN("sent, no answer of the server within %u s", (unsigned)(wait_ms / 1000));
     }
   }
-  svc_emit_tx_done_ack(m->seq, lpwan_rai_send_ok(flag, wait_ms, &out), attempts, out.answered);
+  svc_emit_tx_done_ack(m->seq, lpwan_rai_send_ok(&out), attempts, out.answered, unconfirmed);
 }
 
 /* The connection evaluation of the registered modem. The result is an event; without one the master sends as usual. */
@@ -408,13 +459,17 @@ static void worker_eval(void) {
   if (err == 0) {
     c->valid = true;
     c->energy = lpwan_energy_from_modem((int)p.energy_estimate);
-    c->rsrp_dbm = p.rsrp == LTE_LC_CELL_RSRP_INVALID ? 0 : lpwan_rsrp_dbm(p.rsrp);
+    c->rsrp_valid = p.rsrp != LTE_LC_CELL_RSRP_INVALID;
+    c->rsrp_dbm = c->rsrp_valid ? lpwan_rsrp_dbm(p.rsrp) : 0;
     c->rsrq_db = p.rsrq == LTE_LC_CELL_RSRQ_INVALID ? 0 : lpwan_rsrq_db(p.rsrq);
     c->ce_level = p.ce_level <= LTE_LC_CE_LEVEL_3 ? (uint32_t)p.ce_level : 0;
     c->tx_repetitions = p.tx_rep > 0 ? (uint32_t)p.tx_rep : 0;
-    last_rsrp_dbm = c->rsrp_dbm;
-    LOG_INF("conneval: energy %d, RSRP %d dBm, CE %u, TX repetitions %u", (int)c->energy, (int)c->rsrp_dbm,
-            (unsigned)c->ce_level, (unsigned)c->tx_repetitions);
+    if (c->rsrp_valid) {
+      last_rsrp_dbm = c->rsrp_dbm;
+      last_rsrp_valid = true;
+    }
+    LOG_INF("conneval: energy %d, RSRP %s%d dBm, CE %u, TX repetitions %u", (int)c->energy,
+            c->rsrp_valid ? "" : "invalid ", (int)c->rsrp_dbm, (unsigned)c->ce_level, (unsigned)c->tx_repetitions);
   } else {
     LOG_WRN("conneval: no result (%d)", err);
   }
@@ -477,19 +532,16 @@ static void rx_main(void *a, void *b, void *c) {
       ssize_t n = zsock_recv(sock, buf, sizeof(buf), 0);
 
       if (n > 0) {
-        uint32_t key = (uint32_t)atomic_get(&wait_key);
-        enum lpwan_answer a = lpwan_answer_classify(buf, (size_t)n, key != 0, (uint8_t)(key >> 8), (uint8_t)key);
+        struct lpwan_rx rx = lpwan_rx_decide(buf, (size_t)n, (uint32_t)atomic_get(&wait_key));
 
-        if (a == LPWAN_ANSWER_ACK) {
-          k_sem_give(&answer_sem);
-        } else if (a == LPWAN_ANSWER_OLD_ACK) {
-          LOG_DBG("late ack dropped");
-        } else {
+        if (rx.downlink) {
           /* A downlink is an answer too, and it goes to the node first. */
           svc_emit_downlink(radio_id(), cfg.server_port, buf, (size_t)n);
-          if (key != 0) {
-            k_sem_give(&answer_sem);
-          }
+        } else if (!rx.answer) {
+          LOG_DBG("late ack dropped");
+        }
+        if (rx.answer) {
+          k_sem_give(&answer_sem);
         }
       } else if (n == 0 || (errno != EAGAIN && errno != EINTR)) {
         /* TCP closed by the server, or a socket error: reopen on the next send. */
@@ -584,10 +636,14 @@ void lte_fill_status(sensei_LpwanStatus *st) {
   if (modem_ready && registered) {
     int rsrp = 255;
 
-    if (nrf_modem_at_scanf("AT+CESQ", "+CESQ: %*d,%*d,%*d,%*d,%*d,%d", &rsrp) == 1 && rsrp != 255) {
-      last_rsrp_dbm = rsrp - 140;
+    if (nrf_modem_at_scanf("AT+CESQ", "+CESQ: %*d,%*d,%*d,%*d,%*d,%d", &rsrp) == 1) {
+      last_rsrp_valid = rsrp != 255; /* 255: not known or not detectable */
+      if (last_rsrp_valid) {
+        last_rsrp_dbm = rsrp - 140;
+      }
     }
-    st->rssi_dbm = last_rsrp_dbm;
+    st->rssi_valid = last_rsrp_valid;
+    st->rssi_dbm = last_rsrp_valid ? last_rsrp_dbm : 0;
   }
   st->rai_support = rai_support;
   st->lte_answers = (uint32_t)atomic_get(&n_answers);

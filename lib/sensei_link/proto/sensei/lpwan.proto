@@ -178,6 +178,9 @@ message LpwanRequest {
     // LTE: connection evaluation (%CONEVAL) of the registered modem. Answered at once; the result follows as the
     // conn_eval event (it may take seconds). Needs the connected state; an older shield answers LPWAN_UNSUPPORTED.
     Empty lte_eval = 13;
+    // The client has stored the fault record of the last get_status answer: the shield may forget it. The shield keeps
+    // the record (and reports it with every get_status) until this arrives, so a lost answer loses nothing.
+    Empty diag_ack = 14;
     // Update of the shield (nRF9151 app or modem). See DfuBegin. Tags 40 to 49 are reserved for it.
     DfuBegin dfu_begin = 40;     // open (or resume) a transfer
     DfuChunk dfu_chunk = 41;     // bytes of the image
@@ -213,7 +216,7 @@ message LpwanStatus {
   // LTE, fields 20 and up. rssi_dbm is the RSRP.
   RaiSupport rai_support = 20; // what the network told the modem (LTE_LC_EVT_RAI_UPDATE), for the current cell
   uint32 lte_answers = 21;     // sends that waited for an answer (LTE_RAI_ONE_RESP) and got one, since start
-  uint32 lte_no_answer = 22;   // ... and got none within the wait
+  uint32 lte_no_answer = 22;   // ... and got none within the wait (sent, unconfirmed: TxDone.unconfirmed)
   // Diagnostics of the shield (lib/sensei_diag), fields 9 to 11.
   uint32 reset_cause = 9; // reset cause bits of the last start (SENSEI_RESET_*, as Status.reset_cause)
   uint32 boot_count = 10; // boots since the shield's retained RAM was lost (power cut)
@@ -221,6 +224,8 @@ message LpwanStatus {
   // (the shield resets itself then) has reason 0x80, `pc` in the modem firmware and `status` = the modem library's
   // NRF_MODEM_FAULT_* code, thread "modem".
   FaultRecord fault = 11;
+  // LTE: false while the modem has no valid RSRP; rssi_dbm is 0 then. Not set by an older shield (reads false).
+  bool rssi_valid = 12;
 }
 
 message NetworkTime {
@@ -263,8 +268,11 @@ message TxDone {
   uint32 attempts = 3;
   // LoRa: payload bytes the LR1121 takes in the next uplink (the MAC answers it still owes are counted), 0: not known.
   uint32 next_max_payload = 4;
-  // LTE with LTE_RAI_ONE_RESP: the server's answer arrived (ok is false without it). Otherwise false.
+  // LTE with LTE_RAI_ONE_RESP: the server's answer arrived. Otherwise false.
   bool acked = 5;
+  // LTE with LTE_RAI_ONE_RESP: the datagram went out but no answer came within the wait. ok is true then (the send is
+  // not failed: the answer may be lost or late, the client decides what to do). Never together with acked.
+  bool unconfirmed = 6;
 }
 
 message DownlinkRx {
@@ -305,6 +313,7 @@ message ConnEval {
   uint32 ce_level = 5;        // coverage enhancement level 0 ... 3
   uint32 tx_repetitions = 6;  // estimated
   RaiSupport rai_support = 7; // as in LpwanStatus, so that the client learns it without asking for the status
+  bool rsrp_valid = 8;        // the modem gave a valid RSRP (rsrp_dbm is 0 without it; an older shield reads false)
 }
 
 message LpwanEvent {

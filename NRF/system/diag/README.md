@@ -22,6 +22,13 @@ record layout, the reset cause bits and their tests are in [lib/sensei_diag](../
   does what `RESET_ON_FATAL_ERROR` of NCS does (log, reset). Both define the same function: turn
   `RESET_ON_FATAL_ERROR` off (the module's `SENSEI_DIAG_RESET_ON_FATAL` replaces it, default on; off: halt). An
   application with its own handler sets `SENSEI_DIAG_FATAL_HANDLER=n` and calls `sensei_diag_capture()` first.
+- **Lockup.** A fault inside a fault handler, for example an overflow of the interrupt stack, locks the core up. The chip
+  resets (nRF) with `CPU_LOCKUP` and no record. The reset cause mapping adds `FAULT` for it, so it is counted as a fatal
+  error (`errors.reset`, Status); `sensei_diag_take_fault()` finds no record. QEMU stops on a lockup instead of resetting.
+- **In the handler.** The handler takes no lock: the record is written first (uptime 0) and the uptime is added by a second write,
+  because `k_uptime_get()` takes the timer lock, which a fault in the timer code can hold (an assert with `SPIN_VALIDATE`). A fault
+  inside the second write does not start another capture, so the record of the first fault stays. The retention and
+  retained-memory mutexes must be off (the build checks it; `SENSEI_DIAG` implies the options).
 - **Once.** The next boot moves the record out of the retained RAM; `sensei_diag_take_fault()` hands it over once (`_peek_`
   does not clear). The application decides what to keep: the node stores the bytes of `sensei_diag_fault_pack()` in its
   settings and puts the record in `Status`.
@@ -62,6 +69,10 @@ Keep it off in Release unless you need it.
 - `NRF/tests/diag_fault` (`sensei.diag.fault`, qemu_cortex_m3): a thread calls `k_oops()`, then executes an undefined instruction;
   the node resets each time and the test checks the record (reason, thread, job, image id, PC, boot count), that it is read once,
   and the coredump, across three boots. Runs in the Docker image of `scripts/twister.sh`.
+- `NRF/tests/diag_isr` (`sensei.diag.fault.isr`, `mps2/an521/cpu0`, a Cortex-M33 with stack guards): a fault in an interrupt
+  (thread `ISR`, exception number in the xPSR), a thread stack overflow, `k_panic()` in an interrupt, across four boots.
+  `sensei.diag.fault.isr_stack` overflows the interrupt stack: the core locks up and QEMU stops, so the test only checks that the
+  case runs to the overflow; the accounting of `CPU_LOCKUP` is in the host test of `lib/sensei_diag`.
 
 Untested on hardware: RESETREAS after MCUboot, the retained RAM over a real reset and over MCUboot's swap, the nRF9151 with TF-M
 (reading the reset reason from the non-secure image).

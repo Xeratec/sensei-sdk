@@ -62,7 +62,9 @@ uint32_t sensei_diag_reset_map(uint32_t hwinfo_flags, bool hw_ok, bool fault_val
       cause = SENSEI_RESET_POR;
     }
   }
-  if (fault_valid) {
+  /* A lockup (a fault inside a fault handler, for example an overflow of the interrupt stack) leaves no record, but it
+   * is a fatal error all the same: it counts like one. */
+  if (fault_valid || (cause & SENSEI_RESET_CPU_LOCKUP) != 0) {
     cause |= SENSEI_RESET_FAULT;
   }
   return cause;

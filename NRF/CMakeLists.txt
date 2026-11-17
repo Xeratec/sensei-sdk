@@ -11,6 +11,9 @@ add_subdirectory_ifdef(CONFIG_SENSEI system)
 add_subdirectory_ifdef(CONFIG_SENSEI_DIAG system/diag)
 target_include_directories_ifdef(CONFIG_SENSEI_DIAG app PRIVATE system)
 
+# RAM power-on at the start of the boot (MCUboot): like the diagnostics, it needs no SENSEI board
+target_sources_ifdef(CONFIG_SENSEI_PWR_RAM_ON_BOOT app PRIVATE system/pwr/pwr_ram_boot.c)
+
 # Portable libraries of lib/ (Zephyr part)
 add_subdirectory_ifdef(CONFIG_SENSEI_LINK ${CMAKE_CURRENT_LIST_DIR}/../lib/sensei_link/zephyr sensei_link)
 add_subdirectory_ifdef(CONFIG_SENSEI_BUSARB ${CMAKE_CURRENT_LIST_DIR}/../lib/sensei_busarb/zephyr sensei_busarb)

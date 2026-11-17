@@ -37,7 +37,7 @@ struct lpwan_info {
   uint32_t recoveries; /* shield power cycles after a lost link */
   uint32_t failures;   /* requests that failed in a row */
   uint32_t lte_acked;  /* LTE sends the server answered (one-response RAI) */
-  uint32_t lte_noack;  /* ... and those it did not */
+  uint32_t lte_noack;  /* ... and those that were sent without an answer (unconfirmed) */
 };
 
 void sensei_lpwan_get_info(struct lpwan_info *info);

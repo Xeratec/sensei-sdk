@@ -22,3 +22,8 @@ add_executable(test_ota_image test_ota_image.c)
 target_include_directories(test_ota_image PRIVATE ${CMAKE_CURRENT_LIST_DIR}/..)
 target_compile_options(test_ota_image PRIVATE -Wall -Wextra -Werror)
 add_test(NAME ota_image COMMAND test_ota_image)
+
+add_executable(test_ota_reset test_ota_reset.c)
+target_include_directories(test_ota_reset PRIVATE ${CMAKE_CURRENT_LIST_DIR}/..)
+target_compile_options(test_ota_reset PRIVATE -Wall -Wextra -Werror)
+add_test(NAME ota_reset COMMAND test_ota_reset)

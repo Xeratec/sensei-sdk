@@ -30,7 +30,7 @@ static int cmd_status(const struct shell *sh, size_t argc, char **argv) {
   shell_print(sh, "nRF9151 firmware '%s', modem '%s'", i.fw, i.modem);
   shell_print(sh, "transfers %u, bad frames %u, retries %u, events %u", i.transfers, i.bad_frames, i.retries, i.events);
   shell_print(sh, "uplinks ok %u, failed %u, last result %d", i.uplink_ok, i.uplink_fail, i.last_result);
-  shell_print(sh, "LTE answers %u, without answer %u", i.lte_acked, i.lte_noack);
+  shell_print(sh, "LTE answers %u, sent unconfirmed %u", i.lte_acked, i.lte_noack);
   {
     struct sensei_lpwan_lte_info e;
 

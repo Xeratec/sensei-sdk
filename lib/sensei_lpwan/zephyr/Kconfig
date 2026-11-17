@@ -89,10 +89,13 @@ config SENSEI_LPWAN_EVAL_VALID_S
 	depends on SENSEI_LPWAN_LTE_EVAL
 
 config SENSEI_LPWAN_EVAL_RETRY_S
-	int "Time before an evaluation that gave nothing (or an older shield) is asked for again, s"
-	default 3600
+	int "Time before an evaluation that gave nothing is asked for again, s"
+	default 300
 	range 10 86400
 	depends on SENSEI_LPWAN_LTE_EVAL
+	help
+	  Applies to a result that is not valid, a request that failed and an answer that did not come. A shield that
+	  refuses the request as unsupported (an older shield) is not asked again for an hour.
 
 config SENSEI_LPWAN_LINK_FAILURES
 	int "Failed requests (or sends without result) in a row before the shield is power-cycled"

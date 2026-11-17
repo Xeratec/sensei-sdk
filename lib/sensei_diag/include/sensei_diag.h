@@ -47,7 +47,8 @@ extern "C" {
 #define SENSEI_RESET_TEMPERATURE (1u << 14)
 #define SENSEI_RESET_BOOTLOADER (1u << 15)
 #define SENSEI_RESET_FLASH (1u << 16)
-/** The reset followed a fatal error that the fault handler recorded (the record is valid). */
+/** The reset followed a fatal error: the fault handler recorded it (the record is valid), or the core locked up
+ * (CPU_LOCKUP is set too, there is no record). */
 #define SENSEI_RESET_FAULT (1u << 24)
 /** hwinfo is not supported on this platform: the cause is not known. */
 #define SENSEI_RESET_UNKNOWN (1u << 25)
@@ -60,7 +61,8 @@ extern "C" {
  *
  * The nRF reset reason register is empty after a power-on reset and after a brown-out, and hwinfo then reports no
  * flag: this is mapped to POR (a brown-out cannot be told apart). hwinfo not supported (hw_ok false) gives UNKNOWN.
- * Bits above the hwinfo range are dropped. A valid fault record adds FAULT.
+ * Bits above the hwinfo range are dropped. A valid fault record adds FAULT, and so does a CPU lockup: the core
+ * locked up in a fault handler (interrupt stack overflow, fault while handling a fault) and no record was written.
  *
  * @param hwinfo_flags RESET_* flags from hwinfo_get_reset_cause().
  * @param hw_ok        True if hwinfo_get_reset_cause() worked.

@@ -455,6 +455,12 @@ static void test_sm_table(void) {
   CHECK(lpwan_sm_admit(&sm, &rq) == sensei_LpwanResult_LPWAN_OK);
   rq.which_body = sensei_LpwanRequest_lte_disconnect_tag;
   CHECK(lpwan_sm_admit(&sm, &rq) == sensei_LpwanResult_LPWAN_OK);
+  /* the ack of the fault record is a query: any state, no change */
+  rq.which_body = sensei_LpwanRequest_diag_ack_tag;
+  sm.state = LPWAN_ST_ERROR;
+  CHECK(lpwan_sm_admit(&sm, &rq) == sensei_LpwanResult_LPWAN_OK && sm.state == LPWAN_ST_ERROR);
+  sm.state = LPWAN_ST_SENDING;
+  CHECK(lpwan_sm_admit(&sm, &rq) == sensei_LpwanResult_LPWAN_OK && sm.state == LPWAN_ST_SENDING);
 
   /* the connection evaluation needs a connected LTE modem and does not move the machine */
   lpwan_sm_init(&sm);

@@ -85,7 +85,8 @@ nRF5340 (master)                           nRF9151 (slave)
   retained RAM (the last 1 kB of the application RAM, `sensei_lpwan_nrf9151_nrf9151_common.dtsi`). A fatal error of the
   application core is recorded and resets the chip. A fault of the modem core (`nrf_modem_fault_handler`) is recorded the same way
   (reason `0x80`, PC in the modem firmware, the modem library's code as status) before the reset. `src/diag.c` puts
-  `reset_cause`, `boot_count` and, once, the `fault` into `LpwanStatus` (fields 9 to 11). The nRF5340 asks for the status after each
+  `reset_cause`, `boot_count` and the `fault` into `LpwanStatus` (fields 9 to 11); the fault stays in every status until the nRF5340 has it
+  and sends `diag_ack` (kept in RAM only). The nRF5340 asks for the status after each
   version read and reports the reset cause as `Status.shield_reset_cause`. The shield power is cut between uses, which clears the retained RAM:
   the record survives a reset of the running shield, not a power cut. Untested on hardware: reading the reset reason from the non-secure image.
 - **Self-protection:** the link thread feeds a task watchdog (hardware watchdog behind it, 15 s); a modem fault resets
@@ -143,10 +144,11 @@ lost`); sends fail at once until the modem registers again.
 **RAI and the answer of the server** (`CONFIG_LPWAN_SHIELD_RAI`, default y; `AT%RAI` is switched on at the modem start). A send
 carries `Send.rai` (the last chunk of a message): `lte_send()` sets the socket option `SO_RAI` through `lpwan_rai_send()`
 (`lib/sensei_lpwan/src/lpwan_rai.c`): `LTE_RAI_LAST` before the send; `LTE_RAI_ONE_RESP` before the send, then the worker waits up
-to `LPWAN_SHIELD_LTE_ANSWER_WAIT_S` (8 s) for the answer and sets `RAI_NO_DATA`. The receive thread decides what a datagram is:
+to `LPWAN_SHIELD_LTE_ANSWER_WAIT_S` (10 s, `_NBIOT_S` 30 s on NB-IoT; the time counts from `send()`) for the answer and sets `RAI_NO_DATA`. The receive thread decides what a datagram is:
 the 3-byte ack of the chunk that was sent (consumed), an ack of another chunk (dropped), or a downlink (forwarded as `DownlinkRx`);
-the ack and the downlink both end the wait. `tx_done` is ok only with an answer (`TxDone.acked`); `LpwanStatus.lte_answers` and
-`lte_no_answer` count. The server rule is in `lib/sensei_lpwan/README.md`. The RAI configuration of the cell
+the ack and the downlink both end the wait. `tx_done` is ok when the datagram went out: with the answer `TxDone.acked`, without it `TxDone.unconfirmed` ("sent, unconfirmed", not a
+failure); `LpwanStatus.lte_answers` and `lte_no_answer` count. The RSRP in the status and in `conn_eval` has a validity flag (`rssi_valid`,
+`rsrp_valid`). The server rule is in `lib/sensei_lpwan/README.md`. The RAI configuration of the cell
 (`LTE_LC_EVT_RAI_UPDATE`) is `LpwanStatus.rai_support`. A failed `setsockopt` is logged and does not fail the send.
 
 **Connection evaluation** (`CONFIG_LPWAN_SHIELD_LTE_EVAL`, default y): the request `lte_eval` posts `lte_lc_conn_eval_params_get()` to
@@ -234,7 +236,8 @@ The radio (LoRa, LTE-M or NB-IoT) is chosen by the app per send.
 `NRF_MODEM_LIB_TRACE_BACKEND_RTT`): the second RTT up channel `modem_trace` next to the log on channel 0. Read it with Nordic's
 Trace Collector or `nrfutil trace` and open it with the Wireshark dissector of the modem trace; it shows RRC state changes and whether
 the RAI went to the network. It takes a 16 kB region in the modem's shared RAM (`cpucell_cpuapp_ipc_shm_trace` in `app.overlay`, the
-unused part of the 40 kB) and an RTT buffer of 1 kB. The Release build has no trace (`release.conf` does not set it). The
+unused part of the 40 kB; `lte.c` checks at build time that it follows the IPC regions, fits the modem RAM and is as large as
+`NRF_MODEM_LIB_SHMEM_TRACE_SIZE`) and an RTT buffer of 1 kB. The Release build has no trace (`release.conf` does not set it). The
 trace needs the debugger attached; without one the buffer skips (`NO_BLOCK_SKIP`).
 
 ## Update over the air

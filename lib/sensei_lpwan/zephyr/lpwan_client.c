@@ -38,6 +38,7 @@
 
 #include "lpwan_priv.h"
 #include "sensei_busarb/bus_arb.h"
+#include "sensei_link/frag.h"
 #include "sensei_lpwan/lpwan.h"
 #include "sensei_lpwan/lpwan_dfu.h"
 #include "sensei_lpwan/lpwan_lora.h"
@@ -272,6 +273,8 @@ static sensei_Radio send_radio;
 static bool send_last;         /* the chunk is the last of its message (RAI) */
 static sensei_LteRai send_rai; /* the flag the request carried */
 static uint32_t lte_acked, lte_noack;
+static bool
+    send_unconfirmed; /* the send that just ended went out without the answer (see sensei_lpwan_send_unconfirmed) */
 static int64_t idle_deadline; /* 0: no deadline */
 static uint32_t uplink_ok, uplink_fail;
 
@@ -348,7 +351,11 @@ static atomic_t send_finishing; /* finish_send() ran, send_done_fn() has not yet
 static void dl_work(struct k_work *w) {
   struct dl_item *d = CONTAINER_OF(w, struct dl_item, work);
 
-  if (hooks.on_downlink != NULL) {
+  /* The ack of the collector (3 bytes, count 0) is no fragment of a downlink. The shield drops it; one that is older
+   * than that logic passes it on, and the node would count it as a broken downlink. */
+  if (sensei_frag_is_ack(d->data, d->len, NULL, NULL)) {
+    LOG_DBG("ack dropped");
+  } else if (hooks.on_downlink != NULL) {
     hooks.on_downlink(d->data, d->len, d->radio);
   }
   k_mem_slab_free(&dl_slab, d);
@@ -495,23 +502,30 @@ static void eval_result(const sensei_ConnEval *c) {
   }
   if (c->valid) {
     eval_info.energy = c->energy;
-    eval_info.rsrp_dbm = (int16_t)c->rsrp_dbm;
+    eval_info.rsrp_valid = c->rsrp_valid;
+    eval_info.rsrp_dbm = c->rsrp_valid ? (int16_t)c->rsrp_dbm : 0;
     eval_info.ce_level = (uint8_t)MIN(c->ce_level, 3u);
     eval_info_at = k_uptime_get();
     eval_info_valid = true;
   }
   k_spin_unlock(&eval_lock, k);
-  LOG_INF("LTE evaluation: %s, energy %d, RSRP %d dBm, CE level %u, RAI of the cell %d",
-          c->valid ? "valid" : "no result", (int)c->energy, (int)c->rsrp_dbm, (unsigned)c->ce_level,
-          (int)c->rai_support);
+  LOG_INF("LTE evaluation: %s, energy %d, RSRP %s%d dBm, CE level %u, RAI of the cell %d",
+          c->valid ? "valid" : "no result", (int)c->energy, c->rsrp_valid ? "" : "invalid ", (int)c->rsrp_dbm,
+          (unsigned)c->ce_level, (int)c->rai_support);
   eval_flush();
 }
 
-/* The request failed (an older shield, not connected): count it as an evaluation without result. */
-static void eval_failed(void) {
+/* The request failed (not connected, no answer): count it as an evaluation without result. It is asked for again
+ * after SENSEI_LPWAN_EVAL_RETRY_S. `unsupported`: the shield refused it as unsupported (an older shield, no CONEVAL in
+ * its build): not asked again for an hour. */
+static void eval_failed(bool unsupported) {
   k_spinlock_key_t k = k_spin_lock(&eval_lock);
 
-  lpwan_eval_result(&eval, (uint32_t)k_uptime_get(), false, false);
+  if (unsupported) {
+    lpwan_eval_unsupported(&eval, (uint32_t)k_uptime_get());
+  } else {
+    lpwan_eval_result(&eval, (uint32_t)k_uptime_get(), false, false);
+  }
   k_spin_unlock(&eval_lock, k);
   eval_flush();
 }
@@ -551,7 +565,8 @@ static void op_on_event(void *c, const sensei_LpwanEvent *evt) {
       break;
     }
     LOG_INF("tx done, seq %u, %s%s", (unsigned)evt->tx_done.seq, evt->tx_done.ok ? "ok" : "failed",
-            evt->tx_done.acked ? ", answered" : "");
+            evt->tx_done.acked ? ", answered" : (evt->tx_done.unconfirmed ? ", sent, unconfirmed" : ""));
+    send_unconfirmed = evt->tx_done.ok && evt->tx_done.unconfirmed;
     if (send_radio != sensei_Radio_RADIO_LORA) {
       if (evt->tx_done.acked) {
         lte_acked++;
@@ -627,6 +642,7 @@ static const struct lpwan_master_ops mops = {
 /* ---- requests ---- */
 
 static void link_recover(const char *why);
+static void read_diag(void);
 
 /*
  * Admit locally (clear errors without SPI traffic), send, and undo the admission on failure.
@@ -689,6 +705,12 @@ static int request(sensei_LpwanRequest *req, sensei_LpwanResponse *rsp, uint32_t
       lpwan_sm_init(&sm);
       lpwan_held_clear(&held); /* it has restarted: nothing is held */
       connect_end();
+      {
+        int answer = last_result;
+
+        read_diag(); /* why it restarted: its reset cause and fault record (a restart reads no version) */
+        last_result = answer;
+      }
     } else {
       lpwan_sm_revert(&sm, &before, &admitted);
     }
@@ -719,13 +741,22 @@ static void mark_proto_bad(void) {
   proto_retry_at = k_uptime_get() + PROTO_RETRY_MS;
 }
 
-/* Reset cause, boot count and fatal error of the shield (LpwanStatus). A shield without the fields answers zeros. */
+/* Reset cause, boot count and fatal error of the shield (LpwanStatus). A shield without the fields answers zeros.
+ * Read after every version read, after a restart that the shield reported (NOT_CONNECTED) and before the client cuts
+ * the power of a shield that does not answer (link_recover). The shield keeps its fault record until the diag_ack
+ * that follows, so a lost answer does not lose it. */
 static void read_diag(void) {
   sensei_LpwanRequest rq = sensei_LpwanRequest_init_zero;
   sensei_LpwanResponse rs;
+  static bool busy; /* the requests below may report a restart again */
 
+  if (busy) {
+    return;
+  }
+  busy = true;
   rq.which_body = sensei_LpwanRequest_get_status_tag;
   if (request(&rq, &rs, REQ_TO) != 0 || rs.which_payload != sensei_LpwanResponse_status_tag) {
+    busy = false;
     return;
   }
   k_spinlock_key_t k = k_spin_lock(&diag_lock);
@@ -741,7 +772,11 @@ static void read_diag(void) {
   if (rs.status.has_fault) {
     LOG_WRN("shield: last run ended with a fatal error, reason %u, pc 0x%08x, thread %s",
             (unsigned)rs.status.fault.reason, (unsigned)rs.status.fault.pc, rs.status.fault.thread);
+    memset(&rq, 0, sizeof(rq));
+    rq.which_body = sensei_LpwanRequest_diag_ack_tag; /* stored: the shield may forget it (an older shield refuses) */
+    (void)request(&rq, &rs, REQ_TO);
   }
+  busy = false;
 }
 
 static int read_version(sensei_LpwanVersion *out) {
@@ -945,6 +980,15 @@ static void link_recover(const char *why) {
   recoveries++;
   finish_send(-EIO);
   report_error();
+  /* A shield that faulted resets itself and keeps its fault record in RAM, which the power cut would erase. Give it
+   * the time to boot and ask once for its status. `booting` keeps a failure here from starting another recovery. */
+  if (shield_on && !booting) {
+    booting = true;
+    if (op_wait_ready(NULL, CONFIG_SENSEI_LPWAN_BOOT_TIMEOUT_MS) == 0) {
+      read_diag();
+    }
+    booting = false;
+  }
   shield_down();
   tx_timeouts = 0;
   shield_retry_at = k_uptime_get() + 1000; /* give the cycle a moment, the uplink retries */
@@ -1178,12 +1222,13 @@ static void do_eval(void) {
   sensei_LpwanResponse rs;
 
   if (!link_up || sm.state != LPWAN_ST_CONNECTED || sm.tech != LPWAN_TECH_LTE) {
-    eval_failed();
+    eval_failed(false);
     return;
   }
   rq.which_body = sensei_LpwanRequest_lte_eval_tag;
   if (request(&rq, &rs, REQ_TO) != 0) {
-    eval_failed(); /* refused (an older shield) or no answer: the result is not coming */
+    /* Refused (LPWAN_UNSUPPORTED: an older shield) or no answer: the result is not coming. */
+    eval_failed(last_result == sensei_LpwanResult_LPWAN_UNSUPPORTED);
   }
 }
 
@@ -1738,6 +1783,7 @@ int sensei_lpwan_radio_send_ex(sensei_Radio r, const uint8_t *chunk, size_t len,
   send_len = len;
   send_radio = r;
   send_last = last;
+  send_unconfirmed = false;
   send_done = done;
   send_user = user;
   if (post(CMD_SEND, r, false) != 0) {
@@ -1748,6 +1794,8 @@ int sensei_lpwan_radio_send_ex(sensei_Radio r, const uint8_t *chunk, size_t len,
 }
 
 /* ---- API ---- */
+
+bool sensei_lpwan_send_unconfirmed(void) { return send_unconfirmed; }
 
 enum sensei_lpwan_link sensei_lpwan_lte_link_check(void) {
 #ifdef CONFIG_SENSEI_LPWAN_LTE_EVAL

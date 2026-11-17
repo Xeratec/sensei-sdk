@@ -54,8 +54,10 @@ nRF5340 (master)                          nRF9151 (slave)
 
 - `sensei_lpwan_radio_send_ex(radio, chunk, len, last, done, user)`: like `radio_send` and says if the chunk is the last of its
   message. See "LTE: RAI, the answer of the server" below.
+- `sensei_lpwan_send_unconfirmed()`: inside `done()`, true if the chunk went out but the answer of the server did not come.
 - `sensei_lpwan_lte_link_check()` and `sensei_lpwan_lte_info()`: the connection evaluation (energy estimate, RSRP, coverage
   level) of the LTE modem. See "LTE: connection evaluation".
+- `sensei_lpwan_shield_diag()`: reset cause and fault record of the shield. See "Diagnostics of the shield".
 
 Power: with LoRa the shield is switched off `SENSEI_LPWAN_IDLE_S` after the last traffic, never while a send is in
 flight or its frame waits in the LR1121 (the LR1121 keeps the LoRaWAN session). With LTE it stays on and the modem sleeps in PSM.
@@ -70,16 +72,23 @@ Whether the network acts on it depends on the operator.
   chunks of a message with `sensei_lpwan_radio_send_ex(..., last, ...)`. Only the last chunk gets the flag (`Send.rai` of the
   link, `lpwan_rai_for_chunk()`); earlier chunks never do.
 - The shield sets the socket option RAI for that send (`lpwan_rai_send()`, host tested on a fake socket). `LAST`: the option, the
-  send. `ONE_RESP`: the option `RAI_ONE_RESP`, the send, a short wait for the answer (`LPWAN_SHIELD_LTE_ANSWER_WAIT_S`, 8 s), then
-  `RAI_NO_DATA`. The option is also taken back when the wait ends without an answer.
+  send. `ONE_RESP`: the option `RAI_ONE_RESP`, the send, a wait for the answer, then `RAI_NO_DATA`. The wait counts from `send()`,
+  so it includes the RRC set-up of the modem: 10 s on LTE-M, 30 s on NB-IoT (`LPWAN_SHIELD_LTE_ANSWER_WAIT_S`,
+  `_NBIOT_S`). It ends early when the coverage is lost. The option is also taken back when the wait ends without an answer.
 - **The server answers an LTE uplink with exactly one datagram**: the first pending downlink, or the ack of the SENSEI collector,
   `msg_id | index | 0` (3 bytes, the form of a chunk with count 0, which no chunk has: `sensei_frag_ack()`). The shield
-  consumes an ack of the chunk it sent (`lpwan_answer_classify()`), forwards a downlink as `DownlinkRx` and counts either as the
-  answer. An ack of another chunk is dropped.
-- With `ONE_RESP` the send is ok only if the answer came: `TxDone.ok` false and `done(-EIO)` otherwise, and the app sends the chunk
-  again (the collector acknowledges a repeated last chunk again and stores the message once). `TxDone.acked` says the answer
-  came; `sensei lpwan status` shows the counts. A server that does not answer (an older collector, or another one) makes every
-  last chunk fail: use `LTE_RAI_LAST` or `OFF` with it.
+  consumes an ack of the chunk it sent (`lpwan_rx_decide()`, `lpwan_answer_classify()`), forwards a downlink as `DownlinkRx` and
+  counts either as the answer. An ack of another chunk, or a late one after the wait, is dropped. The client drops an ack-shaped
+  datagram too (a shield older than this rule would pass it on).
+- **Acks are best effort.** The ack of a plain node has no MAC: a forged `msg_id | index | 0`, or any datagram that arrives while
+  a send waits, counts as the answer. With E2E nodes the sealed messages are authenticated, the acks are not. Do not read an ack as
+  proof of delivery against an attacker; it tells the node that the path works.
+- With `ONE_RESP` a send without the answer is **sent, unconfirmed**, not failed: `TxDone.ok` true, `TxDone.unconfirmed` true,
+  `done(0)` and `sensei_lpwan_send_unconfirmed()` true inside the callback. The datagram may have arrived (the ack was lost or the
+  network was slow), so the app does not resend the chunk at once and does not count the message as delivered; the collector
+  stores a repeated message once only within its duplicate window. `TxDone.acked` says the answer came; `sensei lpwan status` and
+  `LpwanStatus.lte_no_answer` count unconfirmed sends. A server that never answers (an older collector, or another one) makes
+  every last chunk unconfirmed: use `LTE_RAI_LAST` or `OFF` with it.
 - The modem reports what the network supports (`LTE_LC_EVT_RAI_UPDATE`, `%RAI`): `LpwanStatus.rai_support` and the
   evaluation event. A modem or network without it ignores the option; the shield logs a warning.
 
@@ -92,10 +101,22 @@ on request (`lte_eval`, the result is the `conn_eval` event) and the client keep
 
 - `SENSEI_LPWAN_LINK_OK`: send. `_BAD`: the estimate is excessive (`lpwan_energy_is_bad()`; unknown and poor are not bad), the
   app may hold the data. `_WAIT`: the shield is evaluating, `on_up` follows when it knows.
-- No result (not registered, radio busy, an older shield that answers `LPWAN_UNSUPPORTED`): OK, and not asked again for
-  `SENSEI_LPWAN_EVAL_RETRY_S` (3600 s). `SENSEI_LPWAN_LTE_EVAL=n` makes the check always say OK.
-- `sensei_lpwan_lte_info()` gives the last result (RSRP, CE level, estimate, RAI of the cell, age) for the app's status.
+- No result (not registered, radio busy, no event within 30 s): a failed evaluation. The send goes ahead (OK) and the shield is not
+  asked again for `SENSEI_LPWAN_EVAL_RETRY_S` (300 s). An older shield that answers `LPWAN_UNSUPPORTED` is not asked again for an
+  hour. `SENSEI_LPWAN_LTE_EVAL=n` makes the check always say OK. A lost `conn_eval` event therefore costs one ask per retry time, not
+  one per check (`lpwan_eval_decide()`, host tested).
+- `sensei_lpwan_lte_info()` gives the last result (RSRP with `rsrp_valid`, CE level, estimate, RAI of the cell, age) for the app's
+  status. An invalid RSRP is not turned into 0 dBm: `rsrp_valid` is false.
 - Untested on hardware: how the modem answers `%CONEVAL` while it sleeps in PSM.
+
+## Diagnostics of the shield
+
+The client reads the shield's status (`get_status`: reset cause, boot count, fault record) after each version read, after a restart
+that the shield reports (a request answered `NOT_CONNECTED`) and, when the link is lost, once before it cuts the shield power:
+`link_recover()` waits up to `SENSEI_LPWAN_BOOT_TIMEOUT_MS` for the shield's BUSY line and asks `get_status`, so the record of a
+shield that faulted and reset itself is not lost with the power cut. The shield keeps the record in RAM and reports it with every
+status until the client has stored it and sends `diag_ack` (an older shield refuses it, harmless). A reset or a power cut of the
+shield before that loses it. `sensei_lpwan_shield_diag()` returns the last reading. Untested on hardware.
 
 ## Update of the shield (`sensei_lpwan_dfu_submit()`)
 
@@ -172,7 +193,7 @@ while GAP9 holds the bus and on again after it. Untested on hardware.
   for an hour (`sensei lpwan status` says so, the self-test returns `-EPROTONOSUPPORT`), then asks again from a fresh
   start of the shield: two damaged version bytes in a row look like another version, and the shield may have been updated.
   Bump the protocol version with every change of `lpwan.proto` or of the transfer rules that an older peer would misread
-  (now 2; the update messages (tags 40 to 46, `LpwanVersion` 4 to 7) and the LTE additions (`Send.rai`, `lte_eval`, `ConnEval`, `TxDone.acked`, `LpwanStatus` 20 to 22) are additions and did not bump it: an old shield app reports
+  (now 2; the update messages (tags 40 to 46, `LpwanVersion` 4 to 7) and the LTE additions (`Send.rai`, `lte_eval`, `ConnEval`, `TxDone.acked`, `TxDone.unconfirmed`, `ConnEval.rsrp_valid`, `LpwanStatus` 20 to 22 and `rssi_valid`, `diag_ack`) are additions and did not bump it: an old shield app reports
   `dfu_targets` 0, an old client never sends `dfu_confirm`, so a new shield image is not kept; the earlier changes: `SendInfo`, `TxDone.next_max_payload`, `SendInfo.next_max_payload`). `SendInfo.queued_seq`, `LpwanStatus.queued`,
   `late_tx_seq` and `late_tx_ok` are new fields: an older peer ignores them and treats BUSY as a failure.
 

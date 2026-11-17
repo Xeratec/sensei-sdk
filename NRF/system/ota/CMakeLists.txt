@@ -9,3 +9,4 @@ target_sources(app PRIVATE
 )
 
 target_sources_ifdef(CONFIG_SENSEI_OTA_SMP_STREAM app PRIVATE sensei_smp_stream.c)
+target_sources_ifdef(CONFIG_SENSEI_OTA_RECOVERY_NEEDS_USB app PRIVATE sensei_ota_reset.c)

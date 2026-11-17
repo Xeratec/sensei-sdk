@@ -40,6 +40,10 @@ static void test_reset_map(void) {
   /* a recorded fault adds a bit and keeps the hardware cause */
   CHECK(sensei_diag_reset_map(SENSEI_RESET_SOFTWARE, true, true) == (SENSEI_RESET_SOFTWARE | SENSEI_RESET_FAULT));
   CHECK(sensei_diag_reset_map(0, true, true) == (SENSEI_RESET_POR | SENSEI_RESET_FAULT));
+  /* a lockup has no record but counts as a fault; a record on top changes nothing */
+  CHECK(sensei_diag_reset_map(SENSEI_RESET_CPU_LOCKUP, true, false) == (SENSEI_RESET_CPU_LOCKUP | SENSEI_RESET_FAULT));
+  CHECK(sensei_diag_reset_map(SENSEI_RESET_CPU_LOCKUP, true, true) == (SENSEI_RESET_CPU_LOCKUP | SENSEI_RESET_FAULT));
+  CHECK(sensei_diag_reset_map(SENSEI_RESET_CPU_LOCKUP, false, false) == SENSEI_RESET_UNKNOWN);
   /* bits above the hwinfo range are dropped */
   CHECK(sensei_diag_reset_map(0x80000000u | SENSEI_RESET_PIN, true, false) == SENSEI_RESET_PIN);
   /* the bit positions are the ones of Zephyr hwinfo.h */

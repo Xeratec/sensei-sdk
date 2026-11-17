@@ -16,7 +16,7 @@
 LOG_MODULE_DECLARE(main, CONFIG_LPWAN_SHIELD_LOG_LEVEL);
 
 static struct sensei_diag_fault fault;
-static bool have_fault;
+static volatile bool have_fault; /* until the node acks it (diag_ack): a lost status answer loses nothing */
 
 void diag_init(void) {
   have_fault = sensei_diag_take_fault(&fault);
@@ -30,12 +30,18 @@ void diag_modem_fault(uint32_t reason, uint32_t pc) {
   sensei_diag_capture_ext(SENSEI_FAULT_MODEM, pc, 0, reason, "modem");
 }
 
+void diag_ack(void) {
+  if (have_fault) {
+    LOG_INF("fault record taken over by the node");
+  }
+  have_fault = false;
+}
+
 void diag_fill_status(sensei_LpwanStatus *st) {
   st->reset_cause = sensei_diag_reset_cause();
   st->boot_count = sensei_diag_boot_count();
   if (have_fault) {
-    have_fault = false; /* once: the master keeps what it needs */
-    st->has_fault = true;
+    st->has_fault = true; /* every status, until diag_ack() */
     st->fault.reason = fault.reason;
     st->fault.pc = fault.pc;
     st->fault.lr = fault.lr;

@@ -9,8 +9,9 @@ Authors:
 # Zephyr tests
 
 Ztest suites that run on `native_sim/native/64` with Twister, so the Zephyr side of the SDK is checked without
-hardware. One folder per suite, all under this tree (the pure C logic of the libraries has host tests in
-`lib/<name>/tests`, see `make test-host`).
+hardware. One suite (`diag_fault`) runs on QEMU (`qemu_cortex_m3`) because it needs a real fault and a reset. One
+folder per suite, all under this tree (the pure C logic of the libraries has host tests in `lib/<name>/tests`, see
+`make test-host`).
 
 | Folder | Test ID | What it checks |
 |---|---|---|
@@ -20,6 +21,8 @@ hardware. One folder per suite, all under this tree (the pure C logic of the lib
 | `link` | `sensei.link` | `sensei_link` as Zephyr library on the NCS nanopb: messages, framing, SPI frame, fragments, Kconfig option |
 | `scd41`, `sgp41`, `bh1730` | `sensei.drivers.<name>` | sensor drivers against I2C emulators: sensor API and split API, conversion, power, sleep, probe and re-probe |
 | `ubx` | `sensei.drivers.gnss.ubx` | u-blox UBX parser |
+| `diag` | `sensei.diag` | `NRF/system/diag` on native_sim with a RAM-array retained memory driver: boot counter, reset cause, fault record taken once, damaged and foreign RAM |
+| `diag_fault` | `sensei.diag.fault` | Fault capture on QEMU (`qemu_cortex_m3`): `k_oops()` and an undefined instruction reset the board, the record and the coredump are checked after each reboot |
 
 Why one tree: Twister needs the SDK as Zephyr module (`-x=EXTRA_ZEPHYR_MODULES=<sdk>/NRF`), so all suites
 need the NRF module anyway, and one `-T NRF/tests` finds them.
@@ -27,16 +30,17 @@ need the NRF module anyway, and one `-T NRF/tests` finds them.
 ## Run
 
 ```sh
-scripts/twister.sh                           # all suites, in Docker (also: make twister)
+scripts/twister.sh                           # all suites on native_sim and QEMU, in Docker (also: make twister)
 scripts/twister.sh -- -s sensei.busarb       # one suite (Twister arguments after --)
 scripts/twister.sh --host                    # no Docker: Linux with gcc, a west workspace and Twister's Python packages
 ```
 
 The script is described in its header. Docker needs the image `sensei-twister:ncs-3.4.1` (built on first use from
-`scripts/docker/twister.Dockerfile`; its base is `sensei-nrf:ncs-3.4.1` of the node repository) and an NCS v3.4.1
+`scripts/docker/twister.Dockerfile`; its base is `sensei-nrf:ncs-3.4.1` of the node repository; it adds the host compiler for
+native_sim and QEMU for `qemu_cortex_m3`, and builds the ARM test with the Zephyr SDK of the base image) and an NCS v3.4.1
 west workspace (`SENSEI_NCS_WORKSPACE`, default `~/Documents/work/Tools/sensei-ncs-v3.4.1`), mounted read-only.
 Output goes to `build/twister`. A fresh workspace for the tests alone: `scripts/west-twister.yml`. CI does that:
-`.github/workflows/twister.yml`.
+`.github/workflows/twister.yml` (native_sim only: it has no Zephyr SDK or QEMU; `TWISTER_PLATFORM` adds platforms).
 
 ## Shared files
 

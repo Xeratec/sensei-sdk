@@ -5,19 +5,23 @@
 # Authors:
 # - Philip Wiese <wiesep@iis.ee.ethz.ch>
 
-# Runs the Zephyr tests of the SDK (NRF/tests) with Twister on native_sim. No hardware needed.
+# Runs the Zephyr tests of the SDK (NRF/tests) with Twister on native_sim and, in Docker, on QEMU (qemu_cortex_m3, for
+# the fault capture test). No hardware needed.
 #
 #   scripts/twister.sh [--host] [-- <twister arguments>]
 #
-# Default: in Docker (image sensei-twister:ncs-3.4.1, built on first use from scripts/docker/twister.Dockerfile).
-# native_sim needs Linux and a host compiler, so this works on macOS too.
-# --host: run Twister directly (Linux with gcc and a west workspace; this is what CI does).
+# Default: in Docker (image sensei-twister:ncs-3.4.1, built on first use from scripts/docker/twister.Dockerfile;
+# it has the Zephyr SDK for the ARM build and QEMU). native_sim needs Linux and a host compiler, so this works on
+# macOS too.
+# --host: run Twister directly (Linux with gcc and a west workspace; this is what CI does). Only native_sim runs
+# there unless TWISTER_PLATFORM adds a platform whose toolchain and emulator you have.
 #
 # Environment:
 #   SENSEI_NCS_WORKSPACE  west workspace of NCS v3.4.1 with a venv or west in PATH
 #                         (default: ~/Documents/work/Tools/sensei-ncs-v3.4.1). Mounted read-only.
 #   TWISTER_OUT           output folder (default: <sdk>/build/twister). Deleted at the start.
-#   TWISTER_PLATFORM      default native_sim/native/64
+#   TWISTER_PLATFORM      platforms, separated by spaces (default: native_sim/native/64 qemu_cortex_m3; with --host
+#                         native_sim/native/64 only)
 #   TWISTER_IMAGE         Docker image (default sensei-twister:ncs-3.4.1)
 #
 # Examples:
@@ -30,13 +34,17 @@ set -euo pipefail
 sdk="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ws="${SENSEI_NCS_WORKSPACE:-$HOME/Documents/work/Tools/sensei-ncs-v3.4.1}"
 out="${TWISTER_OUT:-$sdk/build/twister}"
-platform="${TWISTER_PLATFORM:-native_sim/native/64}"
 image="${TWISTER_IMAGE:-sensei-twister:ncs-3.4.1}"
 host=0
 
 if [ "${1:-}" = "--host" ]; then
   host=1
   shift
+fi
+if [ "$host" = 1 ]; then
+  platform="${TWISTER_PLATFORM:-native_sim/native/64}"
+else
+  platform="${TWISTER_PLATFORM:-native_sim/native/64 qemu_cortex_m3}"
 fi
 [ "${1:-}" = "--" ] && shift
 
@@ -48,7 +56,10 @@ mkdir "$out/.cache" # Zephyr caches compiler checks in $HOME/.cache (HOME=$out i
 # Twister arguments. -x passes the SDK as Zephyr module to every test build.
 tw_args() {
   local sdk_dir="$1" out_dir="$2"
-  TW=(-p "$platform" -T "$sdk_dir/NRF/tests" -O "$out_dir" --inline-logs --no-detailed-test-id
+  local p
+  TW=()
+  for p in $platform; do TW+=(-p "$p"); done
+  TW+=(-T "$sdk_dir/NRF/tests" -O "$out_dir" --inline-logs --no-detailed-test-id
     "-x=EXTRA_ZEPHYR_MODULES=$sdk_dir/NRF")
 }
 
@@ -68,8 +79,8 @@ if ! docker image inspect "$image" >/dev/null 2>&1; then
 fi
 
 tw_args /sdk /out/twister-out
-# Zephyr uses the host compiler (no cross toolchain) for native_sim.
+# The Zephyr SDK builds the ARM tests; native_sim uses the host compiler of the image.
 exec docker run --rm --user "$(id -u):$(id -g)" -e HOME=/out \
-  -e ZEPHYR_BASE=/workspace/zephyr -e ZEPHYR_TOOLCHAIN_VARIANT=host -e PYTHONDONTWRITEBYTECODE=1 \
+  -e ZEPHYR_BASE=/workspace/zephyr -e ZEPHYR_TOOLCHAIN_VARIANT=zephyr -e PYTHONDONTWRITEBYTECODE=1 \
   -v "$ws:/workspace:ro" -v "$sdk:/sdk:ro" -v "$out:/out" -w /out \
   "$image" /workspace/zephyr/scripts/twister "${TW[@]}" "$@"

@@ -1,0 +1,68 @@
+// Copyright (c) 2026 ETH Zurich and University of Bologna
+// SPDX-License-Identifier: Apache-2.0
+
+// Retained RAM of the application core: the last 1 kB of the application RAM (sram0_image), taken out of the
+// image RAM so that neither the application nor MCUboot uses it. Include it after nrf5340_sram_partition.dtsi.
+//
+//   0x2006fc00  diag_fault  64 B   record of the last fatal error (NRF/system/diag)
+//   0x2006fc40  diag_state  16 B   boot counter
+//   0x2006fc80  diag_dump  896 B   optional coredump of the faulting thread
+//
+// The boot mode (MCUboot serial recovery requested by the application) is kept in GPREGRET1, which
+// survives a reset and is outside the RAM.
+
+&sram0_image {
+	reg = <0x0 DT_SIZE_K(447)>;
+};
+
+/ {
+	sram@2006fc00 {
+		compatible = "zephyr,memory-region", "mmio-sram";
+		reg = <0x2006fc00 DT_SIZE_K(1)>;
+		ranges = <0x0 0x2006fc00 DT_SIZE_K(1)>;
+		zephyr,memory-region = "RetainedMem";
+		status = "okay";
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		diag_retained: retainedmem {
+			compatible = "zephyr,retained-ram";
+			status = "okay";
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			diag_fault: diag_fault@0 {
+				compatible = "zephyr,retention";
+				status = "okay";
+				reg = <0x0 0x40>;
+			};
+			diag_state: diag_state@40 {
+				compatible = "zephyr,retention";
+				status = "okay";
+				reg = <0x40 0x10>;
+			};
+			diag_dump: diag_dump@80 {
+				compatible = "zephyr,retention";
+				status = "okay";
+				reg = <0x80 0x380>;
+			};
+		};
+	};
+
+	chosen {
+		sensei,diag-fault = &diag_fault;
+		sensei,diag-state = &diag_state;
+		sensei,diag-dump = &diag_dump;
+		zephyr,boot-mode = &boot_mode0;
+	};
+};
+
+&gpregret1 {
+	status = "okay";
+
+	boot_mode0: boot_mode@0 {
+		compatible = "zephyr,retention";
+		status = "okay";
+		reg = <0x0 0x1>;
+	};
+};

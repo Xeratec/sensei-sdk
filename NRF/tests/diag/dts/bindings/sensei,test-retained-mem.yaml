@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+# SPDX-License-Identifier: Apache-2.0
+
+description: Retained memory in a RAM array, for tests on native_sim (the content lasts as long as the process)
+
+compatible: "sensei,test-retained-mem"
+
+include: base.yaml
+
+properties:
+  size:
+    type: int
+    required: true
+    description: Bytes

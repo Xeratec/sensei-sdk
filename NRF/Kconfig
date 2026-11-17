@@ -22,5 +22,6 @@ rsource "../lib/sensei_secure/zephyr/Kconfig"
 rsource "../lib/sensei_gas_index/zephyr/Kconfig"
 rsource "../lib/sensei_sensor_math/zephyr/Kconfig"
 rsource "../lib/sensei_pwr_math/zephyr/Kconfig"
+rsource "../lib/sensei_diag/zephyr/Kconfig"
 
 endmenu

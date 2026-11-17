@@ -139,6 +139,7 @@ All SDK drivers are untested on hardware. `example/drivers_test` probes every IC
   - Enable with `CONFIG_SENSEI_CRYPTO`, example in `example/crypto_api`.
 - **Marker** (`CONFIG_SENSEI_MARKER`): two GPIO outputs for the digital inputs of a power analyzer, see [NRF/system/marker](NRF/system/marker/README.md).
 - **Watchdog** (`CONFIG_SENSEI_WDT`): hardware watchdog fed only while the application is healthy, see [NRF/system/wdt](NRF/system/wdt/README.md).
+- **Diagnostics** (`CONFIG_SENSEI_DIAG`): reset cause, boot counter and the record of the last fatal error in retained RAM, see [NRF/system/diag](NRF/system/diag/README.md).
 
 
 ## Portable Libraries (`lib/`)
@@ -155,6 +156,7 @@ Plain C libraries for nRF (Zephyr), GAP9 and host builds. Each folder has `inclu
 | [lib/sensei_gas_index](lib/sensei_gas_index/README.md) | `CONFIG_SENSEI_GAS_INDEX` | VOC and NOx index from SGP41 raw ticks (Sensirion gas index algorithm inside) |
 | [lib/sensei_sensor_math](lib/sensei_sensor_math/README.md) | `CONFIG_SENSEI_SENSOR_MATH` | Unit conversions of the sensor shield drivers (SGP41 ticks, AS7331 uW/cm2, SCD41 ASC hours, LIS2DUXS12 wake threshold) |
 | [lib/sensei_pwr_math](lib/sensei_pwr_math/README.md) | `CONFIG_SENSEI_PWR_MATH` | Battery charge estimate per chemistry and button press detection of the power module |
+| [lib/sensei_diag](lib/sensei_diag/README.md) | `CONFIG_SENSEI_DIAG_CODEC` | Reset cause bits, fault record and boot state of the diagnostics module (byte layout, names) |
 
 ## Applications (`NRF/apps/`)
 - [lpwan_shield](NRF/apps/lpwan_shield/README.md): firmware of the LPWAN shield's nRF9151 (LTE-M, NB-IoT, LoRaWAN over an LR1121). Board `sensei_lpwan_nrf9151/nrf9151/ns`.

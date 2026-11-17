@@ -7,6 +7,10 @@ add_subdirectory(drivers)
 
 add_subdirectory_ifdef(CONFIG_SENSEI system)
 
+# Field diagnostics (system/diag): a module of its own, it needs no SENSEI board (tests on QEMU use it).
+add_subdirectory_ifdef(CONFIG_SENSEI_DIAG system/diag)
+target_include_directories_ifdef(CONFIG_SENSEI_DIAG app PRIVATE system)
+
 # Portable libraries of lib/ (Zephyr part)
 add_subdirectory_ifdef(CONFIG_SENSEI_LINK ${CMAKE_CURRENT_LIST_DIR}/../lib/sensei_link/zephyr sensei_link)
 add_subdirectory_ifdef(CONFIG_SENSEI_BUSARB ${CMAKE_CURRENT_LIST_DIR}/../lib/sensei_busarb/zephyr sensei_busarb)
@@ -17,6 +21,7 @@ add_subdirectory_ifdef(CONFIG_SENSEI_SECURE ${CMAKE_CURRENT_LIST_DIR}/../lib/sen
 add_subdirectory_ifdef(CONFIG_SENSEI_GAS_INDEX ${CMAKE_CURRENT_LIST_DIR}/../lib/sensei_gas_index/zephyr sensei_gas_index)
 add_subdirectory_ifdef(CONFIG_SENSEI_SENSOR_MATH ${CMAKE_CURRENT_LIST_DIR}/../lib/sensei_sensor_math/zephyr sensei_sensor_math)
 add_subdirectory_ifdef(CONFIG_SENSEI_PWR_MATH ${CMAKE_CURRENT_LIST_DIR}/../lib/sensei_pwr_math/zephyr sensei_pwr_math)
+add_subdirectory_ifdef(CONFIG_SENSEI_DIAG_CODEC ${CMAKE_CURRENT_LIST_DIR}/../lib/sensei_diag/zephyr sensei_diag)
 
 target_include_directories_ifdef(CONFIG_SENSEI app PRIVATE
     system

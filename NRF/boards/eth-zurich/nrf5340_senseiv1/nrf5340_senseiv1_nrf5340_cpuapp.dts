@@ -243,3 +243,6 @@ zephyr_udc0: &usbd {
 /* RAM plan (256 kB secure, 192 kB non-secure application, 64 kB shared with the network core). */
 #include <nordic/nrf5340_sram_partition.dtsi>
 #include <nordic/nrf5340_shared_sram_partition.dtsi>
+
+/* Retained RAM (diagnostics record, boot counter) and the boot mode for MCUboot. */
+#include "nrf5340_senseiv1_retained.dtsi"

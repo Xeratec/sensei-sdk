@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+# SPDX-License-Identifier: Apache-2.0
+---
+# The test crashes on purpose and reboots twice. QEMU keeps the RAM over the reset, as the nRF keeps the retained RAM.
+tests:
+  sensei.diag.fault:
+    platform_allow:
+      - qemu_cortex_m3
+    tags: sensei diag
+    timeout: 60
+    ignore_faults: true
+    harness: console
+    harness_config:
+      type: one_line
+      regex:
+        - "DIAG TEST PASSED"

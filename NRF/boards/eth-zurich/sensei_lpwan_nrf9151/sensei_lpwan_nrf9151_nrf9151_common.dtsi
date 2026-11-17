@@ -95,3 +95,56 @@
  * RAM: 88 kB secure, 40 kB for the modem library, 128 kB non-secure application.
  */
 #include <nordic/nrf91xx_partition.dtsi>
+
+/*
+ * Retained RAM: the last 1 kB of the non-secure application RAM (taken out of sram0_ns_app, so the application
+ * does not use it), for the diagnostics record and the boot counter (NRF/system/diag).
+ *
+ *   0x2003fc00  diag_fault  64 B   record of the last fatal error
+ *   0x2003fc40  diag_state  16 B   boot counter
+ *   0x2003fc80  diag_dump  896 B   optional coredump of the faulting thread
+ */
+&sram0_ns_app {
+	reg = <0xa000 DT_SIZE_K(127)>;
+};
+
+/ {
+	sram@2003fc00 {
+		compatible = "zephyr,memory-region", "mmio-sram";
+		reg = <0x2003fc00 DT_SIZE_K(1)>;
+		ranges = <0x0 0x2003fc00 DT_SIZE_K(1)>;
+		zephyr,memory-region = "RetainedMem";
+		status = "okay";
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		retainedmem {
+			compatible = "zephyr,retained-ram";
+			status = "okay";
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			diag_fault: diag_fault@0 {
+				compatible = "zephyr,retention";
+				status = "okay";
+				reg = <0x0 0x40>;
+			};
+			diag_state: diag_state@40 {
+				compatible = "zephyr,retention";
+				status = "okay";
+				reg = <0x40 0x10>;
+			};
+			diag_dump: diag_dump@80 {
+				compatible = "zephyr,retention";
+				status = "okay";
+				reg = <0x80 0x380>;
+			};
+		};
+	};
+
+	chosen {
+		sensei,diag-fault = &diag_fault;
+		sensei,diag-state = &diag_state;
+		sensei,diag-dump = &diag_dump;
+	};
+};

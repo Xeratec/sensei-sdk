@@ -1,0 +1,64 @@
+# SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+# SPDX-License-Identifier: Apache-2.0
+#
+# Authors:
+# - Philip Wiese <wiesep@iis.ee.ethz.ch>
+
+DT_CHOSEN_SENSEI_DIAG_DUMP := sensei,diag-dump
+
+menuconfig SENSEI_DIAG
+	bool "Field diagnostics: reset cause, boot counter, fatal error record in retained RAM"
+	default n
+	select SENSEI_DIAG_CODEC
+	select HWINFO
+	select REBOOT
+	# The retained RAM and the retention areas (devicetree chosen sensei,diag-fault and sensei,diag-state, see
+	# README.md). Without them the record lives in noinit RAM, which a warm reset usually keeps, but nothing
+	# guarantees it. The fatal handler writes from an interrupt, so no mutex.
+	imply RETAINED_MEM
+	imply RETENTION
+	imply RETAINED_MEM_MUTEX_FORCE_DISABLE
+	imply RETENTION_MUTEX_FORCE_DISABLE
+	help
+	  At boot: the full reset cause (hwinfo) and a boot counter. On a fatal error: reason, PC, LR, thread, uptime
+	  and the last job id of the application go into retained RAM; the next boot hands the record to the
+	  application once (sensei_diag_take_fault()). See NRF/system/diag/README.md.
+
+if SENSEI_DIAG
+
+config SENSEI_DIAG_FATAL_HANDLER
+	bool "Record fatal errors (defines k_sys_fatal_error_handler)"
+	default y
+	depends on !RESET_ON_FATAL_ERROR
+	help
+	  The module defines k_sys_fatal_error_handler(): it records the fault and then resets (or halts, see below),
+	  as RESET_ON_FATAL_ERROR of NCS does. NCS defines the same function, so turn RESET_ON_FATAL_ERROR off. Say
+	  n if the application has its own handler and calls sensei_diag_capture() from it.
+
+config SENSEI_DIAG_RESET_ON_FATAL
+	bool "Reset after a fatal error"
+	default y
+	depends on SENSEI_DIAG_FATAL_HANDLER
+	help
+	  Reset the chip after the record is written (a trial image then reverts). Without it the handler halts, as
+	  the Zephyr default does.
+
+config SENSEI_DIAG_COREDUMP
+	bool "Keep a small coredump of the faulting thread in retained RAM"
+	depends on $(dt_chosen_enabled,$(DT_CHOSEN_SENSEI_DIAG_DUMP))
+	depends on ARCH_SUPPORTS_COREDUMP
+	select DEBUG_COREDUMP
+	help
+	  Registers the Zephyr coredump (backend "other") with the retention area of the devicetree chosen
+	  sensei,diag-dump: the registers and the top of the stack of the faulting thread, as many bytes as fit (the
+	  rest is dropped). Also set DEBUG_COREDUMP_BACKEND_OTHER=y and DEBUG_COREDUMP_MEMORY_DUMP_MIN=y (Kconfig
+	  cannot select choice symbols), and DEBUG_COREDUMP_THREAD_STACK_TOP_LIMIT_FOR_CURRENT to the stack bytes you
+	  want kept (about 700).
+	  Costs about 2 kB of flash and the retention area in RAM. The dump has the format of the Zephyr coredump;
+	  see README.md for how to read it.
+
+module = SENSEI_DIAG
+module-str = SENSEI diagnostics
+source "subsys/logging/Kconfig.template.log_config"
+
+endif # SENSEI_DIAG

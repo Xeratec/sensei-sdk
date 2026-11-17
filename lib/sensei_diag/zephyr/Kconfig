@@ -1,0 +1,10 @@
+# SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+# SPDX-License-Identifier: Apache-2.0
+#
+# Authors:
+# - Philip Wiese <wiesep@iis.ee.ethz.ch>
+
+config SENSEI_DIAG_CODEC
+	bool "SENSEI diagnostics codec (reset cause bits, fault record, boot state)"
+	help
+	  Pure logic of lib/sensei_diag. The diagnostics module (SENSEI_DIAG) selects it.

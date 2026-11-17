@@ -26,8 +26,11 @@ Untested on hardware.
 
 ## Start-up order
 
-1. `PRE_KERNEL`: GPIO, I2C buses (I2C at priority 50).
-2. `POST_KERNEL` 55, `pwr_boot_hook`: resets the PMIC (rails go off for 300 ms), applies the config, and with
+1. GPIO and the I2C buses: the TWIM driver starts at `POST_KERNEL` 50 (`CONFIG_I2C_INIT_PRIORITY`). The PSRAM
+   driver (opt-in) also starts at 50 and keeps its supply off.
+2. `POST_KERNEL` 55, `pwr_boot_hook`: first drives the GAP9 supply select (P1.15) and the GAP9 I2C, SPI and shared-GPIO
+   mux selects (P0.06, P0.20, P0.28) inactive, so GAP9 cannot boot or use the buses while the rails come up. Then it
+   resets the PMIC (rails go off for 300 ms), applies the config, and with
    `SENSEI_PWR_BOOT_RAILS` (default with the sensor shield) switches the rails on (SBB0 3.3 V, SBB1 2.8 V, SBB2 1.2 V,
    LDO0 3.3 V), waits 50 ms, and switches the LED supply (SDB, P0.22) on.
 3. `POST_KERNEL` 60: PCA6416A expander (the sensor shield sets `GPIO_PCA_SERIES_INIT_PRIORITY` to 60), 61: its GPIO
@@ -56,5 +59,6 @@ The table and the button logic are in `lib/sensei_pwr_math` (host tests).
 ## Button
 
 Key-down is the nEN falling edge (interrupt flag read from the PMIC), key-up is the Soft_nRST edge. A key-up without a
-key-down is ignored. A press longer than 2 s (`THREAD_PWR_SOFT_RESET_LATENCY_MS`) switches the rails off and
+key-down is ignored, and a new key-down replaces an older one (its key-up was missed). The key-up is handled only
+after a good flag read. A press longer than 2 s (`THREAD_PWR_SOFT_RESET_LATENCY_MS`) switches the rails off and
 reboots.

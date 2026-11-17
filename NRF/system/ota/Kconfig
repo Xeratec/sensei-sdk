@@ -66,14 +66,16 @@ config SENSEI_OTA_CONFIRM
 	  reverts after SENSEI_OTA_TRIAL_TIMEOUT_S.
 
 config SENSEI_OTA_CONFIRM_NEEDS_LINK
-	bool "Confirm only after the host reached the node on the new image"
+	bool "Confirm only after an SMP request came in on the new image"
 	default y
 	depends on SENSEI_OTA_CONFIRM
+	select MCUMGR_SMP_COMMAND_STATUS_HOOKS
 	help
-	  A new image confirms itself only after an SMP request or a host session was seen on it (the app
-	  calls sensei_ota_link_seen()). An image that passes the health check but can no longer be reached
-	  over BLE or USB then stays on trial and MCUboot reverts it, as it must for a link that cannot be
-	  updated again. Development builds can turn this off to confirm after the health check alone.
+	  A new image confirms itself only after an SMP request came in on it (BLE or USB: the update path
+	  works). An image that passes the health check but can no longer be reached over SMP then stays on
+	  trial and MCUboot reverts it. Apps with another update path can also call sensei_ota_link_seen().
+	  The SMP request hook needs MCUMGR_SMP_COMMAND_STATUS_HOOKS (selected here, checked at build
+	  time). Debug and Release builds can use the same setting.
 
 config SENSEI_OTA_CONFIRM_DELAY_S
 	int "Run time before the image is confirmed, s"

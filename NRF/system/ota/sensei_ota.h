@@ -14,8 +14,8 @@
  * @brief Firmware update helpers for apps that run under MCUboot (CONFIG_SENSEI_OTA).
  *
  * - Trial boot: after an update the new image runs on trial. sensei_ota_init() watches it, confirms it
- *   when the app's check passes (and, by default, the host has reached the node: see
- *   sensei_ota_link_seen()), and resets the node when it does not (MCUboot then reverts).
+ *   when the app's check passes (and, by default, an SMP request came in on the image: BLE or USB update path
+ *   works), and resets the node when it does not (MCUboot then reverts).
  * - SMP server: the Kconfig options select the mcumgr image and OS groups and the Bluetooth transport.
  * - SMP over a byte stream that carries another protocol too (USB CDC): sensei_smp_stream_*().
  *
@@ -45,15 +45,17 @@ typedef bool (*sensei_ota_check_fn)(void);
  * Start the trial supervision if the running image is not confirmed. Call it once, at the end of
  * the app start-up. With CONFIG_SENSEI_OTA_CONFIRM the image is confirmed when `check` (may be NULL)
  * has passed after CONFIG_SENSEI_OTA_CONFIRM_DELAY_S seconds and, with
- * CONFIG_SENSEI_OTA_CONFIRM_NEEDS_LINK, an SMP request or sensei_ota_link_seen() came in on this image.
+ * CONFIG_SENSEI_OTA_CONFIRM_NEEDS_LINK, an SMP request (or sensei_ota_link_seen()) came in on this image.
  * If it is still unconfirmed after CONFIG_SENSEI_OTA_TRIAL_TIMEOUT_S seconds, the node resets, so that
  * MCUboot reverts to the old image. A confirmation over SMP ends the trial as well.
  */
 int sensei_ota_init(sensei_ota_check_fn check);
 
 /**
- * Tell the trial supervision that the host reached the node on this image (the app's host link works).
- * SMP requests are noticed by themselves. Any thread; harmless on a confirmed image.
+ * Tell the trial supervision that the update path works. SMP requests are noticed by themselves
+ * (CONFIG_SENSEI_OTA_CONFIRM_NEEDS_LINK selects the mcumgr hook). Call this only for an update path that is
+ * not SMP: traffic of an app protocol on the same link does not show that SMP works. Any thread; harmless on
+ * a confirmed image.
  */
 void sensei_ota_link_seen(void);
 

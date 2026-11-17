@@ -619,6 +619,82 @@ static void test_fetch_timeout(void) {
   CHECK(gap9_do_job() == 2 && ngot == 2 && gots[1].err == 0);
 }
 
+/* The POLL that took the job is garbled on MOSI, but GAP9 clocked in the whole job. Its BUSFREE or RESULT for the armed
+ * job promotes it to SENT: the job is recovered, not lost (E6). */
+static void test_lost_poll_recovers(int bus) {
+  tjob j = bus ? job_detect(false) : job_forecast();
+  tjob fj;
+  tres r;
+  bool bad;
+  uint8_t junk[G9L_TX_CAP] = {0};
+
+  reset();
+  g9_submit(&g, &j, done_cb, NULL);
+  sim_hello();
+  memcpy(&fj, g.tx + G9L_HDR, sizeof(fj)); /* what GAP9 reads */
+  sensei_spi_header_pack(junk, G9L_TYPE_POLL, 0, NULL, 0);
+  junk[6] ^= 0xff;
+  g9_spi_done(&g, junk, g.tx_len);
+  CHECK(g.q[0].st == G9E_PENDING && g.timer == G9T_FETCH);
+  uint32_t s = fj.seq;
+  unsigned errors = nerr;
+
+  if (bus) {
+    sim_push(G9L_TYPE_BUSFREE, 0, (const uint8_t *)&s, 4, 0);
+    CHECK(g.q[0].st == G9E_SENT && !locked && g.timer == G9T_JOB && nerr == errors);
+    res_detect(&r, s, 2);
+  } else {
+    res_forecast(&r, s);
+  }
+  sim_result(&r, 0, 0);
+  CHECK(ngot == 1 && gots[0].err == 0 && gots[0].final && g.q[0].st == G9E_FREE && !locked);
+  /* GAP9 fetches again (same seq, it skipped the job): nothing to offer, no timeout */
+  sim_poll(true, false, NULL, &bad, 0);
+  CHECK(g.timer != G9T_FETCH && g.timer != G9T_JOB && powered);
+}
+
+/* A result for another seq than the armed job is not taken for it. */
+static void test_foreign_result_ignored(void) {
+  tjob j = job_forecast();
+  tres r;
+
+  reset();
+  g9_submit(&g, &j, done_cb, NULL);
+  sim_hello();
+  res_forecast(&r, 99);
+  sim_result(&r, 0, 0);
+  CHECK(ngot == 0 && g.q[0].st == G9E_PENDING && nerr == 1);
+}
+
+/* A new job while the first waits for its fetch keeps the fetch timer (E7): a GAP9 that never fetches is power
+ * cycled after one job time, not after one per queued job. */
+static void test_submit_keeps_fetch_timer(void) {
+  tjob j = job_forecast();
+  bool bad;
+
+  reset();
+  g9_submit(&g, &j, done_cb, NULL);
+  sim_hello();
+  CHECK(g.timer == G9T_FETCH);
+  int n = timer_n;
+
+  g9_submit(&g, &j, done_cb, NULL);
+  g9_submit(&g, &j, done_cb, NULL);
+  CHECK(g.timer == G9T_FETCH && timer_n == n);
+  g9_timer_expired(&g);
+  CHECK(!powered && ngot == 1 && gots[0].err == -ETIMEDOUT); /* only the armed job fails */
+
+  /* an idle timer is still cancelled by a new job */
+  reset();
+  g9_submit(&g, &j, done_cb, NULL);
+  sim_hello();
+  CHECK(gap9_do_job() == 1);
+  sim_poll(true, false, NULL, &bad, 0); /* "no more jobs": GAP9 sleeps */
+  CHECK(g.timer == G9T_IDLE);
+  g9_submit(&g, &j, done_cb, NULL);
+  CHECK(g.timer == G9T_FETCH);
+}
+
 /* GAP9 resets itself while a camera job runs: HELLO in RUN. The job starts again, with the bus lock. */
 static void test_gap9_reset_in_run(void) {
   tjob j = job_detect(false);
@@ -757,6 +833,10 @@ int main(void) {
   test_status_mapping();
   test_corrupt_poll_recovers();
   test_fetch_timeout();
+  test_lost_poll_recovers(0);
+  test_lost_poll_recovers(1);
+  test_foreign_result_ignored();
+  test_submit_keeps_fetch_timer();
   test_gap9_reset_in_run();
   test_peek_keeps_none();
   test_early_error_frees_bus();

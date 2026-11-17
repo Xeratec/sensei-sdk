@@ -57,6 +57,26 @@ static void count_error(struct g9 *g) {
   g->ops->error();
 }
 
+/* GAP9 has the job: wait for its first answer. */
+static void mark_sent(struct g9 *g, struct g9_entry *e) {
+  e->st = G9E_SENT;
+  set_timer(g, uses_bus(g, e) ? G9T_BUSFREE : G9T_JOB, uses_bus(g, e) ? g->cfg.busfree_ms : g->cfg.job_ms);
+}
+
+/*
+ * The job in flight. A BUSFREE or RESULT for the armed job that was never seen as taken (the POLL that took it was
+ * garbled) shows that GAP9 has it: the job is recovered, not lost.
+ */
+static struct g9_entry *sent_or_recovered(struct g9 *g, uint32_t seq) {
+  struct g9_entry *e = find(g, G9E_SENT);
+
+  if (e == NULL && g->armed >= 0 && g->q[g->armed].st == G9E_PENDING && job_seq(g, &g->q[g->armed]) == seq) {
+    e = &g->q[g->armed];
+    mark_sent(g, e);
+  }
+  return e;
+}
+
 /* Put the frame for the next transaction into tx and arm the SPIS. Returns the frame kind. */
 static void arm_frame(struct g9 *g, struct g9_entry *job) {
   uint8_t flags = g->err_flag ? G9L_FLAG_ERROR : 0;
@@ -216,7 +236,9 @@ int g9_submit(struct g9 *g, const void *job, g9_done_fn done, void *user) {
     /* GAP9 is idle (trigger low, no job in flight): wake it up. A job in flight keeps the
      * armed frame; the new job is offered after its result. */
     if (find(g, G9E_SENT) == NULL) {
-      set_timer(g, G9T_NONE, 0);
+      if (g->timer != G9T_FETCH) { /* a job that waits for its fetch keeps its timer */
+        set_timer(g, G9T_NONE, 0);
+      }
       arm_next(g, true);
     }
     break;
@@ -276,12 +298,13 @@ static bool on_hello(struct g9 *g, const uint8_t *p, size_t len) {
 }
 
 static void on_busfree(struct g9 *g, const uint8_t *p, size_t len) {
-  struct g9_entry *e = find(g, G9E_SENT);
   uint32_t seq = 0;
 
   if (len >= 4) {
     memcpy(&seq, p, 4); /* both sides are little endian */
   }
+  struct g9_entry *e = sent_or_recovered(g, seq);
+
   if (e == NULL || !uses_bus(g, e) || job_seq(g, e) != seq || e->busfree) {
     count_error(g);
     return;
@@ -292,11 +315,14 @@ static void on_busfree(struct g9 *g, const uint8_t *p, size_t len) {
 }
 
 static void on_result(struct g9 *g, const uint8_t *p, size_t len, uint8_t flags) {
-  struct g9_entry *e = find(g, G9E_SENT);
+  struct g9_entry *e = NULL;
   bool more = (flags & G9L_FLAG_MORE) != 0;
 
   memset(g->res, 0, g->codec->result_size);
-  if (!g->codec->decode_result(p, len, g->res) || e == NULL || g->codec->result_seq(g->res) != job_seq(g, e)) {
+  if (g->codec->decode_result(p, len, g->res)) {
+    e = sent_or_recovered(g, g->codec->result_seq(g->res));
+  }
+  if (e == NULL || g->codec->result_seq(g->res) != job_seq(g, e)) {
     count_error(g);
     return;
   }
@@ -366,8 +392,7 @@ void g9_spi_done(struct g9 *g, const uint8_t *rx, size_t rx_len) {
       struct g9_entry *e = &g->q[g->armed];
 
       if (e->st == G9E_PENDING) {
-        e->st = G9E_SENT;
-        set_timer(g, uses_bus(g, e) ? G9T_BUSFREE : G9T_JOB, uses_bus(g, e) ? g->cfg.busfree_ms : g->cfg.job_ms);
+        mark_sent(g, e);
       }
       arm_next(g, true); /* same job frame again, for a retry */
     } else if (consumed && g->armed < 0 && g->state == G9_RUN && find(g, G9E_SENT) == NULL) {

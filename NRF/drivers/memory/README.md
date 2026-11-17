@@ -16,4 +16,8 @@ Node `psram` in the base board devicetree, disabled. Enable it with `&psram { st
 - Accesses are cut into 32 byte pieces because CE# may stay low for 8 us at most (3 us at high temperature).
 - States: on (about 64 uA), half-sleep (about 19.5 uA, data kept), off (load switch, data lost).
 
+Init order: the driver starts at the device priority (50) and only drives the supply and CS pins inactive. That is
+before the PMIC reset of the power module (POST_KERNEL 55), so the PSRAM supply is off while the rails cycle. Keep it
+below 55.
+
 Check first on the board: the nrfx QSPI start reads a status byte, which the PSRAM does not define (init may time out); nRF5340 anomaly 159 (`-EPERM`, see the nrfx_qspi notes); chip select mux polarity; 32 MHz clock.

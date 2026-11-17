@@ -25,9 +25,14 @@ static sensei_ota_check_fn check_fn;
 static struct k_work_delayable trial_work;
 static atomic_t link_seen;
 
+/* The SMP request hook is only called when mcumgr was built with the command status hooks. Without them the
+ * link rule would never be met and every update would revert. */
+BUILD_ASSERT(!IS_ENABLED(CONFIG_SENSEI_OTA_CONFIRM_NEEDS_LINK) || IS_ENABLED(CONFIG_MCUMGR_SMP_COMMAND_STATUS_HOOKS),
+             "SENSEI_OTA_CONFIRM_NEEDS_LINK needs CONFIG_MCUMGR_SMP_COMMAND_STATUS_HOOKS");
+
 void sensei_ota_link_seen(void) { atomic_set(&link_seen, 1); }
 
-/* Any SMP request, on any transport, shows that the image can still be updated. */
+/* Any SMP request, on any transport (Bluetooth, USB), shows that the image can still be updated. */
 static enum mgmt_cb_return smp_request_cb(uint32_t event, enum mgmt_cb_return prev, int32_t *rc, uint16_t *group,
                                           bool *abort_more, void *data, size_t data_size) {
   ARG_UNUSED(event);
@@ -151,7 +156,9 @@ int sensei_ota_init(sensei_ota_check_fn check) {
   }
   LOG_WRN("image is on trial: confirm within %d s or it reverts", CONFIG_SENSEI_OTA_TRIAL_TIMEOUT_S);
   k_work_init_delayable(&trial_work, trial_fn);
-  mgmt_callback_register(&smp_request_hook);
+  if (IS_ENABLED(CONFIG_SENSEI_OTA_CONFIRM_NEEDS_LINK)) {
+    mgmt_callback_register(&smp_request_hook);
+  }
   k_work_schedule(&trial_work, K_SECONDS(CHECK_PERIOD_S));
   return 0;
 }

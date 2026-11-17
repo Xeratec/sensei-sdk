@@ -15,7 +15,8 @@ same code.
   Saft LS33600 primary cell of the SENSEI board (flat curve around 3.6 V, so only a hint), `SENSEI_BATTERY_LIION` a
   4.2 V Li-ion or LiPo cell.
 - `sensei_button_down()`, `sensei_button_up()`: press detection of the nEN button. A key-up without a key-down is
-  ignored, a press longer than the limit is `SENSEI_BUTTON_LONG`.
+  ignored, a new key-down replaces an older one (its key-up was missed), a press longer than the limit is
+  `SENSEI_BUTTON_LONG`.
 
 ## Use
 

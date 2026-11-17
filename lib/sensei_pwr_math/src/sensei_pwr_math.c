@@ -44,10 +44,9 @@ uint8_t sensei_battery_perc(enum sensei_battery_chem chem, uint32_t mv) {
 }
 
 void sensei_button_down(struct sensei_button *b, uint32_t now_ms) {
-  if (!b->pressed) {
-    b->pressed = true;
-    b->down_ms = now_ms;
-  }
+  /* A new key-down replaces an older one: its key-up was missed, and that press must not count. */
+  b->pressed = true;
+  b->down_ms = now_ms;
 }
 
 enum sensei_button_press sensei_button_up(struct sensei_button *b, uint32_t now_ms, uint32_t long_ms) {
@@ -55,5 +54,8 @@ enum sensei_button_press sensei_button_up(struct sensei_button *b, uint32_t now_
     return SENSEI_BUTTON_NONE;
   }
   b->pressed = false;
-  return (uint32_t)(now_ms - b->down_ms) > long_ms ? SENSEI_BUTTON_LONG : SENSEI_BUTTON_SHORT;
+  /* A key-up before the key-down time belongs to an older press (key-up read late): short. */
+  int32_t held_ms = (int32_t)(now_ms - b->down_ms);
+
+  return held_ms > 0 && (uint32_t)held_ms > long_ms ? SENSEI_BUTTON_LONG : SENSEI_BUTTON_SHORT;
 }

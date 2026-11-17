@@ -56,6 +56,15 @@ LOG_MODULE_REGISTER(pwr);
 static const struct gpio_dt_spec gpio_gap9_pwr_sel = GPIO_DT_SPEC_GET(GPIO_NODE_gap9_pwr, gpios);
 static const struct gpio_dt_spec gpio_led_pwr = GPIO_DT_SPEC_GET(GPIO_NODE_led_pwr, gpios);
 
+// Lines that must be inactive before the rails come on: the GAP9 supply select and the I2C, SPI and shared-GPIO
+// muxes to GAP9 (nodes of the board devicetree). Floating, they could let GAP9 boot and use the buses.
+static const struct gpio_dt_spec gap9_lines[] = {
+    GPIO_DT_SPEC_GET(DT_NODELABEL(gpio_gap9_pwr), gpios),
+    GPIO_DT_SPEC_GET(DT_NODELABEL(gpio_gap9_i2c_ctrl), gpios),
+    GPIO_DT_SPEC_GET(DT_NODELABEL(gpio_gap9_spi_ctrl), gpios),
+    GPIO_DT_SPEC_GET(DT_NODELABEL(gpio_gap9_shared_ctrl), gpios),
+};
+
 static const struct device *pwr_i2c = DEVICE_DT_GET(DT_ALIAS(i2ca));
 
 // PWR mutex:
@@ -114,9 +123,19 @@ static void rails_on(struct max77654_conf *c) {
   c->ldo_conf[0].output_voltage_mV = 3300;
 }
 
+static void gap9_lines_inactive(void) {
+  for (size_t i = 0; i < ARRAY_SIZE(gap9_lines); i++) {
+    if (!gpio_is_ready_dt(&gap9_lines[i]) || gpio_pin_configure_dt(&gap9_lines[i], GPIO_OUTPUT_INACTIVE) < 0) {
+      LOG_ERR("GAP9 line %u init error", (unsigned)i);
+    }
+  }
+}
+
 // Reset the PMIC (this power-cycles the rails), configure it, and with boot rails switch them on.
 static int pmic_bring_up(void) {
   int err;
+
+  gap9_lines_inactive(); // before the rails
 
   if (!device_is_ready(pwr_i2c)) {
     LOG_ERR("I2C device %s is not ready", pwr_i2c->name);

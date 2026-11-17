@@ -216,7 +216,8 @@ static void thread_pwr(void *_a, void *_b, void *_c) {
       if (pmic.flags.nen_f) {
         sensei_button_down(&button, pmic_irq_ms);
       }
-      if (atomic_cas(&keyup_pending, 1, 0)) {
+      // Only after a good flag read, so that a key-down in the flags is seen before its key-up:
+      if (flags_valid && atomic_cas(&keyup_pending, 1, 0)) {
         if (sensei_button_up(&button, keyup_ms, THREAD_PWR_SOFT_RESET_LATENCY_MS) == SENSEI_BUTTON_LONG) {
           LOG_INF("Button pressed for more than 2 seconds");
           pwr_off_and_reboot();

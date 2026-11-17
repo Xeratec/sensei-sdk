@@ -287,7 +287,9 @@ static int psram_init(const struct device *dev) {
   if (!gpio_is_ready_dt(&cfg->power) || !gpio_is_ready_dt(&cfg->cs_select)) {
     return -ENODEV;
   }
-  /* Supply off and CS on the PSRAM until the application asks for it. */
+  /* Supply off and CS on the PSRAM until the application asks for it. This runs at the device priority (50), before
+   * the PMIC reset of the power module (POST_KERNEL 55) on purpose: the supply switch is an nRF pin, and it must be
+   * off while the PMIC cycles the rails. */
   ret = gpio_pin_configure_dt(&cfg->power, GPIO_OUTPUT_INACTIVE);
   if (ret == 0) {
     ret = gpio_pin_configure_dt(&cfg->cs_select, GPIO_OUTPUT_INACTIVE);

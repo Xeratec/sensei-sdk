@@ -69,10 +69,17 @@ static void test_button(void) {
   sensei_button_down(&b, 20000);
   CHECK(sensei_button_up(&b, 22001, 2000) == SENSEI_BUTTON_LONG);
 
-  /* a second key-down keeps the first time */
+  /* a missed key-up: the next key-down replaces the old time, so a short press stays short (E8) */
+  sensei_button_down(&b, 30000);
+  sensei_button_down(&b, 90000);
+  CHECK(sensei_button_up(&b, 90150, 2000) == SENSEI_BUTTON_SHORT);
   sensei_button_down(&b, 30000);
   sensei_button_down(&b, 31500);
-  CHECK(sensei_button_up(&b, 32500, 2000) == SENSEI_BUTTON_LONG);
+  CHECK(sensei_button_up(&b, 33600, 2000) == SENSEI_BUTTON_LONG);
+
+  /* a key-up that is older than the key-down (read late) is never long */
+  sensei_button_down(&b, 50000);
+  CHECK(sensei_button_up(&b, 49000, 2000) == SENSEI_BUTTON_SHORT);
 
   /* the millisecond counter wraps */
   sensei_button_down(&b, 0xFFFFFF00u);

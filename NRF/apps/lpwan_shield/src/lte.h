@@ -31,5 +31,9 @@ sensei_LpwanResult lte_request_time(void);
 sensei_LpwanResult lte_sleep(uint32_t deep);
 void lte_fill_status(sensei_LpwanStatus *st);
 void lte_modem_string(char *out, size_t cap);
+/** Start the modem library if it is not running (idempotent). 0 or a negative errno. */
+int lte_modem_init(void);
+/** The firmware update shut the modem library down and started it again (ok: it runs): read the version again. */
+void lte_modem_restarted(bool ok);
 
 #endif /* SENSEI_NRF9151_LTE_H_ */

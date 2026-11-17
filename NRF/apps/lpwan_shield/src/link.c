@@ -57,6 +57,7 @@ static const struct spi_config spis_cfg = {
 };
 
 static struct link_slave slave;
+static int wdt_id = -1;
 static K_MUTEX_DEFINE(q_lock);
 static K_SEM_DEFINE(done_sem, 0, 1);
 static volatile int done_result;
@@ -123,7 +124,7 @@ static void link_main(void *a, void *b, void *c) {
   /* Task watchdog: this thread must come round every few seconds. It waits for the master with a timeout
    * (the armed transfer stays armed), and does not feed while a re-arm keeps failing, so a link that
    * cannot be armed resets the chip. The hardware watchdog behind it catches a frozen kernel. */
-  int wdt_id = task_wdt_add(LINK_WDT_MS, NULL, NULL);
+  wdt_id = task_wdt_add(LINK_WDT_MS, NULL, NULL);
 
   /* The first arm may fail only if the driver is not ready: wait and retry. */
   while ((err = link_slave_start(&slave)) != 0) {
@@ -173,6 +174,12 @@ int link_start(link_slave_request_fn on_request, void *user) {
 int link_respond(const sensei_LpwanResponse *rsp) { return link_slave_respond(&slave, rsp); }
 
 int link_push_event(const sensei_LpwanEvent *evt) { return link_slave_push_event(&slave, evt); }
+
+void link_feed_watchdog(void) {
+  if (wdt_id >= 0) {
+    (void)task_wdt_feed(wdt_id);
+  }
+}
 
 bool link_master_present(void) { return gpio_pin_get_dt(&pin_ack) > 0; }
 

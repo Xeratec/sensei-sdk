@@ -15,11 +15,14 @@
  *        request against the global state machine and starts the backend, which reports by events.
  */
 
+#include <stdio.h>
 #include <string.h>
 
+#include <zephyr/app_version.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 
+#include "dfu.h"
 #include "link.h"
 #include "lora.h"
 #include "lte.h"
@@ -172,18 +175,20 @@ static sensei_LpwanResult backend_off(void) { return sensei_LpwanResult_LPWAN_UN
 static void fill_version(sensei_LpwanResponse *r) {
   r->which_payload = sensei_LpwanResponse_version_tag;
   r->version.has_firmware = true;
-  r->version.firmware.major = CONFIG_LPWAN_SHIELD_VERSION_MAJOR;
-  r->version.firmware.minor = CONFIG_LPWAN_SHIELD_VERSION_MINOR;
-  r->version.firmware.patch = CONFIG_LPWAN_SHIELD_VERSION_PATCH;
+  r->version.firmware.major = APP_VERSION_MAJOR;
+  r->version.firmware.minor = APP_VERSION_MINOR;
+  r->version.firmware.patch = APP_PATCHLEVEL;
   r->version.protocol = LPWAN_PROTOCOL_VERSION;
+  dfu_fill_version(&r->version);
   r->version.modem[0] = '\0';
 #ifdef CONFIG_LPWAN_SHIELD_LORA
   lora_modem_string(r->version.modem, sizeof(r->version.modem));
 #endif
 #ifdef CONFIG_LPWAN_SHIELD_LTE
+  lte_modem_string(r->version.lte_modem, sizeof(r->version.lte_modem));
   // cppcheck-suppress knownConditionTrueFalse ; set by lora_modem_string() when LoRa is built
   if (r->version.modem[0] == '\0') {
-    lte_modem_string(r->version.modem, sizeof(r->version.modem));
+    snprintf(r->version.modem, sizeof(r->version.modem), "%s", r->version.lte_modem);
   }
 #endif
 }
@@ -305,6 +310,16 @@ static sensei_LpwanResult run(const sensei_LpwanRequest *req, struct send_answer
 #else
     return sensei_LpwanResult_LPWAN_OK;
 #endif
+#ifndef CONFIG_LPWAN_SHIELD_DFU
+  case sensei_LpwanRequest_dfu_begin_tag:
+  case sensei_LpwanRequest_dfu_chunk_tag:
+  case sensei_LpwanRequest_dfu_finish_tag:
+  case sensei_LpwanRequest_dfu_apply_tag:
+  case sensei_LpwanRequest_dfu_abort_tag:
+  case sensei_LpwanRequest_dfu_status_tag:
+  case sensei_LpwanRequest_dfu_confirm_tag:
+    return backend_off();
+#endif
   default:
     return sensei_LpwanResult_LPWAN_OK;
   }
@@ -315,6 +330,21 @@ static void fill_send_answer(sensei_LpwanResponse *rsp, const struct send_answer
   rsp->send.expected_ms = a->expected_ms;
   rsp->send.next_max_payload = a->next_max;
   rsp->send.queued_seq = a->queued_seq;
+}
+
+static bool is_dfu_request(const sensei_LpwanRequest *req) {
+  return req->which_body >= sensei_LpwanRequest_dfu_begin_tag && req->which_body <= sensei_LpwanRequest_dfu_confirm_tag;
+}
+
+static bool allowed_during_dfu(const sensei_LpwanRequest *req) {
+  switch (req->which_body) {
+  case sensei_LpwanRequest_get_version_tag:
+  case sensei_LpwanRequest_get_status_tag:
+  case sensei_LpwanRequest_lte_disconnect_tag:
+    return true;
+  default:
+    return is_dfu_request(req);
+  }
 }
 
 static void on_request(struct link_slave *s, const sensei_LpwanRequest *req, void *user) {
@@ -331,7 +361,8 @@ static void on_request(struct link_slave *s, const sensei_LpwanRequest *req, voi
   lpwan_sm_t before = sm;
   lpwan_sm_t admitted;
 
-  res = lpwan_sm_admit(&sm, req);
+  /* An update holds the link: no radio work meanwhile (the flash, the modem and the CPU are busy). */
+  res = dfu_holds_link() && !allowed_during_dfu(req) ? sensei_LpwanResult_LPWAN_BUSY : lpwan_sm_admit(&sm, req);
   admitted = sm;
   if (res == sensei_LpwanResult_LPWAN_OK) {
     k_mutex_unlock(&sm_lock);
@@ -339,6 +370,12 @@ static void on_request(struct link_slave *s, const sensei_LpwanRequest *req, voi
       fill_version(&rsp);
     } else if (req->which_body == sensei_LpwanRequest_get_status_tag) {
       fill_status(&rsp);
+    } else if (is_dfu_request(req)) {
+#ifdef CONFIG_LPWAN_SHIELD_DFU
+      res = dfu_handle(req, &rsp);
+#else
+      res = backend_off();
+#endif
     } else {
       if (is_send) {
         k_mutex_lock(&sm_lock, K_FOREVER);

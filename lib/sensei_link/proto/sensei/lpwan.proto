@@ -86,6 +86,68 @@ message Send {
   bool confirmed = 4;
 }
 
+// ---- Update of the shield ----
+//
+// Flow: dfu_begin, dfu_chunk until the end, dfu_finish (SHA-256 of what was written), dfu_apply. The shield writes
+// the image into its second MCUboot slot (target APP) or hands a delta patch to the modem (target MODEM). After an
+// APP apply the master cuts the shield power and powers it again: MCUboot swaps and starts the new image on trial,
+// which asks for dfu_confirm. Every dfu_* answer is a DfuStatus; a refused request has a result other than LPWAN_OK
+// and the status still says where the transfer is.
+
+enum DfuTarget {
+  DFU_TARGET_APP = 0;   // the shield application with TF-M (one signed MCUboot image)
+  DFU_TARGET_MODEM = 1; // modem firmware, delta patch (nrf_modem_delta_dfu)
+}
+
+enum DfuState {
+  DFU_STATE_IDLE = 0;      // no transfer open
+  DFU_STATE_RECEIVING = 1; // `offset` is the next byte wanted
+  DFU_STATE_ERASING = 2;   // modem: erasing its DFU area, ask again with dfu_status
+  DFU_STATE_VERIFIED = 3;  // every byte is in and the SHA-256 matches: dfu_apply may follow
+  DFU_STATE_APPLYING = 4;  // app: marked for the trial boot. modem: the update runs, ask again with dfu_status
+  DFU_STATE_DONE = 5;      // modem: the new firmware runs
+  DFU_STATE_FAILED = 6;    // see `fail`; dfu_abort or dfu_begin starts again
+}
+
+enum DfuFail {
+  DFU_FAIL_NONE = 0;
+  DFU_FAIL_STATE = 1;       // the request does not fit the state of the transfer
+  DFU_FAIL_OFFSET = 2;      // dfu_chunk at another offset than the one wanted: continue at `offset`
+  DFU_FAIL_SIZE = 3;        // does not fit the slot or the modem DFU area
+  DFU_FAIL_IMAGE = 4;       // not an MCUboot image for this slot
+  DFU_FAIL_HASH = 5;        // the written bytes do not match the SHA-256 of dfu_begin
+  DFU_FAIL_DOWNGRADE = 6;   // older than the running image (MCUboot would drop it)
+  DFU_FAIL_FLASH = 7;       // flash driver error, `detail` is the errno
+  DFU_FAIL_MODEM = 8;       // modem library error, `detail` is its code
+  DFU_FAIL_UNSUPPORTED = 9; // target not built in
+}
+
+message DfuBegin {
+  DfuTarget target = 1;
+  uint32 size = 2;  // bytes of the whole file
+  bytes sha256 = 3; // 32 B, of the whole file
+  // Keep an open transfer (also one saved before a restart of the shield) of the same target, size and SHA-256 and
+  // answer its offset. Else, or if there is none, a new transfer starts at 0.
+  bool resume = 4;
+}
+
+message DfuChunk {
+  uint32 offset = 1; // where `data` goes: the offset of the last answer
+  bytes data = 2;    // <= DfuStatus.chunk_max
+  // APP only: the bytes between the wanted offset and `offset` are 0xFF (the sender skipped them): they are erased.
+  bool gap = 3;
+}
+
+message DfuStatus {
+  DfuState state = 1;
+  DfuTarget target = 2;
+  uint32 size = 3;      // of the open transfer
+  uint32 offset = 4;    // next byte wanted: everything before it is in place
+  uint32 chunk_max = 5; // largest DfuChunk.data the shield takes, B
+  DfuFail fail = 6;
+  sint32 detail = 7;
+}
+
 message LpwanSleep {
   uint32 deep = 1; // 0: idle with modem kept registered, 1: deepest state
 }
@@ -104,13 +166,25 @@ message LpwanRequest {
     Send send = 10;
     Empty get_time = 11;
     LpwanSleep sleep = 12;
+    // Update of the shield (nRF9151 app or modem). See DfuBegin. Tags 40 to 49 are reserved for it.
+    DfuBegin dfu_begin = 40; // open (or resume) a transfer
+    DfuChunk dfu_chunk = 41; // bytes of the image
+    Empty dfu_finish = 42;   // all bytes sent: check the SHA-256
+    Empty dfu_apply = 43;    // app: mark for one trial boot (the master then power-cycles the shield); modem: apply
+    Empty dfu_abort = 44;    // drop the open transfer
+    Empty dfu_status = 45;   // state and next offset (the resume query)
+    Empty dfu_confirm = 46;  // the master accepted the handshake of an image on trial
   }
 }
 
 message LpwanVersion {
   Version firmware = 1;
-  string modem = 2;    // modem firmware, for example the Modem-E version
-  uint32 protocol = 3; // LPWAN_PROTOCOL_VERSION of lpwan_link.h; the client refuses a different value
+  string modem = 2;       // modem firmware, for example the Modem-E version
+  uint32 protocol = 3;    // LPWAN_PROTOCOL_VERSION of lpwan_link.h; the client refuses a different value
+  fixed32 image_id = 4;   // first 4 bytes of the SHA-256 of the running app image (little endian), 0: unknown
+  bool trial = 5;         // the running image is on trial: the master confirms it with dfu_confirm
+  uint32 dfu_targets = 6; // bit 0: the app can be updated, bit 1: the modem firmware can (0: no update support)
+  string lte_modem = 7;   // firmware of the nRF91 modem (AT%SHORTSWVER), empty until the modem library has run
 }
 
 message LpwanStatus {
@@ -153,6 +227,7 @@ message LpwanResponse {
     LpwanStatus status = 4;
     NetworkTime time = 5;
     SendInfo send = 6;
+    DfuStatus dfu = 40; // answer to every dfu_* request
   }
 }
 

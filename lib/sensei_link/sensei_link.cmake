@@ -33,6 +33,7 @@ endif()
 # Framing only (plain C99, no nanopb).
 set(SENSEI_LINK_FRAMING_SOURCES
   ${SENSEI_LINK_DIR}/src/crc.c
+  ${SENSEI_LINK_DIR}/src/sha256.c
   ${SENSEI_LINK_DIR}/src/cobs.c
   ${SENSEI_LINK_DIR}/src/stream.c
   ${SENSEI_LINK_DIR}/src/spi.c

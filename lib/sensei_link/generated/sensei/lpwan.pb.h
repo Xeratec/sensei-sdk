@@ -54,6 +54,34 @@ typedef enum _sensei_LpwanResult {
     sensei_LpwanResult_LPWAN_FAILED = 10
 } sensei_LpwanResult;
 
+typedef enum _sensei_DfuTarget {
+    sensei_DfuTarget_DFU_TARGET_APP = 0, /* the shield application with TF-M (one signed MCUboot image) */
+    sensei_DfuTarget_DFU_TARGET_MODEM = 1 /* modem firmware, delta patch (nrf_modem_delta_dfu) */
+} sensei_DfuTarget;
+
+typedef enum _sensei_DfuState {
+    sensei_DfuState_DFU_STATE_IDLE = 0, /* no transfer open */
+    sensei_DfuState_DFU_STATE_RECEIVING = 1, /* `offset` is the next byte wanted */
+    sensei_DfuState_DFU_STATE_ERASING = 2, /* modem: erasing its DFU area, ask again with dfu_status */
+    sensei_DfuState_DFU_STATE_VERIFIED = 3, /* every byte is in and the SHA-256 matches: dfu_apply may follow */
+    sensei_DfuState_DFU_STATE_APPLYING = 4, /* app: marked for the trial boot. modem: the update runs, ask again with dfu_status */
+    sensei_DfuState_DFU_STATE_DONE = 5, /* modem: the new firmware runs */
+    sensei_DfuState_DFU_STATE_FAILED = 6 /* see `fail`; dfu_abort or dfu_begin starts again */
+} sensei_DfuState;
+
+typedef enum _sensei_DfuFail {
+    sensei_DfuFail_DFU_FAIL_NONE = 0,
+    sensei_DfuFail_DFU_FAIL_STATE = 1, /* the request does not fit the state of the transfer */
+    sensei_DfuFail_DFU_FAIL_OFFSET = 2, /* dfu_chunk at another offset than the one wanted: continue at `offset` */
+    sensei_DfuFail_DFU_FAIL_SIZE = 3, /* does not fit the slot or the modem DFU area */
+    sensei_DfuFail_DFU_FAIL_IMAGE = 4, /* not an MCUboot image for this slot */
+    sensei_DfuFail_DFU_FAIL_HASH = 5, /* the written bytes do not match the SHA-256 of dfu_begin */
+    sensei_DfuFail_DFU_FAIL_DOWNGRADE = 6, /* older than the running image (MCUboot would drop it) */
+    sensei_DfuFail_DFU_FAIL_FLASH = 7, /* flash driver error, `detail` is the errno */
+    sensei_DfuFail_DFU_FAIL_MODEM = 8, /* modem library error, `detail` is its code */
+    sensei_DfuFail_DFU_FAIL_UNSUPPORTED = 9 /* target not built in */
+} sensei_DfuFail;
+
 /* Struct definitions */
 typedef struct _sensei_LteConfigure {
     sensei_LteMode mode;
@@ -93,6 +121,33 @@ typedef struct _sensei_Send {
     bool confirmed;
 } sensei_Send;
 
+typedef struct _sensei_DfuBegin {
+    sensei_DfuTarget target;
+    uint32_t size; /* bytes of the whole file */
+    pb_byte_t sha256[32]; /* 32 B, of the whole file */
+    /* Keep an open transfer (also one saved before a restart of the shield) of the same target, size and SHA-256 and
+ answer its offset. Else, or if there is none, a new transfer starts at 0. */
+    bool resume;
+} sensei_DfuBegin;
+
+typedef PB_BYTES_ARRAY_T(512) sensei_DfuChunk_data_t;
+typedef struct _sensei_DfuChunk {
+    uint32_t offset; /* where `data` goes: the offset of the last answer */
+    sensei_DfuChunk_data_t data; /* <= DfuStatus.chunk_max */
+    /* APP only: the bytes between the wanted offset and `offset` are 0xFF (the sender skipped them): they are erased. */
+    bool gap;
+} sensei_DfuChunk;
+
+typedef struct _sensei_DfuStatus {
+    sensei_DfuState state;
+    sensei_DfuTarget target;
+    uint32_t size; /* of the open transfer */
+    uint32_t offset; /* next byte wanted: everything before it is in place */
+    uint32_t chunk_max; /* largest DfuChunk.data the shield takes, B */
+    sensei_DfuFail fail;
+    int32_t detail;
+} sensei_DfuStatus;
+
 typedef struct _sensei_LpwanSleep {
     uint32_t deep; /* 0: idle with modem kept registered, 1: deepest state */
 } sensei_LpwanSleep;
@@ -112,6 +167,14 @@ typedef struct _sensei_LpwanRequest {
         sensei_Send send;
         sensei_Empty get_time;
         sensei_LpwanSleep sleep;
+        /* Update of the shield (nRF9151 app or modem). See DfuBegin. Tags 40 to 49 are reserved for it. */
+        sensei_DfuBegin dfu_begin; /* open (or resume) a transfer */
+        sensei_DfuChunk dfu_chunk; /* bytes of the image */
+        sensei_Empty dfu_finish; /* all bytes sent: check the SHA-256 */
+        sensei_Empty dfu_apply; /* app: mark for one trial boot (the master then power-cycles the shield); modem: apply */
+        sensei_Empty dfu_abort; /* drop the open transfer */
+        sensei_Empty dfu_status; /* state and next offset (the resume query) */
+        sensei_Empty dfu_confirm; /* the master accepted the handshake of an image on trial */
     };
 } sensei_LpwanRequest;
 
@@ -120,6 +183,10 @@ typedef struct _sensei_LpwanVersion {
     sensei_Version firmware;
     char modem[25]; /* modem firmware, for example the Modem-E version */
     uint32_t protocol; /* LPWAN_PROTOCOL_VERSION of lpwan_link.h; the client refuses a different value */
+    uint32_t image_id; /* first 4 bytes of the SHA-256 of the running app image (little endian), 0: unknown */
+    bool trial; /* the running image is on trial: the master confirms it with dfu_confirm */
+    uint32_t dfu_targets; /* bit 0: the app can be updated, bit 1: the modem firmware can (0: no update support) */
+    char lte_modem[25]; /* firmware of the nRF91 modem (AT%SHORTSWVER), empty until the modem library has run */
 } sensei_LpwanVersion;
 
 typedef struct _sensei_LpwanStatus {
@@ -163,6 +230,7 @@ typedef struct _sensei_LpwanResponse {
         sensei_LpwanStatus status;
         sensei_NetworkTime time;
         sensei_SendInfo send;
+        sensei_DfuStatus dfu; /* answer to every dfu_* request */
     };
 } sensei_LpwanResponse;
 
@@ -226,6 +294,18 @@ extern "C" {
 #define _sensei_LpwanResult_MAX sensei_LpwanResult_LPWAN_FAILED
 #define _sensei_LpwanResult_ARRAYSIZE ((sensei_LpwanResult)(sensei_LpwanResult_LPWAN_FAILED+1))
 
+#define _sensei_DfuTarget_MIN sensei_DfuTarget_DFU_TARGET_APP
+#define _sensei_DfuTarget_MAX sensei_DfuTarget_DFU_TARGET_MODEM
+#define _sensei_DfuTarget_ARRAYSIZE ((sensei_DfuTarget)(sensei_DfuTarget_DFU_TARGET_MODEM+1))
+
+#define _sensei_DfuState_MIN sensei_DfuState_DFU_STATE_IDLE
+#define _sensei_DfuState_MAX sensei_DfuState_DFU_STATE_FAILED
+#define _sensei_DfuState_ARRAYSIZE ((sensei_DfuState)(sensei_DfuState_DFU_STATE_FAILED+1))
+
+#define _sensei_DfuFail_MIN sensei_DfuFail_DFU_FAIL_NONE
+#define _sensei_DfuFail_MAX sensei_DfuFail_DFU_FAIL_UNSUPPORTED
+#define _sensei_DfuFail_ARRAYSIZE ((sensei_DfuFail)(sensei_DfuFail_DFU_FAIL_UNSUPPORTED+1))
+
 #define sensei_LteConfigure_mode_ENUMTYPE sensei_LteMode
 
 #define sensei_LoraConfigure_region_ENUMTYPE sensei_LoraRegion
@@ -233,6 +313,13 @@ extern "C" {
 
 
 #define sensei_Send_radio_ENUMTYPE sensei_Radio
+
+#define sensei_DfuBegin_target_ENUMTYPE sensei_DfuTarget
+
+
+#define sensei_DfuStatus_state_ENUMTYPE sensei_DfuState
+#define sensei_DfuStatus_target_ENUMTYPE sensei_DfuTarget
+#define sensei_DfuStatus_fail_ENUMTYPE sensei_DfuFail
 
 
 
@@ -257,9 +344,12 @@ extern "C" {
 #define sensei_LoraConfigure_init_default        {_sensei_LoraRegion_MIN, _sensei_LoraClass_MIN, 0, 0, 0, 0}
 #define sensei_LoraProvision_init_default        {{0}, {0}, {0}}
 #define sensei_Send_init_default                 {_sensei_Radio_MIN, 0, {0, {0}}, 0}
+#define sensei_DfuBegin_init_default             {_sensei_DfuTarget_MIN, 0, {0}, 0}
+#define sensei_DfuChunk_init_default             {0, {0, {0}}, 0}
+#define sensei_DfuStatus_init_default            {_sensei_DfuState_MIN, _sensei_DfuTarget_MIN, 0, 0, 0, _sensei_DfuFail_MIN, 0}
 #define sensei_LpwanSleep_init_default           {0}
 #define sensei_LpwanRequest_init_default         {0, 0, {sensei_Empty_init_default}}
-#define sensei_LpwanVersion_init_default         {false, sensei_Version_init_default, "", 0}
+#define sensei_LpwanVersion_init_default         {false, sensei_Version_init_default, "", 0, 0, 0, 0, ""}
 #define sensei_LpwanStatus_init_default          {0, 0, 0, 0, 0, 0, 0, 0}
 #define sensei_NetworkTime_init_default          {0, _sensei_Radio_MIN}
 #define sensei_SendInfo_init_default             {0, 0, 0}
@@ -273,9 +363,12 @@ extern "C" {
 #define sensei_LoraConfigure_init_zero           {_sensei_LoraRegion_MIN, _sensei_LoraClass_MIN, 0, 0, 0, 0}
 #define sensei_LoraProvision_init_zero           {{0}, {0}, {0}}
 #define sensei_Send_init_zero                    {_sensei_Radio_MIN, 0, {0, {0}}, 0}
+#define sensei_DfuBegin_init_zero                {_sensei_DfuTarget_MIN, 0, {0}, 0}
+#define sensei_DfuChunk_init_zero                {0, {0, {0}}, 0}
+#define sensei_DfuStatus_init_zero               {_sensei_DfuState_MIN, _sensei_DfuTarget_MIN, 0, 0, 0, _sensei_DfuFail_MIN, 0}
 #define sensei_LpwanSleep_init_zero              {0}
 #define sensei_LpwanRequest_init_zero            {0, 0, {sensei_Empty_init_zero}}
-#define sensei_LpwanVersion_init_zero            {false, sensei_Version_init_zero, "", 0}
+#define sensei_LpwanVersion_init_zero            {false, sensei_Version_init_zero, "", 0, 0, 0, 0, ""}
 #define sensei_LpwanStatus_init_zero             {0, 0, 0, 0, 0, 0, 0, 0}
 #define sensei_NetworkTime_init_zero             {0, _sensei_Radio_MIN}
 #define sensei_SendInfo_init_zero                {0, 0, 0}
@@ -309,6 +402,20 @@ extern "C" {
 #define sensei_Send_port_tag                     2
 #define sensei_Send_payload_tag                  3
 #define sensei_Send_confirmed_tag                4
+#define sensei_DfuBegin_target_tag               1
+#define sensei_DfuBegin_size_tag                 2
+#define sensei_DfuBegin_sha256_tag               3
+#define sensei_DfuBegin_resume_tag               4
+#define sensei_DfuChunk_offset_tag               1
+#define sensei_DfuChunk_data_tag                 2
+#define sensei_DfuChunk_gap_tag                  3
+#define sensei_DfuStatus_state_tag               1
+#define sensei_DfuStatus_target_tag              2
+#define sensei_DfuStatus_size_tag                3
+#define sensei_DfuStatus_offset_tag              4
+#define sensei_DfuStatus_chunk_max_tag           5
+#define sensei_DfuStatus_fail_tag                6
+#define sensei_DfuStatus_detail_tag              7
 #define sensei_LpwanSleep_deep_tag               1
 #define sensei_LpwanRequest_seq_tag              1
 #define sensei_LpwanRequest_get_version_tag      2
@@ -322,9 +429,20 @@ extern "C" {
 #define sensei_LpwanRequest_send_tag             10
 #define sensei_LpwanRequest_get_time_tag         11
 #define sensei_LpwanRequest_sleep_tag            12
+#define sensei_LpwanRequest_dfu_begin_tag        40
+#define sensei_LpwanRequest_dfu_chunk_tag        41
+#define sensei_LpwanRequest_dfu_finish_tag       42
+#define sensei_LpwanRequest_dfu_apply_tag        43
+#define sensei_LpwanRequest_dfu_abort_tag        44
+#define sensei_LpwanRequest_dfu_status_tag       45
+#define sensei_LpwanRequest_dfu_confirm_tag      46
 #define sensei_LpwanVersion_firmware_tag         1
 #define sensei_LpwanVersion_modem_tag            2
 #define sensei_LpwanVersion_protocol_tag         3
+#define sensei_LpwanVersion_image_id_tag         4
+#define sensei_LpwanVersion_trial_tag            5
+#define sensei_LpwanVersion_dfu_targets_tag      6
+#define sensei_LpwanVersion_lte_modem_tag        7
 #define sensei_LpwanStatus_lte_connected_tag     1
 #define sensei_LpwanStatus_lora_joined_tag       2
 #define sensei_LpwanStatus_rssi_dbm_tag          3
@@ -344,6 +462,7 @@ extern "C" {
 #define sensei_LpwanResponse_status_tag          4
 #define sensei_LpwanResponse_time_tag            5
 #define sensei_LpwanResponse_send_tag            6
+#define sensei_LpwanResponse_dfu_tag             40
 #define sensei_RadioEvent_radio_tag              1
 #define sensei_TxDone_seq_tag                    1
 #define sensei_TxDone_ok_tag                     2
@@ -401,6 +520,32 @@ X(a, STATIC,   SINGULAR, BOOL,     confirmed,         4)
 #define sensei_Send_CALLBACK NULL
 #define sensei_Send_DEFAULT NULL
 
+#define sensei_DfuBegin_FIELDLIST(X, a) \
+X(a, STATIC,   SINGULAR, UENUM,    target,            1) \
+X(a, STATIC,   SINGULAR, UINT32,   size,              2) \
+X(a, STATIC,   SINGULAR, FIXED_LENGTH_BYTES, sha256,            3) \
+X(a, STATIC,   SINGULAR, BOOL,     resume,            4)
+#define sensei_DfuBegin_CALLBACK NULL
+#define sensei_DfuBegin_DEFAULT NULL
+
+#define sensei_DfuChunk_FIELDLIST(X, a) \
+X(a, STATIC,   SINGULAR, UINT32,   offset,            1) \
+X(a, STATIC,   SINGULAR, BYTES,    data,              2) \
+X(a, STATIC,   SINGULAR, BOOL,     gap,               3)
+#define sensei_DfuChunk_CALLBACK NULL
+#define sensei_DfuChunk_DEFAULT NULL
+
+#define sensei_DfuStatus_FIELDLIST(X, a) \
+X(a, STATIC,   SINGULAR, UENUM,    state,             1) \
+X(a, STATIC,   SINGULAR, UENUM,    target,            2) \
+X(a, STATIC,   SINGULAR, UINT32,   size,              3) \
+X(a, STATIC,   SINGULAR, UINT32,   offset,            4) \
+X(a, STATIC,   SINGULAR, UINT32,   chunk_max,         5) \
+X(a, STATIC,   SINGULAR, UENUM,    fail,              6) \
+X(a, STATIC,   SINGULAR, SINT32,   detail,            7)
+#define sensei_DfuStatus_CALLBACK NULL
+#define sensei_DfuStatus_DEFAULT NULL
+
 #define sensei_LpwanSleep_FIELDLIST(X, a) \
 X(a, STATIC,   SINGULAR, UINT32,   deep,              1)
 #define sensei_LpwanSleep_CALLBACK NULL
@@ -418,7 +563,14 @@ X(a, STATIC,   ONEOF,    MESSAGE,  (body,lora_provision,lora_provision),   8) \
 X(a, STATIC,   ONEOF,    MESSAGE,  (body,lora_join,lora_join),   9) \
 X(a, STATIC,   ONEOF,    MESSAGE,  (body,send,send),  10) \
 X(a, STATIC,   ONEOF,    MESSAGE,  (body,get_time,get_time),  11) \
-X(a, STATIC,   ONEOF,    MESSAGE,  (body,sleep,sleep),  12)
+X(a, STATIC,   ONEOF,    MESSAGE,  (body,sleep,sleep),  12) \
+X(a, STATIC,   ONEOF,    MESSAGE,  (body,dfu_begin,dfu_begin),  40) \
+X(a, STATIC,   ONEOF,    MESSAGE,  (body,dfu_chunk,dfu_chunk),  41) \
+X(a, STATIC,   ONEOF,    MESSAGE,  (body,dfu_finish,dfu_finish),  42) \
+X(a, STATIC,   ONEOF,    MESSAGE,  (body,dfu_apply,dfu_apply),  43) \
+X(a, STATIC,   ONEOF,    MESSAGE,  (body,dfu_abort,dfu_abort),  44) \
+X(a, STATIC,   ONEOF,    MESSAGE,  (body,dfu_status,dfu_status),  45) \
+X(a, STATIC,   ONEOF,    MESSAGE,  (body,dfu_confirm,dfu_confirm),  46)
 #define sensei_LpwanRequest_CALLBACK NULL
 #define sensei_LpwanRequest_DEFAULT NULL
 #define sensei_LpwanRequest_body_get_version_MSGTYPE sensei_Empty
@@ -432,11 +584,22 @@ X(a, STATIC,   ONEOF,    MESSAGE,  (body,sleep,sleep),  12)
 #define sensei_LpwanRequest_body_send_MSGTYPE sensei_Send
 #define sensei_LpwanRequest_body_get_time_MSGTYPE sensei_Empty
 #define sensei_LpwanRequest_body_sleep_MSGTYPE sensei_LpwanSleep
+#define sensei_LpwanRequest_body_dfu_begin_MSGTYPE sensei_DfuBegin
+#define sensei_LpwanRequest_body_dfu_chunk_MSGTYPE sensei_DfuChunk
+#define sensei_LpwanRequest_body_dfu_finish_MSGTYPE sensei_Empty
+#define sensei_LpwanRequest_body_dfu_apply_MSGTYPE sensei_Empty
+#define sensei_LpwanRequest_body_dfu_abort_MSGTYPE sensei_Empty
+#define sensei_LpwanRequest_body_dfu_status_MSGTYPE sensei_Empty
+#define sensei_LpwanRequest_body_dfu_confirm_MSGTYPE sensei_Empty
 
 #define sensei_LpwanVersion_FIELDLIST(X, a) \
 X(a, STATIC,   OPTIONAL, MESSAGE,  firmware,          1) \
 X(a, STATIC,   SINGULAR, STRING,   modem,             2) \
-X(a, STATIC,   SINGULAR, UINT32,   protocol,          3)
+X(a, STATIC,   SINGULAR, UINT32,   protocol,          3) \
+X(a, STATIC,   SINGULAR, FIXED32,  image_id,          4) \
+X(a, STATIC,   SINGULAR, BOOL,     trial,             5) \
+X(a, STATIC,   SINGULAR, UINT32,   dfu_targets,       6) \
+X(a, STATIC,   SINGULAR, STRING,   lte_modem,         7)
 #define sensei_LpwanVersion_CALLBACK NULL
 #define sensei_LpwanVersion_DEFAULT NULL
 #define sensei_LpwanVersion_firmware_MSGTYPE sensei_Version
@@ -472,13 +635,15 @@ X(a, STATIC,   SINGULAR, UENUM,    result,            2) \
 X(a, STATIC,   ONEOF,    MESSAGE,  (payload,version,version),   3) \
 X(a, STATIC,   ONEOF,    MESSAGE,  (payload,status,status),   4) \
 X(a, STATIC,   ONEOF,    MESSAGE,  (payload,time,time),   5) \
-X(a, STATIC,   ONEOF,    MESSAGE,  (payload,send,send),   6)
+X(a, STATIC,   ONEOF,    MESSAGE,  (payload,send,send),   6) \
+X(a, STATIC,   ONEOF,    MESSAGE,  (payload,dfu,dfu),  40)
 #define sensei_LpwanResponse_CALLBACK NULL
 #define sensei_LpwanResponse_DEFAULT NULL
 #define sensei_LpwanResponse_payload_version_MSGTYPE sensei_LpwanVersion
 #define sensei_LpwanResponse_payload_status_MSGTYPE sensei_LpwanStatus
 #define sensei_LpwanResponse_payload_time_MSGTYPE sensei_NetworkTime
 #define sensei_LpwanResponse_payload_send_MSGTYPE sensei_SendInfo
+#define sensei_LpwanResponse_payload_dfu_MSGTYPE sensei_DfuStatus
 
 #define sensei_RadioEvent_FIELDLIST(X, a) \
 X(a, STATIC,   SINGULAR, UENUM,    radio,             1)
@@ -528,6 +693,9 @@ extern const pb_msgdesc_t sensei_LteConfigure_msg;
 extern const pb_msgdesc_t sensei_LoraConfigure_msg;
 extern const pb_msgdesc_t sensei_LoraProvision_msg;
 extern const pb_msgdesc_t sensei_Send_msg;
+extern const pb_msgdesc_t sensei_DfuBegin_msg;
+extern const pb_msgdesc_t sensei_DfuChunk_msg;
+extern const pb_msgdesc_t sensei_DfuStatus_msg;
 extern const pb_msgdesc_t sensei_LpwanSleep_msg;
 extern const pb_msgdesc_t sensei_LpwanRequest_msg;
 extern const pb_msgdesc_t sensei_LpwanVersion_msg;
@@ -546,6 +714,9 @@ extern const pb_msgdesc_t sensei_LpwanEvent_msg;
 #define sensei_LoraConfigure_fields &sensei_LoraConfigure_msg
 #define sensei_LoraProvision_fields &sensei_LoraProvision_msg
 #define sensei_Send_fields &sensei_Send_msg
+#define sensei_DfuBegin_fields &sensei_DfuBegin_msg
+#define sensei_DfuChunk_fields &sensei_DfuChunk_msg
+#define sensei_DfuStatus_fields &sensei_DfuStatus_msg
 #define sensei_LpwanSleep_fields &sensei_LpwanSleep_msg
 #define sensei_LpwanRequest_fields &sensei_LpwanRequest_msg
 #define sensei_LpwanVersion_fields &sensei_LpwanVersion_msg
@@ -561,16 +732,19 @@ extern const pb_msgdesc_t sensei_LpwanEvent_msg;
 
 /* Maximum encoded size of messages (where known) */
 #define SENSEI_SENSEI_LPWAN_PB_H_MAX_SIZE        sensei_LpwanRequest_size
+#define sensei_DfuBegin_size                     44
+#define sensei_DfuChunk_size                     523
+#define sensei_DfuStatus_size                    30
 #define sensei_DownlinkRx_size                   1035
 #define sensei_LoraConfigure_size                20
 #define sensei_LoraProvision_size                38
 #define sensei_LpwanError_size                   52
 #define sensei_LpwanEvent_size                   1038
 #define sensei_LpwanRequest_size                 1046
-#define sensei_LpwanResponse_size                67
+#define sensei_LpwanResponse_size                106
 #define sensei_LpwanSleep_size                   6
 #define sensei_LpwanStatus_size                  36
-#define sensei_LpwanVersion_size                 57
+#define sensei_LpwanVersion_size                 96
 #define sensei_LteConfigure_size                 134
 #define sensei_NetworkTime_size                  7
 #define sensei_RadioEvent_size                   2

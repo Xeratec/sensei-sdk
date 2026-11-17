@@ -21,6 +21,7 @@ add_library(sensei_lpwan STATIC
   ${CMAKE_CURRENT_LIST_DIR}/src/link_slave.c
   ${CMAKE_CURRENT_LIST_DIR}/src/lpwan_master.c
   ${CMAKE_CURRENT_LIST_DIR}/src/lpwan_timers.c
-  ${CMAKE_CURRENT_LIST_DIR}/src/lpwan_lora.c)
+  ${CMAKE_CURRENT_LIST_DIR}/src/lpwan_lora.c
+  ${CMAKE_CURRENT_LIST_DIR}/src/lpwan_dfu.c)
 target_include_directories(sensei_lpwan PUBLIC ${CMAKE_CURRENT_LIST_DIR}/include)
 target_link_libraries(sensei_lpwan PUBLIC sensei_link)

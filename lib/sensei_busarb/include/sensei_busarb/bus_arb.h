@@ -30,6 +30,7 @@ enum bus_user {
   BUS_SPI,      /* one SPI exchange with the nRF9151 */
   BUS_LTE_CONN, /* LTE registration in progress */
   BUS_LTE_TX,   /* LTE transmission in progress */
+  BUS_DFU,      /* update of the LPWAN shield in progress: the link is held, no GAP9 job in between */
   BUS_USER_COUNT
 };
 

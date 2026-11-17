@@ -23,9 +23,9 @@ nRF5340 (master)                          nRF9151 (slave)
 | Folder | What |
 |---|---|
 | `include/sensei_lpwan/lpwan_link.h` | transfer scheme, flags, shared state machine API |
-| `src/` | protocol cores without OS: `link_slave.c` (nRF9151), `lpwan_master.c` (nRF5340), `lpwan_sm.c` (both), `lpwan_timers.c` (3GPP PSM and eDRX timer coding), `lpwan_lora.c` (LoRa payload limit, airtime, send time estimate, what a send gets before it is queued, the send tracking of both sides) |
-| `zephyr/` | nRF5340 client: `lpwan_client.c` (thread, shield power, shared SPI_A bus, radios), `lpwan_shell.c` |
-| `tests/` | host tests: master against slave through a simulated SPI with faults, state machine, timer coding, LoRa limits and airtime, a model of the LR1121 (duty cycle, NbTrans, repeats) with the shield and the client around it |
+| `src/` | protocol cores without OS: `link_slave.c` (nRF9151), `lpwan_master.c` (nRF5340), `lpwan_sm.c` (both), `lpwan_timers.c` (3GPP PSM and eDRX timer coding), `lpwan_lora.c` (LoRa payload limit, airtime, send time estimate, what a send gets before it is queued, the send tracking of both sides), `lpwan_dfu.c` (rules of the shield update: offsets, resume, SHA-256, checkpoints, MCUboot header checks; flash and modem behind an ops table) |
+| `zephyr/` | nRF5340 client: `lpwan_client.c` (thread, shield power, shared SPI_A bus, radios, the update session), `lpwan_shell.c` |
+| `tests/` | host tests: master against slave through a simulated SPI with faults, state machine, timer coding, LoRa limits and airtime, a model of the LR1121 (duty cycle, NbTrans, repeats) with the shield and the client around it, `test_lpwan_dfu` (a shield update on a RAM flash, with gaps, resume after a restart, bad images, the modem path, and over the SPI link with damaged frames) |
 
 ## Client API (nRF5340, `sensei_lpwan/lpwan.h`)
 
@@ -54,6 +54,27 @@ nRF5340 (master)                          nRF9151 (slave)
 
 Power: with LoRa the shield is switched off `SENSEI_LPWAN_IDLE_S` after the last traffic, never while a send is in
 flight or its frame waits in the LR1121 (the LR1121 keeps the LoRaWAN session). With LTE it stays on and the modem sleeps in PSM.
+
+## Update of the shield (`sensei_lpwan_dfu_submit()`)
+
+The app of the nRF5340 relays the image it gets from a host to the nRF9151 piece by piece and keeps none of it. The
+requests are `dfu_begin`, `dfu_chunk`, `dfu_finish`, `dfu_apply`, `dfu_abort`, `dfu_status`, `dfu_confirm` (`lpwan.proto`,
+tags 40 to 46); each answer is a `DfuStatus`. The rules and the flow are in `lpwan_dfu.h`, the node's description in
+`firmware/docs/UPDATE.md` of SENSEI IEQ. What the client adds:
+
+- `sensei_lpwan_dfu_submit(request, done, user)`: one request at a time, the answer on the hook work queue
+  (`struct sensei_lpwan_dfu_result`: verdict, status, version). `-ENOTSUP` for a shield app without update support
+  (`LpwanVersion.dfu_targets` is 0), `-EBUSY` while a send or connect runs or GAP9 holds the bus.
+- `dfu_begin` opens a session that holds the link: `sensei_lpwan_radio_ready()` is false and `radio_send` gives `-EBUSY`, the
+  shield is not powered down, `BUS_DFU` keeps GAP9 off the bus, an active radio is released. It ends with `dfu_abort`, after a
+  restart into the new app, when no transfer is open any more, or after 120 s without a request. `on_up(RADIO_BLE)` tells
+  the app that data may go again. The shield keeps its transfer, `dfu_begin` with `resume` continues it (also after a power cycle: checkpoints).
+- Requests may take seconds on the shield (a flash erase): the client waits 8 s per SPI try. `sensei_lpwan_shield_version()`
+  gives the version of the last handshake (the node's Status).
+- `dfu_apply` of the app: the client cuts the shield power, waits 300 ms, switches it on and waits up to 180 s for the new
+  image (MCUboot swaps first). A new image on trial (`LpwanVersion.trial`) gets `dfu_confirm` only after the protocol version
+  matched, in this and in every later handshake; the shield is kept on for 15 s so that it can confirm itself. Otherwise MCUboot
+  goes back to the old image at the next reset.
 
 SPI_A (P0.08 to P0.11) is shared with GAP9. The client takes it for each exchange through `sensei_busarb` (internal, not
 part of the API); it also claims the bus during LTE registration and transmission, because GAP9 must not run then. The
@@ -100,7 +121,8 @@ while GAP9 holds the bus and on again after it. Untested on hardware.
   for an hour (`sensei lpwan status` says so, the self-test returns `-EPROTONOSUPPORT`), then asks again from a fresh
   start of the shield: two damaged version bytes in a row look like another version, and the shield may have been updated.
   Bump the protocol version with every change of `lpwan.proto` or of the transfer rules that an older peer would misread
-  (now 2: `SendInfo`, `TxDone.next_max_payload`, `SendInfo.next_max_payload`). `SendInfo.queued_seq`, `LpwanStatus.queued`,
+  (now 2; the update messages (tags 40 to 46, `LpwanVersion` 4 to 7) are additions and did not bump it: an old shield app reports
+  `dfu_targets` 0, an old client never sends `dfu_confirm`, so a new shield image is not kept; the earlier changes: `SendInfo`, `TxDone.next_max_payload`, `SendInfo.next_max_payload`). `SendInfo.queued_seq`, `LpwanStatus.queued`,
   `late_tx_seq` and `late_tx_ok` are new fields: an older peer ignores them and treats BUSY as a failure.
 
 ## Use it

@@ -21,7 +21,7 @@ set_target_properties(sensei_link_framing PROPERTIES C_STANDARD 99)
 target_compile_options(sensei_link_framing PRIVATE -Wall -Wextra -Wpedantic -Werror -Wconversion)
 
 enable_testing()
-foreach(t test_framing test_pb)
+foreach(t test_framing test_pb test_sha256)
   add_executable(${t} ${t}.c)
   target_link_libraries(${t} PRIVATE sensei_link)
   target_compile_options(${t} PRIVATE -Wall -Wextra)

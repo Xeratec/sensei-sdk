@@ -21,6 +21,7 @@ block the others for ever.
 | `BUS_SPI` | one SPI exchange with the nRF9151 |
 | `BUS_LTE_CONN` | LTE registration in progress |
 | `BUS_LTE_TX` | LTE transmission in progress |
+| `BUS_DFU` | update of the LPWAN shield in progress (held for the whole update, renewed with each chunk) |
 
 - `include/sensei_busarb/bus_arb.h`: the API. `bus_arb_*` is the pure logic (time is an argument, no lock).
   `bus_claim()`, `bus_release()`, `bus_is_held()` and `bus_claim_wait()` use one global instance with a lock

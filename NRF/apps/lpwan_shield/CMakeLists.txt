@@ -29,6 +29,10 @@ target_sources(app PRIVATE
   src/service.c
 )
 target_include_directories(app PRIVATE src)
+# The trial rule of the OTA helpers (pure header, no Zephyr dependency): "ota/sensei_ota_trial.h".
+target_include_directories(app PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../../system)
+
+target_sources_ifdef(CONFIG_LPWAN_SHIELD_DFU app PRIVATE src/dfu.c)
 
 target_sources_ifdef(CONFIG_LPWAN_SHIELD_LTE app PRIVATE src/lte.c)
 

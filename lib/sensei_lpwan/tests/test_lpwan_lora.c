@@ -140,16 +140,16 @@ static void test_duty_cycle_model(void) {
   /* three chunks at DR0: two of them wait */
   CHECK(model_message(0, false, 1, false, 140, 3) == 2);
   /* with ADR the chunks are 51 B whatever the rate, the estimate uses DR0: never early */
-  CHECK(model_message(3, true, 1, false, 76, 2) >= 0u);
+  CHECK(model_message(3, true, 1, false, 76, 2) == 0); /* the real DR3 airtime is short: the 45 s watchdog is not hit */
   /* DR5: one chunk of 222 B, no waiting, nothing to fail */
   CHECK(model_message(5, false, 1, false, 222, 1) == 0);
   /* DR4 and up: a 300 B message is two chunks, the wait is a few seconds */
   CHECK(model_message(5, false, 1, false, 300, 2) == 0);
   /* NbTrans 2 and 3, and a confirmed uplink (one more repeat): the estimate follows */
-  CHECK(model_message(3, false, 2, false, 160, 2) >= 1);
-  CHECK(model_message(3, false, 3, false, 160, 2) >= 1);
+  CHECK(model_message(3, false, 2, false, 160, 2) > 0);
+  CHECK(model_message(3, false, 3, false, 160, 2) > 0);
   /* DR5, NbTrans 3 and one more for a confirmed uplink: the repeats wait 20 s each, the old watchdog failed it */
-  CHECK(model_message(5, false, 3, true, 300, 2) >= 1);
+  CHECK(model_message(5, false, 3, true, 300, 2) > 0);
 
   /* the wait the LR1121 reports is what the second chunk of DR0 needs: about 99 times the first airtime */
   {

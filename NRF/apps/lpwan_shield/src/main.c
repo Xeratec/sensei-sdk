@@ -21,6 +21,7 @@
 #include <modem/nrf_modem_lib.h>
 #endif
 
+#include "dfu.h"
 #include "lora.h"
 #include "lte.h"
 
@@ -49,6 +50,8 @@ int main(void) {
   if (err) {
     LOG_ERR("watchdog init failed: %d", err);
   }
+  /* The update state and the trial supervision are ready before the first request. */
+  dfu_init();
   /* The link comes first so the master gets answers while the radios start. */
   err = service_start();
   if (err) {

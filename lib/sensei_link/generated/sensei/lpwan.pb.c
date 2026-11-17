@@ -26,6 +26,15 @@ PB_BIND(sensei_LoraProvision, sensei_LoraProvision, AUTO)
 PB_BIND(sensei_Send, sensei_Send, 2)
 
 
+PB_BIND(sensei_DfuBegin, sensei_DfuBegin, AUTO)
+
+
+PB_BIND(sensei_DfuChunk, sensei_DfuChunk, 2)
+
+
+PB_BIND(sensei_DfuStatus, sensei_DfuStatus, AUTO)
+
+
 PB_BIND(sensei_LpwanSleep, sensei_LpwanSleep, AUTO)
 
 
@@ -60,6 +69,12 @@ PB_BIND(sensei_LpwanError, sensei_LpwanError, AUTO)
 
 
 PB_BIND(sensei_LpwanEvent, sensei_LpwanEvent, 2)
+
+
+
+
+
+
 
 
 

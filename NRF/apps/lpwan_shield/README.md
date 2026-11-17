@@ -28,24 +28,31 @@ export ZEPHYR_BASE=<ncs>/zephyr SENSEI_SDK_ROOT=<path to the SENSEI SDK>
 cd $SENSEI_SDK_ROOT/NRF/apps/lpwan_shield
 M=-DEXTRA_ZEPHYR_MODULES=$SENSEI_SDK_ROOT/NRF
 west build -b sensei_lpwan_nrf9151/nrf9151/ns -- $M -DEXTRA_CONF_FILE=conf/debug.conf
-west build -b sensei_lpwan_nrf9151/nrf9151/ns -- $M -DEXTRA_CONF_FILE=conf/release.conf
+SENSEI_SHIELD_MCUBOOT_KEY=<PEM file> \
+west build -b sensei_lpwan_nrf9151/nrf9151/ns -- $M -DEXTRA_CONF_FILE=conf/release.conf -DSB_CONFIG_SENSEI_RELEASE=y
 ```
 
+MCUboot is part of every build (sysbuild). Debug is signed with MCUboot's public development key (anyone can sign for it: lab
+only). Release needs a private ECDSA P-256 key (`imgtool keygen -k key.pem -t ecdsa-p256`) in `SENSEI_SHIELD_MCUBOOT_KEY`, or
+`SENSEI_MCUBOOT_KEY` if that is empty; the build stops without it, and stops if the Release configuration and
+`SB_CONFIG_SENSEI_RELEASE` do not match. Keep the key outside git; MCUboot holds its public half for the life of the shield.
 The SENSEI IEQ node builds it with `make nrf9151` and `make nrf9151-release` (`firmware/Makefile`).
 
-| Build | Flash (non-secure image) | RAM |
-|---|---|---|
-| Release | 93 kB | 51 kB |
-| Debug (RTT log) | 143 kB | 59 kB |
+| Build | Flash (non-secure image) | RAM | MCUboot | TF-M |
+|---|---|---|---|---|
+| Release | 101.5 kB | 52 kB | 27.4 kB of 64 kB | 64.3 kB |
+| Debug (RTT log) | 154.0 kB | 60 kB | 27.4 kB of 64 kB | 64.3 kB |
 
-The non-secure slot is 212 kB. Kconfig: `LPWAN_SHIELD_LTE`, `LPWAN_SHIELD_LORA` (both default y).
+The non-secure slot is 196.6 kB (188 kB usable) with MCUboot; 212 kB without. Kconfig: `LPWAN_SHIELD_LTE`, `LPWAN_SHIELD_LORA` (both default y).
 Turn one off to save flash.
 
 ## Flash
 
 ```sh
-west flash -d <build dir>
+west flash -d <build dir>        # the first time: MCUboot, TF-M and the app (tfm_merged.hex + mcuboot)
 ```
+
+Later updates need no probe: see "Update over the air".
 
 The shield has no UART. The debug header J12 gives SWD and RTT. In the Debug build the log is on RTT
 channel 0. The nRF9151 reset and SWD are not reachable from the nRF5340.
@@ -192,13 +199,40 @@ The nRF5340 client (`lib/sensei_lpwan`, `struct sensei_lpwan_config`) sends this
 
 The radio (LoRa, LTE-M or NB-IoT) is chosen by the app per send.
 
+## Update over the air
+
+The nRF5340 sends the new app, or a modem delta patch, over the SPI link (`dfu_*` requests of `lpwan.proto`, rules in
+`lib/sensei_lpwan/include/sensei_lpwan/lpwan_dfu.h`). The user guide for the SENSEI IEQ node is in its
+`firmware/docs/UPDATE.md`, section "LPWAN shield".
+
+- **Boot.** MCUboot with swap using move and revert, ECDSA P-256 signature, software downgrade check (the same version is
+  allowed). `NRF/apps/lpwan_shield/VERSION` is the image version and `LpwanVersion.firmware`: raise it for each update.
+  NCS 3.4.1 needs no extra devicetree: the Zephyr default partitions of the nRF91 with TF-M fit (`nrf91xx_partition.dtsi`:
+  MCUboot 64 kB, slot 0 and slot 1 of 448 kB each with TF-M 256 kB and the app 192 kB inside, TF-M storage, and `storage`
+  32 kB for the app, non-secure with `TFM_NRF_NS_STORAGE`). The signed file `lpwan_shield.signed.bin` (also in
+  `dfu_application.zip`) is TF-M and app in one image; the gap between them is 0xFF.
+- **App update.** `src/dfu.c` writes slot 1 (`flash_area`), erasing each sector when the transfer reaches it, keeps a checkpoint per
+  sector in the first sector of `storage` (a restart of the shield resumes at most one sector back), reads slot 1 back at
+  `dfu_finish` for the SHA-256 and checks the MCUboot header (image, version), and at `dfu_apply` requests one test boot
+  (`boot_request_upgrade`). The nRF5340 then cuts the shield power and powers it again (the shield cannot reset
+  itself reliably in a way the nRF5340 sees, and the nRF5340 owns the power).
+- **Trial boot.** The new image answers `get_version` with `trial` set. Only when the nRF5340 accepted the handshake it sends
+  `dfu_confirm`; `dfu_init()` then confirms the image (`boot_write_img_confirmed`) after `LPWAN_SHIELD_CONFIRM_DELAY_S` (5 s) with the
+  rule of `NRF/system/ota/sensei_ota_trial.h`. Without `dfu_confirm`, or if the nRF5340 refuses the protocol version, the image
+  reverts at the next reset or power cycle, and the shield resets by itself after `LPWAN_SHIELD_TRIAL_TIMEOUT_S` (180 s).
+- **Modem.** `nrf_modem_delta_dfu` (target `DFU_TARGET_MODEM`): `lte_modem_init()` starts the modem library if needed, the patch goes in
+  order, the SHA-256 is computed on the way (no resume after a restart of the shield), `dfu_apply` schedules the update and a
+  worker restarts the modem library (result by `NRF_MODEM_LIB_ON_DFU_RES`); `dfu_status` reports it. The modem checks the
+  signature and UUID of the patch itself. Disable with `CONFIG_LPWAN_SHIELD_MODEM_DFU=n`, the whole update with
+  `CONFIG_LPWAN_SHIELD_DFU=n` (then no MCUboot needed: `sysbuild.conf`).
+- **During an update** the shield refuses connect, join and send (`LPWAN_BUSY`); `get_version`, `get_status`, `lte_disconnect`
+  and the `dfu_*` requests work. The link thread runs the update (stack 3 kB) and feeds its watchdog during erases.
+- Everything is untested on hardware.
+
 ## Open points
 
-- MCUboot is off. It builds with TF-M for the nRF9151 in NCS v3.4.1
-  (`-DSB_CONFIG_BOOTLOADER_MCUBOOT=y`, merged image 64 kB bootloader plus TF-M and app), but has not
-  been run on hardware. The devicetree partitions are the Zephyr default (mcuboot 64 kB, two image
-  slots with secure and non-secure part, TF-M storage), so OTA can follow.
-  The request set has room for a DFU transfer: `LpwanRequest` tags 13 and up are free (the node reserves 40 to 59 for OTA and GNSS).
+- The MCUboot swap time of 448 kB (about 112 sectors moved and copied) and the modem erase time are not measured.
+- No recovery over the link: a shield with a broken app is flashed over SWD (J12). The shield has no UART and no USB.
 - Everything was built and tested on the host only. See the list of items to check on hardware in the
   report of the LPWAN work and `HARDWARE.md` (marked **verify**).
 

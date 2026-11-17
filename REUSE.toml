@@ -76,3 +76,8 @@ SPDX-License-Identifier = "Apache-2.0"
 path = "NRF/system/third_party/max77654/test/Unity/**"
 SPDX-FileCopyrightText = "2007-21 Mike Karlesky, Mark VanderVoord, Greg Williams"
 SPDX-License-Identifier = "MIT"
+
+[[annotations]]
+path = "NRF/apps/*/VERSION"
+SPDX-FileCopyrightText = "2026 ETH Zurich and University of Bologna"
+SPDX-License-Identifier = "Apache-2.0"

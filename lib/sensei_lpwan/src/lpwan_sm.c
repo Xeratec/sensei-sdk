@@ -34,7 +34,17 @@ sensei_LpwanResult lpwan_sm_admit(lpwan_sm_t *sm, const sensei_LpwanRequest *req
   switch (req->which_body) {
   case sensei_LpwanRequest_get_version_tag:
   case sensei_LpwanRequest_get_status_tag:
+  case sensei_LpwanRequest_dfu_status_tag:
+  case sensei_LpwanRequest_dfu_confirm_tag:
     return sensei_LpwanResult_LPWAN_OK;
+
+  case sensei_LpwanRequest_dfu_begin_tag:
+  case sensei_LpwanRequest_dfu_chunk_tag:
+  case sensei_LpwanRequest_dfu_finish_tag:
+  case sensei_LpwanRequest_dfu_apply_tag:
+  case sensei_LpwanRequest_dfu_abort_tag:
+    /* An update needs the radios idle: the modem is used by the delta update and a send holds the flash and the CPU. */
+    return sm->state == LPWAN_ST_IDLE ? sensei_LpwanResult_LPWAN_OK : sensei_LpwanResult_LPWAN_BUSY;
 
   case sensei_LpwanRequest_lte_configure_tag:
   case sensei_LpwanRequest_lora_configure_tag:

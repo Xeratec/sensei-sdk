@@ -72,9 +72,48 @@ config LPWAN_SHIELD_SEND_TIMEOUT_S
 	  frame the send is not failed then; the LR1121 is reset after twice that time. The client waits 15 s more at the least
 	  (SENSEI_LPWAN_TX_TIMEOUT_S, 60 s), so this side answers first.
 
+config LPWAN_SHIELD_DFU
+	bool "Update over the air: the app (MCUboot) and the modem firmware (delta)"
+	default y
+	depends on BOOTLOADER_MCUBOOT
+	select FLASH
+	select FLASH_MAP
+	select STREAM_FLASH
+	select IMG_MANAGER
+	help
+	  The nRF5340 sends the new image over the SPI link (lpwan.proto, dfu_* requests); the app writes it into the
+	  second MCUboot slot, or hands a delta patch to the modem. The new app confirms itself after the handshake with the
+	  nRF5340 (dfu_confirm). Needs MCUboot from sysbuild (sysbuild.conf). See README.md.
+
+config LPWAN_SHIELD_MODEM_DFU
+	bool "Modem firmware update (nrf_modem_delta_dfu)"
+	default y
+	depends on LPWAN_SHIELD_DFU && LPWAN_SHIELD_LTE
+
+config LPWAN_SHIELD_CONFIRM_DELAY_S
+	int "Run time before a new app image confirms itself, s"
+	default 5
+	range 1 600
+	depends on LPWAN_SHIELD_DFU
+	help
+	  After an update the image runs on trial. It confirms itself when it has run this long and the nRF5340 has
+	  accepted the handshake (dfu_confirm, sent after the protocol version matched).
+
+config LPWAN_SHIELD_TRIAL_TIMEOUT_S
+	int "Trial time of a new app image, s"
+	default 180
+	range 30 3600
+	depends on LPWAN_SHIELD_DFU
+	help
+	  If the image is still unconfirmed after this time (the nRF5340 did not accept it), the shield resets and MCUboot
+	  goes back to the old image. Any reset or power cycle of an unconfirmed image does the same.
+
 config LPWAN_SHIELD_LINK_STACK
 	int "SPI link thread stack size"
+	default 3072 if LPWAN_SHIELD_DFU
 	default 2048
+	help
+	  The update runs on this thread (flash writes, the read-back hash): it needs the larger size.
 
 config LPWAN_SHIELD_LINK_PRIO
 	int "SPI link thread priority (preemptible, lower is higher)"
@@ -83,18 +122,6 @@ config LPWAN_SHIELD_LINK_PRIO
 config LPWAN_SHIELD_WORKER_PRIO
 	int "Priority of the LTE and LoRa workers (lower is higher)"
 	default 6
-
-config LPWAN_SHIELD_VERSION_MAJOR
-	int "Firmware version, major"
-	default 0
-
-config LPWAN_SHIELD_VERSION_MINOR
-	int "Firmware version, minor"
-	default 1
-
-config LPWAN_SHIELD_VERSION_PATCH
-	int "Firmware version, patch"
-	default 0
 
 config LPWAN_SHIELD_LOG_LEVEL
 	int "Log level of the service modules (0 off ... 4 debug)"

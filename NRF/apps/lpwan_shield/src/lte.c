@@ -59,6 +59,8 @@ static sensei_LteConfigure cfg = {
 };
 static bool configured;
 static bool modem_ready;
+static K_MUTEX_DEFINE(modem_lock);
+static char modem_ver[25]; /* the modem firmware version once the modem library has started, else empty */
 static volatile bool registered;
 static volatile bool want_connected;
 static volatile bool connect_cancelled; /* lte_disconnect() asked the connect in progress to stop */
@@ -208,17 +210,49 @@ static void apply_power_saving(void) {
   }
 }
 
-static int do_connect(void) {
-  int err;
+/* The modem firmware version (for LpwanVersion.modem), asked once the modem library runs. */
+static void read_modem_version(void) {
+  char v[sizeof(modem_ver)];
 
+  if (nrf_modem_at_scanf("AT%SHORTSWVER", "%%SHORTSWVER: %24s", v) == 1) {
+    snprintf(modem_ver, sizeof(modem_ver), "%s", v);
+  }
+}
+
+int lte_modem_init(void) {
+  int err = 0;
+
+  k_mutex_lock(&modem_lock, K_FOREVER);
   if (!modem_ready) {
     err = nrf_modem_lib_init();
     if (err) {
       LOG_ERR("nrf_modem_lib_init: %d", err);
-      return -EIO;
+      err = -EIO;
+    } else {
+      lte_lc_register_handler(lte_handler);
+      modem_ready = true;
+      read_modem_version();
     }
-    lte_lc_register_handler(lte_handler);
-    modem_ready = true;
+  }
+  k_mutex_unlock(&modem_lock);
+  return err;
+}
+
+void lte_modem_restarted(bool ok) {
+  k_mutex_lock(&modem_lock, K_FOREVER);
+  modem_ready = ok; /* the delta update shut the library down and started it again; if that failed, the next
+                       connect starts it */
+  if (ok) {
+    read_modem_version();
+  }
+  k_mutex_unlock(&modem_lock);
+}
+
+static int do_connect(void) {
+  int err = lte_modem_init();
+
+  if (err) {
+    return err;
   }
   err =
       lte_lc_system_mode_set(cfg.mode == sensei_LteMode_LTE_NB_IOT ? LTE_LC_SYSTEM_MODE_NBIOT : LTE_LC_SYSTEM_MODE_LTEM,
@@ -436,4 +470,4 @@ void lte_fill_status(sensei_LpwanStatus *st) {
   }
 }
 
-void lte_modem_string(char *out, size_t cap) { snprintf(out, cap, "nRF91 modem"); }
+void lte_modem_string(char *out, size_t cap) { snprintf(out, cap, "%s", modem_ver); }

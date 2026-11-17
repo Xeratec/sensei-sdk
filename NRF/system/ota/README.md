@@ -64,5 +64,6 @@ Signing keys and the build type belong to the app's sysbuild files, not to this 
 ## Not covered
 
 - The network core of the nRF5340: the NCS update path needs the b0n bootloader and the partition manager.
-- Images for other processors (nRF9151, GAP9): the app receives them over SMP and writes them itself. This module
-  only keeps the SMP server and the trial logic general.
+- Images for other processors: the nRF9151 of the LPWAN shield has its own MCUboot and is updated through the client of
+  `lib/sensei_lpwan` (`sensei_lpwan_dfu_submit()`); the shield app uses the pure trial rule `sensei_ota_trial.h` of this folder.
+  GAP9 is not covered.

@@ -117,6 +117,9 @@ void lpwan_sm_init(lpwan_sm_t *sm);
  *   lte_disconnect                      CONNECTING, CONNECTED, ERROR or IDLE: the active
  *                                       technology is released (LTE detaches, LoRa is parked)
  *   sleep                               IDLE or CONNECTED
+ *   dfu_begin, _chunk, _finish, _apply,
+ *   _abort                              IDLE (the update holds the link: no radio is active)
+ *   dfu_status, dfu_confirm             any state
  */
 sensei_LpwanResult lpwan_sm_admit(lpwan_sm_t *sm, const sensei_LpwanRequest *req);
 

@@ -39,6 +39,7 @@
 #include "lpwan_priv.h"
 #include "sensei_busarb/bus_arb.h"
 #include "sensei_lpwan/lpwan.h"
+#include "sensei_lpwan/lpwan_dfu.h"
 #include "sensei_lpwan/lpwan_lora.h"
 #include "sensei_lpwan/lpwan_master.h"
 
@@ -188,7 +189,7 @@ static void gap9_listener(enum bus_user u, bool held, void *ctx) {
 
 /* ---- state ---- */
 
-enum cmd_type { CMD_CONNECT, CMD_DISCONNECT, CMD_POWER, CMD_SEND, CMD_SETTINGS, CMD_PROVISION, CMD_VERSION };
+enum cmd_type { CMD_CONNECT, CMD_DISCONNECT, CMD_POWER, CMD_SEND, CMD_SETTINGS, CMD_PROVISION, CMD_VERSION, CMD_DFU };
 
 struct cmd {
   enum cmd_type type;
@@ -263,6 +264,30 @@ static uint32_t uplink_ok, uplink_fail;
 static sensei_LpwanVersion version_out;
 static atomic_t version_wanted;
 static int version_err;
+
+/* The version the shield reported last (sensei_lpwan_shield_version(), Status of the node). */
+static struct k_spinlock ver_lock;
+static sensei_LpwanVersion shield_ver;
+static bool shield_ver_valid;
+
+/* Update of the shield: the session holds the link (no data uplinks, no power gating) from dfu_begin until it ends
+ * (apply, abort, no request for DFU_SESSION_IDLE_MS, or an error that ends it). One request at a time. */
+#define DFU_SESSION_IDLE_MS 120000
+#define DFU_BUS_HOLD_MS (DFU_SESSION_IDLE_MS + 30000)
+#define DFU_READY_MS 8000          /* longest the shield may take for one request (a flash erase of the padding) */
+#define DFU_SWAP_TIMEOUT_MS 180000 /* MCUboot swaps 448 kB at the first start of the new image */
+static atomic_t dfu_active;
+static bool dfu_bus;      /* BUS_DFU claimed (thread owned) */
+static int64_t dfu_until; /* uptime at which an idle session ends, 0: none (thread owned) */
+static atomic_t dfu_busy; /* a job is queued or running */
+static struct dfu_job {
+  sensei_LpwanRequest req;
+  struct sensei_lpwan_dfu_result res;
+  sensei_lpwan_dfu_done_fn done;
+  void *user;
+  int err;
+  struct k_work work;
+} dfu_job;
 
 /* The app work queue gets completions, downlinks and time. */
 struct dl_item {
@@ -560,7 +585,11 @@ static int request(sensei_LpwanRequest *req, sensei_LpwanResponse *rsp, uint32_t
     if (err == -EBUSY) {
       master.failures = 0; /* GAP9 owns the bus: not the shield's fault */
     }
-    LOG_ERR("request %u failed: %d (%u in a row)", (unsigned)req->which_body, err, (unsigned)master.failures);
+    if (booting) {
+      LOG_DBG("request %u failed: %d (%u in a row)", (unsigned)req->which_body, err, (unsigned)master.failures);
+    } else {
+      LOG_ERR("request %u failed: %d (%u in a row)", (unsigned)req->which_body, err, (unsigned)master.failures);
+    }
     if (!booting && master.failures >= CONFIG_SENSEI_LPWAN_LINK_FAILURES) {
       link_recover("no answer");
     }
@@ -625,6 +654,11 @@ static int read_version(sensei_LpwanVersion *out) {
       return -EPROTONOSUPPORT;
     }
     *out = rs.version;
+    k_spinlock_key_t k = k_spin_lock(&ver_lock);
+
+    shield_ver = rs.version;
+    shield_ver_valid = true;
+    k_spin_unlock(&ver_lock, k);
     snprintf(fw_str, sizeof(fw_str), "%u.%u.%u", (unsigned)rs.version.firmware.major,
              (unsigned)rs.version.firmware.minor, (unsigned)rs.version.firmware.patch);
     snprintf(modem_str, sizeof(modem_str), "%.23s", rs.version.modem);
@@ -636,12 +670,34 @@ static int read_version(sensei_LpwanVersion *out) {
 
 static void shield_down(void);
 
+/* A shield image on trial (after an update) confirms itself only when we tell it that the handshake worked: the
+ * protocol version matched (read_version() refuses otherwise), so the update path stays usable. Without this message
+ * MCUboot goes back to the old image at the next reset or power cycle. The shield is kept on until it has confirmed
+ * itself. */
+#define TRIAL_HOLD_MS 15000
+static int64_t trial_hold_until;
+
+static void accept_trial_image(const sensei_LpwanVersion *v) {
+  if (!v->trial) {
+    return;
+  }
+  LOG_INF("shield image %u.%u.%u is on trial, protocol %u matches: confirming", (unsigned)v->firmware.major,
+          (unsigned)v->firmware.minor, (unsigned)v->firmware.patch, (unsigned)v->protocol);
+  if (simple_request(sensei_LpwanRequest_dfu_confirm_tag) == 0) {
+    trial_hold_until = k_uptime_get() + TRIAL_HOLD_MS;
+  }
+}
+
 /* After a failed bring-up the next one waits, so a dead shield does not keep the thread and the
  * rail busy. Power-off time: the nRF9151 must lose its supply to reset. */
 #define SHIELD_OFF_MS 300
 #define SHIELD_RETRY_MS 15000
 
-static int shield_up(void) {
+static int shield_up_for(uint32_t boot_timeout_ms);
+
+static int shield_up(void) { return shield_up_for(CONFIG_SENSEI_LPWAN_BOOT_TIMEOUT_MS); }
+
+static int shield_up_for(uint32_t boot_timeout_ms) {
   int64_t end;
 
   if (proto_bad) {
@@ -680,7 +736,7 @@ static int shield_up(void) {
   lpwan_master_reset(&master);
   master.failures = 0;
   booting = true;
-  end = k_uptime_get() + CONFIG_SENSEI_LPWAN_BOOT_TIMEOUT_MS;
+  end = k_uptime_get() + boot_timeout_ms;
   while (k_uptime_get() < end) {
     sensei_LpwanVersion v;
 
@@ -691,13 +747,14 @@ static int shield_up(void) {
         booting = false;
         link_up = true;
         LOG_INF("nRF9151 firmware %s, modem '%s'", fw_str, modem_str);
+        accept_trial_image(&v);
         return 0;
       }
       if (err == -EPROTONOSUPPORT) {
         break; /* no use to wait */
       }
       if (err == -EBUSY) {
-        end = k_uptime_get() + CONFIG_SENSEI_LPWAN_BOOT_TIMEOUT_MS; /* GAP9 had the bus: not the shield's fault */
+        end = k_uptime_get() + boot_timeout_ms; /* GAP9 had the bus: not the shield's fault */
       }
     }
     k_msleep(50);
@@ -803,6 +860,9 @@ static void do_connect(sensei_Radio radio) {
 
   if (want != LPWAN_TECH_LORA && want != LPWAN_TECH_LTE) {
     return;
+  }
+  if (atomic_get(&dfu_active)) {
+    return; /* the update holds the link; on_up comes when it ends */
   }
   if (sm.state == LPWAN_ST_CONNECTED && sm.tech == want &&
       (want != LPWAN_TECH_LTE || lte_nb == (radio == sensei_Radio_RADIO_NBIOT))) {
@@ -918,6 +978,10 @@ static void do_send(void) {
   const struct sensei_lpwan_config st = cfg_get();
   sensei_Send *s = &rq.send;
 
+  if (atomic_get(&dfu_active)) {
+    finish_send(-EBUSY);
+    return;
+  }
   if (lpwan_tech_of_radio(send_radio) == LPWAN_TECH_LTE &&
       !bus_claim_wait(BUS_LTE_TX, (CONFIG_SENSEI_LPWAN_TX_TIMEOUT_S + 5) * 1000U, LPWAN_BUS_WAIT_MS)) {
     LOG_WRN("GAP9 busy, LTE send postponed");
@@ -971,7 +1035,11 @@ static void do_disconnect(void) {
 
 static void idle_action(void) {
   idle_deadline = 0;
-  if (!shield_on || atomic_get(&sending) || connecting) {
+  if (!shield_on || atomic_get(&sending) || connecting || atomic_get(&dfu_active)) {
+    return;
+  }
+  if (k_uptime_get() < trial_hold_until) { /* a new shield image is confirming itself */
+    idle_deadline = trial_hold_until;
     return;
   }
   if (lpwan_held_keeps_power(&held, (uint32_t)k_uptime_get())) {
@@ -991,6 +1059,171 @@ static void idle_action(void) {
     rq.sleep.deep = 0;
     (void)request(&rq, &rs, REQ_TO);
   }
+}
+
+/* ---- update of the shield ---- */
+
+/* End the session: the link is free again, the shield may be gated off, the uplink queue tries again. */
+static void dfu_session_end(const char *why) {
+  if (!atomic_cas(&dfu_active, 1, 0)) {
+    return;
+  }
+  LOG_INF("shield update session ends: %s", why);
+  if (dfu_bus) {
+    bus_release(BUS_DFU);
+    dfu_bus = false;
+  }
+  dfu_until = 0;
+  idle_deadline = k_uptime_get() + CONFIG_SENSEI_LPWAN_IDLE_S * 1000LL;
+  up_radio = sensei_Radio_RADIO_BLE;
+  submit_work(&flush_work);
+}
+
+/* Take the link for an update: no send or connect in progress, GAP9 kept off the bus, the shield on and idle. */
+static int dfu_session_begin(void) {
+  int err;
+
+  if (atomic_get(&sending) || connecting) {
+    return -EBUSY;
+  }
+  if (!bus_claim_wait(BUS_DFU, DFU_BUS_HOLD_MS, LPWAN_BUS_WAIT_MS)) {
+    return -EBUSY; /* GAP9 owns the bus */
+  }
+  dfu_bus = true;
+  atomic_set(&dfu_active, 1);
+  idle_deadline = 0;
+  err = shield_up();
+  if (err == 0 && sm.state != LPWAN_ST_IDLE) { /* a radio is active: release it first */
+    if (simple_request(sensei_LpwanRequest_lte_disconnect_tag) == 0) {
+      (void)lpwan_master_fetch_events(&master, 8);
+    }
+    if (sm.state != LPWAN_ST_IDLE) {
+      err = -EBUSY;
+    }
+  }
+  if (err) {
+    dfu_session_end("could not start");
+  }
+  return err;
+}
+
+static uint32_t dfu_timeout_ms(pb_size_t tag) {
+  switch (tag) {
+  case sensei_LpwanRequest_dfu_finish_tag:
+    return 20000; /* reads the whole image back and hashes it */
+  case sensei_LpwanRequest_dfu_status_tag:
+  case sensei_LpwanRequest_dfu_confirm_tag:
+    return REQ_TO + 1500;
+  default:
+    return 12000; /* a chunk may erase the padding of the image */
+  }
+}
+
+/* The shield marked its second slot for one test boot. The nRF5340 owns the power: cut it, wait, switch it on, and give
+ * MCUboot the time to swap the images (tens of seconds, at the first start only). Then the new image answers the
+ * handshake. If it speaks another protocol it is not confirmed, and the revert happens at the next power-up. */
+static int dfu_restart_shield(struct dfu_job *j) {
+  int err;
+
+  LOG_INF("shield update: test swap requested, power-cycling the shield");
+  shield_down();
+  shield_retry_at = 0;
+  proto_bad = false;
+  err = shield_up_for(DFU_SWAP_TIMEOUT_MS);
+  if (err == 0) {
+    k_spinlock_key_t k = k_spin_lock(&ver_lock);
+
+    j->res.version = shield_ver;
+    j->res.has_version = true;
+    k_spin_unlock(&ver_lock, k);
+  } else {
+    LOG_ERR(
+        "shield update: the new image does not answer or is refused (%d); it is not confirmed and MCUboot goes back "
+        "to the old one at the next power-up",
+        err);
+    proto_bad = false; /* the old image will be back: do not keep refusing the shield */
+    shield_retry_at = 0;
+  }
+  return err;
+}
+
+static void do_dfu(void) {
+  struct dfu_job *j = &dfu_job;
+  sensei_LpwanResponse rs;
+  pb_size_t tag = j->req.which_body;
+  int err;
+
+  memset(&j->res, 0, sizeof(j->res));
+  memset(&rs, 0, sizeof(rs));
+  if (tag == sensei_LpwanRequest_dfu_begin_tag && !atomic_get(&dfu_active)) {
+    err = dfu_session_begin();
+  } else {
+    err = shield_up();
+  }
+  if (err == 0 && tag == sensei_LpwanRequest_dfu_begin_tag) {
+    uint32_t bit = j->req.dfu_begin.target == sensei_DfuTarget_DFU_TARGET_MODEM ? LPWAN_DFU_TARGET_MODEM_BIT
+                                                                                : LPWAN_DFU_TARGET_APP_BIT;
+    k_spinlock_key_t k = k_spin_lock(&ver_lock);
+    bool no = shield_ver_valid && (shield_ver.dfu_targets & bit) == 0;
+
+    k_spin_unlock(&ver_lock, k);
+    if (no) {
+      err = -ENOTSUP; /* an older shield app, or the target is not built in */
+      dfu_session_end("no update support");
+    }
+  }
+  if (err == 0) {
+    master.ready_timeout_ms = DFU_READY_MS;
+    err = request(&j->req, &rs, dfu_timeout_ms(tag));
+    master.ready_timeout_ms = 1000;
+    if ((err == -EIO || err == -EPERM) && last_result >= 0) {
+      err = 0; /* the shield (or our state machine) refused: its verdict is the answer */
+      rs.result = (sensei_LpwanResult)last_result;
+    }
+  }
+  if (err == 0) {
+    j->res.result = rs.result;
+    if (rs.which_payload == sensei_LpwanResponse_dfu_tag) {
+      j->res.status = rs.dfu;
+    }
+    if (atomic_get(&dfu_active)) {
+      dfu_until = k_uptime_get() + DFU_SESSION_IDLE_MS;
+      (void)bus_claim(BUS_DFU, DFU_BUS_HOLD_MS); /* renew */
+    }
+    if (rs.result == sensei_LpwanResult_LPWAN_OK && tag == sensei_LpwanRequest_dfu_apply_tag &&
+        rs.dfu.target == sensei_DfuTarget_DFU_TARGET_APP) {
+      err = dfu_restart_shield(j);
+      dfu_session_end(err ? "restart failed" : "restarted");
+    } else if (tag == sensei_LpwanRequest_dfu_status_tag || tag == sensei_LpwanRequest_dfu_confirm_tag) {
+      sensei_LpwanVersion v;
+
+      if (read_version(&v) == 0) { /* the version goes with the status */
+        j->res.version = v;
+        j->res.has_version = true;
+      }
+    }
+    if (atomic_get(&dfu_active) &&
+        (tag == sensei_LpwanRequest_dfu_abort_tag || rs.dfu.state == sensei_DfuState_DFU_STATE_IDLE ||
+         rs.dfu.state == sensei_DfuState_DFU_STATE_FAILED || rs.dfu.state == sensei_DfuState_DFU_STATE_DONE)) {
+      dfu_session_end("no transfer open");
+    }
+  } else if (atomic_get(&dfu_active) && err != -EBUSY) {
+    /* The link failed: the session stays (the host asks for the offset and goes on), until it has been idle too long.
+     */
+    dfu_until = k_uptime_get() + DFU_SESSION_IDLE_MS;
+  }
+  j->err = err;
+  k_work_submit_to_queue(hooks.wq != NULL ? hooks.wq : &k_sys_work_q, &j->work);
+}
+
+static void dfu_done_fn(struct k_work *w) {
+  struct dfu_job *j = CONTAINER_OF(w, struct dfu_job, work);
+  sensei_lpwan_dfu_done_fn cb = j->done;
+
+  if (cb != NULL) {
+    cb(j->err, &j->res, j->user);
+  }
+  atomic_set(&dfu_busy, 0);
 }
 
 static void handle_cmd(const struct cmd *c) {
@@ -1030,6 +1263,9 @@ static void handle_cmd(const struct cmd *c) {
         idle_deadline = k_uptime_get() + CONFIG_SENSEI_LPWAN_IDLE_S * 1000LL;
       }
     }
+    break;
+  case CMD_DFU:
+    do_dfu();
     break;
   case CMD_SETTINGS:
     /* The next connect configures from the new settings. A connected LoRa or LTE link is
@@ -1100,6 +1336,9 @@ static void check_timers(void) {
   if (idle_deadline && now > idle_deadline) {
     idle_action();
   }
+  if (dfu_until && now > dfu_until) {
+    dfu_session_end("no request for a while"); /* the shield keeps its transfer: begin with resume continues it */
+  }
 }
 
 static void thread_fn(void *a, void *b, void *c) {
@@ -1124,6 +1363,9 @@ static void thread_fn(void *a, void *b, void *c) {
     }
     if (idle_deadline && idle_deadline < next) {
       next = idle_deadline;
+    }
+    if (dfu_until && dfu_until < next) {
+      next = dfu_until;
     }
     k_timeout_t to = next == INT64_MAX ? K_FOREVER : K_MSEC(MAX(next - now, 1));
 
@@ -1172,6 +1414,10 @@ uint32_t sensei_lpwan_lora_retry_after_ms(void) {
 bool sensei_lpwan_radio_ready(sensei_Radio r) {
   lpwan_tech_t want = lpwan_tech_of_radio(r);
 
+  if (atomic_get(&dfu_active)) {
+    return false; /* an update of the shield holds the link: on_up comes when it ends */
+  }
+
   if (r == sensei_Radio_RADIO_LORA && sensei_lpwan_lora_retry_after_ms() != 0) {
     return false; /* refused for the duty cycle: do not wake the shield, on_up comes when it may be tried again */
   }
@@ -1196,6 +1442,9 @@ uint32_t sensei_lpwan_lora_mtu(void) {
 int sensei_lpwan_radio_send(sensei_Radio r, const uint8_t *chunk, size_t len, void (*done)(int, void *), void *user) {
   if (len == 0 || len > sizeof(send_buf)) {
     return -EINVAL;
+  }
+  if (atomic_get(&dfu_active)) {
+    return -EBUSY;
   }
   if (r == sensei_Radio_RADIO_LORA) {
     const struct sensei_lpwan_config st = cfg_get();
@@ -1245,6 +1494,7 @@ int sensei_lpwan_init(const struct sensei_lpwan_hooks *h, const struct sensei_lp
   k_mutex_init(&bus_lock);
   k_work_init(&flush_work, flush_fn);
   k_work_init(&send_done_work, send_done_fn);
+  k_work_init(&dfu_job.work, dfu_done_fn);
   k_work_init_delayable(&retry_work, retry_fn);
   k_work_init(&time_item.work, time_work);
   lpwan_sm_init(&sm);
@@ -1280,6 +1530,38 @@ int sensei_lpwan_init(const struct sensei_lpwan_hooks *h, const struct sensei_lp
   k_thread_name_set(&thread, "lpwan");
   LOG_INF("LPWAN client ready, shield off");
   return 0;
+}
+
+/* ---- update of the shield: API ---- */
+
+int sensei_lpwan_dfu_submit(const sensei_LpwanRequest *req, sensei_lpwan_dfu_done_fn done, void *user) {
+  if (req->which_body < sensei_LpwanRequest_dfu_begin_tag || req->which_body > sensei_LpwanRequest_dfu_confirm_tag) {
+    return -EINVAL;
+  }
+  if (!atomic_cas(&dfu_busy, 0, 1)) {
+    return -EBUSY;
+  }
+  dfu_job.req = *req;
+  dfu_job.done = done;
+  dfu_job.user = user;
+  if (post(CMD_DFU, sensei_Radio_RADIO_BLE, false) != 0) {
+    atomic_set(&dfu_busy, 0);
+    return -EBUSY;
+  }
+  return 0;
+}
+
+bool sensei_lpwan_dfu_active(void) { return atomic_get(&dfu_active) != 0; }
+
+int sensei_lpwan_shield_version(sensei_LpwanVersion *out) {
+  k_spinlock_key_t k = k_spin_lock(&ver_lock);
+  bool ok = shield_ver_valid;
+
+  if (ok) {
+    *out = shield_ver;
+  }
+  k_spin_unlock(&ver_lock, k);
+  return ok ? 0 : -ENODATA;
 }
 
 int sensei_lpwan_lora_provision(const sensei_LoraProvision *k) {

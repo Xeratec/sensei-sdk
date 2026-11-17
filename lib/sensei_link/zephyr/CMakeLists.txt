@@ -10,6 +10,7 @@ set(SENSEI_LINK_DIR ${CMAKE_CURRENT_LIST_DIR}/..)
 zephyr_library_named(sensei_link)
 zephyr_library_sources(
   ${SENSEI_LINK_DIR}/src/crc.c
+  ${SENSEI_LINK_DIR}/src/sha256.c
   ${SENSEI_LINK_DIR}/src/cobs.c
   ${SENSEI_LINK_DIR}/src/stream.c
   ${SENSEI_LINK_DIR}/src/spi.c

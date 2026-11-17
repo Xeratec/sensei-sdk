@@ -13,8 +13,11 @@ sensei.LoraProvision.dev_eui   max_size:8 fixed_length:true
 sensei.LoraProvision.join_eui  max_size:8 fixed_length:true
 sensei.LoraProvision.app_key   max_size:16 fixed_length:true
 sensei.Send.payload            max_size:1024
+sensei.DfuBegin.sha256         max_size:32 fixed_length:true
+sensei.DfuChunk.data           max_size:512
 sensei.DownlinkRx.payload      max_size:1024
 sensei.LpwanVersion.modem      max_size:25
+sensei.LpwanVersion.lte_modem  max_size:25
 sensei.LpwanError.message      max_size:49
 
 # String max_size counts the terminating NUL: max_size 65 means 64 characters.

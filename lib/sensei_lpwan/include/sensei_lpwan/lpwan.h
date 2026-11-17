@@ -61,7 +61,8 @@ struct sensei_lpwan_config {
 struct sensei_lpwan_hooks {
   /** Work queue for the callbacks. NULL: the system work queue. */
   struct k_work_q *wq;
-  /** LoRaWAN joined or LTE connected: the uplink queue may send now. */
+  /** LoRaWAN joined or LTE connected: the uplink queue may send now. Also called (radio RADIO_BLE) when an update of
+   * the shield ends and the link is free again. */
   void (*on_up)(sensei_Radio radio);
   /** A downlink arrived (an encoded app message, not decoded here). data is valid during the call only. */
   void (*on_downlink)(const uint8_t *data, size_t len, sensei_Radio radio);
@@ -142,6 +143,46 @@ int sensei_lpwan_query_version(sensei_LpwanVersion *out, uint32_t timeout_ms);
  * exchange with the shield; this is internal. While GAP9 holds the bus the level shifter of the shield is
  * off.
  */
+
+/**
+ * Update of the shield (the nRF9151 app, or its modem firmware). The host sends the image to the nRF5340, which relays
+ * it piece by piece to the nRF9151 and keeps none of it. The messages are the dfu_* requests of lpwan.proto; the rules
+ * and the flow are in sensei_lpwan/lpwan_dfu.h. What the client adds:
+ *
+ * - dfu_begin opens a session that holds the link: no data uplink is sent and the shield is not powered down
+ *   (sensei_lpwan_radio_ready() is false, sensei_lpwan_radio_send() gives -EBUSY), GAP9 is kept off the shared bus
+ *   (BUS_DFU), and an active radio is released first. The session ends with dfu_abort, after the new app was started,
+ *   when no transfer is open any more, or after 120 s without a request (the shield keeps the transfer: begin with
+ *   `resume` goes on). on_up (radio RADIO_BLE) then tells the app that data may go again.
+ * - A request that gets no answer fails with an error code; ask dfu_status for the offset and continue there.
+ * - dfu_apply of the app: the shield marks its second slot for a test boot, then the client cuts the shield power,
+ * waits 300 ms, switches it on and waits up to 180 s for the new image (MCUboot swaps first). It reports the new
+ * version. The new image runs on trial and confirms itself after the client accepted its handshake (protocol version,
+ * see LpwanVersion.trial); a new image with another protocol is not accepted and MCUboot goes back to the old one at
+ * the next power-up.
+ * - Modem: dfu_apply only starts the update (minutes); ask dfu_status until the state is DFU_STATE_DONE or FAILED.
+ */
+struct sensei_lpwan_dfu_result {
+  sensei_LpwanResult result; /* the shield's verdict (LPWAN_OK: accepted); the status tells why if it is not */
+  sensei_DfuStatus status;
+  bool has_version;
+  sensei_LpwanVersion version; /* with dfu_status, dfu_confirm and (app) dfu_apply, once the new image answers */
+};
+
+/** done(err, res, user) runs on hooks.wq. err 0: the shield answered (see res->result); -EBUSY: another request is in
+ *  flight, a send or connect is running, or GAP9 holds the bus; -ENOTSUP: the shield app cannot be updated (old
+ * firmware) or lacks the target; -EPROTONOSUPPORT: it speaks another protocol; -ETIMEDOUT, -EIO: the link failed. */
+typedef void (*sensei_lpwan_dfu_done_fn)(int err, const struct sensei_lpwan_dfu_result *res, void *user);
+
+/** Relay one dfu_* request (dfu_begin ... dfu_confirm of LpwanRequest). The request is copied. Returns 0 if it was
+ *  queued, -EINVAL for another request, -EBUSY while one is in flight. */
+int sensei_lpwan_dfu_submit(const sensei_LpwanRequest *req, sensei_lpwan_dfu_done_fn done, void *user);
+
+/** True while an update session holds the link. */
+bool sensei_lpwan_dfu_active(void);
+
+/** The version the shield reported at the last handshake (the node puts it in Status). -ENODATA: not read yet. */
+int sensei_lpwan_shield_version(sensei_LpwanVersion *out);
 
 /** One-line state for the shell and status messages. */
 const char *sensei_lpwan_state_str(void);

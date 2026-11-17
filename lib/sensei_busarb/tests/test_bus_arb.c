@@ -97,6 +97,16 @@ int main(void) {
   CHECK(!bus_arb_try(&a, BUS_SPI, 5500, 100));
   CHECK(bus_arb_try(&a, BUS_SPI, 6000, 100));
 
+  /* A shield update keeps GAP9 out for its whole time, and GAP9 keeps the update from starting. */
+  bus_arb_init(&a);
+  CHECK(bus_arb_try(&a, BUS_DFU, 0, 60000));
+  CHECK(bus_arb_try(&a, BUS_SPI, 10, 100)); /* the exchanges of the update itself */
+  CHECK(!bus_arb_try(&a, BUS_GAP9, 20, 1000));
+  bus_arb_release(&a, BUS_DFU);
+  bus_arb_release(&a, BUS_SPI);
+  CHECK(bus_arb_try(&a, BUS_GAP9, 30, 1000));
+  CHECK(!bus_arb_try(&a, BUS_DFU, 40, 60000));
+
   /* Releasing a user that holds nothing is harmless. */
   bus_arb_init(&a);
   bus_arb_release(&a, BUS_LTE_TX);

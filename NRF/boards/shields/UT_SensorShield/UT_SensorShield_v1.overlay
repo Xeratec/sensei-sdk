@@ -68,7 +68,7 @@
 		compatible = "regulator-fixed";
 		regulator-name = "scd41-vdd";
 		enable-gpios = <&gpio0 4 GPIO_ACTIVE_HIGH>;
-		startup-delay-us = <50000>;
+		startup-delay-us = <1000000>; /* power-up time of the SCD4x, datasheet 3.1 */
 	};
 
 	scd41_i2c_sw: regulator-scd41-i2c-sw {

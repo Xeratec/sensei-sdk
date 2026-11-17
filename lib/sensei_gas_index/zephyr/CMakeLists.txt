@@ -14,4 +14,8 @@ zephyr_library_sources(
   ${SENSEI_GAS_INDEX_VENDOR}/sensirion_gas_index_algorithm.c
 )
 zephyr_include_directories(${SENSEI_GAS_INDEX_DIR}/include ${SENSEI_GAS_INDEX_VENDOR})
-zephyr_library_link_libraries(m)
+# libm of the toolchain libc. Not with the native libc (native_sim): the host libm.a of an x86_64 Linux needs the
+# loader's CPU feature symbols and does not link there; the host libc brings its libm anyway.
+if(NOT CONFIG_NATIVE_LIBC)
+  zephyr_library_link_libraries(m)
+endif()

@@ -1,0 +1,10 @@
+# SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+# SPDX-License-Identifier: Apache-2.0
+#
+# Authors:
+# - Philip Wiese <wiesep@iis.ee.ethz.ch>
+
+config SENSEI_PWR_MATH
+	bool "SENSEI power math (battery charge estimate, button press detection)"
+	help
+	  Pure logic of lib/sensei_pwr_math. The power module (SENSEI_PWR) selects it.

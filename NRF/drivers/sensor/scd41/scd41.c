@@ -125,7 +125,7 @@ static int scd41_power_up(const struct device *dev) {
   d->asleep = false;
   if (!d->probed) {
     d->present = check_chip(cfg) == 0;
-    d->probed = true;
+    d->probed = d->present; /* a chip that did not answer is probed again on the next power-up */
   }
   if (!d->present) {
     (void)sensei_supply_disable(&cfg->supply);

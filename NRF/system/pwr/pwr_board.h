@@ -1,7 +1,7 @@
 /*
  * ----------------------------------------------------------------------
  *
- * File: pwr_common.h
+ * File: pwr_board.h
  *
  * Last edited: 30.10.2025
  *
@@ -27,13 +27,17 @@
  * limitations under the License.
  */
 
-#ifndef PWR_COMMON_H_
-#define PWR_COMMON_H_
+#ifndef PWR_BOARD_H_
+#define PWR_BOARD_H_
 
-#define PWR_MUTEX_TIMEOUT K_MSEC(50)
+#include "max77654.h"
 
-extern struct k_mutex pwr_mutex;
+/*
+ * For the board hooks pwr_bsp_init() and pwr_bsp_start() (bsp/pwr_bsp.h of the application) only. They run with the
+ * power module's PMIC handle: change its conf, then call max77654_config(). Applications use pwr/pwr.h.
+ */
 
-extern struct max77654_h pmic_h;
+/** @brief PMIC driver handle of the power module. */
+struct max77654_h *pwr_pmic(void);
 
-#endif /* PWR_COMMON_H_ */
+#endif /* PWR_BOARD_H_ */

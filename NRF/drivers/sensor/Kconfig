@@ -15,6 +15,7 @@ config LIS2DUXS12_EXTRA
 	default y
 	depends on DT_HAS_ST_LIS2DUXS12_ENABLED
 	depends on LIS2DUX12
+	select SENSEI_SENSOR_MATH
 	help
 	  Helpers for what the Zephyr LIS2DUX12 driver lacks. They use the register library of the
 	  Zephyr ST HAL (hal_st), which the Zephyr driver already selects.

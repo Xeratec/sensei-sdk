@@ -19,6 +19,8 @@
         gpio_ext_as7331_ready: pca6416a_20p4 {
             gpios = <&pca6416a_20 4 GPIO_ACTIVE_HIGH>;
         };
+        /* Camera clock gate. The pin is active low in this tree: logical active (pin low) gates the clock,
+         * logical inactive runs it. The hog below gates it from the moment the expander starts. */
         gpio_ext_hm0360_clk_en: pca6416a_20p5 {
             gpios = <&pca6416a_20 5 GPIO_ACTIVE_LOW>;
         };
@@ -145,6 +147,13 @@
         gpio-controller;
         ngpios = < 16 >;
         #gpio-cells = < 2 >;
+
+        /* HM0360 camera clock off (gated) until the GAP9 camera job needs it. */
+        hm0360-clk-gate-hog {
+            gpio-hog;
+            gpios = <5 GPIO_ACTIVE_LOW>;
+            output-high;
+        };
     };
 
     /* SCD41 CO2 sensor on I2C_B, 0x62: rail P0.04, bus switch P12. Driver in NRF/drivers/sensor. */

@@ -14,9 +14,11 @@ menuconfig SENSEI_PWR
 	bool "Enable the SENSEI Power Subsystem"
 	default n
 	depends on SENSEI
+	select SENSEI_PWR_MATH
 	help
 	  Enable the SENSEI Power Subsystem.
 
+rsource "pwr/Kconfig"
 rsource "crypto/Kconfig"
 rsource "ota/Kconfig"
 rsource "marker/Kconfig"

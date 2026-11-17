@@ -27,13 +27,14 @@
  * limitations under the License.
  */
 
-#include "pwr/thread_pwr.h"
 #include "pwr/pwr.h"
-#include "pwr/pwr_common.h"
+#include "pwr/pwr_priv.h"
 
+#include "config/pmic_default.h"
 #include "config/tasks.h"
 
 #include "max77654.h"
+#include "sensei_pwr_math.h"
 
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/kernel.h>
@@ -41,6 +42,10 @@
 
 #include <stdio.h>
 #include <string.h>
+
+#ifdef CONFIG_SENSEI_GAP9
+#include "sensei_gap9/gap9_zephyr.h"
+#endif
 
 // ======== Definitions/Variables ==================================================================
 
@@ -57,7 +62,9 @@ LOG_MODULE_REGISTER(thread_pwr);
  */
 static const struct gpio_dt_spec gpio_pmic_irq = GPIO_DT_SPEC_GET(GPIO_NODE_pmic_irq, gpios);
 static const struct gpio_dt_spec gpio_soft_nrst = GPIO_DT_SPEC_GET(GPIO_NODE_soft_nrst, gpios);
+#ifndef CONFIG_SENSEI_GAP9
 static const struct gpio_dt_spec gpio_gap9_pwr_sel = GPIO_DT_SPEC_GET(GPIO_NODE_gap9_pwr, gpios);
+#endif
 
 // Semaphore to indicate that an update should be performed:
 K_SEM_DEFINE(pmic_update_sem, 0, 2);
@@ -78,8 +85,13 @@ static void pmic_int_cb_handler(const struct device *port, struct gpio_callback 
 static struct gpio_callback softRst_int_cb;
 static void softRst_int_cb_handler(const struct device *port, struct gpio_callback *cb, gpio_port_pins_t pins);
 
-static int64_t last_keydown_ms;
-static int64_t last_keyup_ms;
+// Button: key-down is the nEN falling edge (flag read from the PMIC), key-up is the Soft_nRST edge. The interrupt
+// handlers only store a time and wake the thread. pmic_irq_ms is the time of the last PMIC interrupt, which is
+// the time of the key-down when the flags say nEN fell.
+static struct sensei_button button;
+static volatile uint32_t pmic_irq_ms;
+static volatile uint32_t keyup_ms;
+static atomic_t keyup_pending;
 
 // Check the current PMIC/charger status:
 static int check_status();
@@ -104,6 +116,11 @@ struct max77654_device {
 
 struct max77654_device pmic;
 
+// The interrupt flags clear when read: they count as events as soon as the read worked, even if the status read after
+// it failed.
+static bool flags_valid;
+static bool status_valid;
+
 // Last status and event callback, see pwr.h:
 static struct pwr_status pwr_status_last;
 static struct k_spinlock pwr_status_lock;
@@ -121,17 +138,9 @@ static uint32_t collect_events();
 int thread_pwr_init() {
   pmic.pmic_h = &pmic_h;
 
-  // Setup PMIC int pin interrupt:
-  if (gpio_pin_interrupt_configure_dt(&gpio_pmic_irq, GPIO_INT_EDGE_FALLING) < 0) {
-    LOG_ERR("GPIO Int. config error!");
-    return -1;
-  }
-
-  // Setup soft reset pin:
-  if (gpio_pin_interrupt_configure_dt(&gpio_soft_nrst, GPIO_INT_EDGE_RISING) < 0) {
-    LOG_ERR("GAP9 EN GPIO configuration error");
-    return -1;
-  }
+  // The button state starts clean; the interrupts are enabled last, after the callbacks:
+  memset(&button, 0, sizeof(button));
+  atomic_clear(&keyup_pending);
 
   // Create a callback:
   gpio_init_callback(&pmic_int_cb, pmic_int_cb_handler, BIT(gpio_pmic_irq.pin));
@@ -148,6 +157,18 @@ int thread_pwr_init() {
     return -1;
   }
 
+  // Setup PMIC int pin interrupt:
+  if (gpio_pin_interrupt_configure_dt(&gpio_pmic_irq, GPIO_INT_EDGE_FALLING) < 0) {
+    LOG_ERR("GPIO Int. config error!");
+    return -1;
+  }
+
+  // Setup soft reset pin:
+  if (gpio_pin_interrupt_configure_dt(&gpio_soft_nrst, GPIO_INT_EDGE_RISING) < 0) {
+    LOG_ERR("GAP9 EN GPIO configuration error");
+    return -1;
+  }
+
   check_battery();
 
   return 0;
@@ -159,9 +180,6 @@ static void thread_pwr(void *_a, void *_b, void *_c) {
   // Keep track of the last time the charger was re-configured (millisec):
   int64_t last_reconfig_ms = k_uptime_get();
 
-  last_keydown_ms = 0;
-  last_keyup_ms = 0;
-
   while (1) {
 
     int err = 0;
@@ -172,52 +190,54 @@ static void thread_pwr(void *_a, void *_b, void *_c) {
     if (k_mutex_lock(&pwr_mutex, PWR_MUTEX_TIMEOUT) < 0) {
       LOG_ERR("Power deadlock!");
       err = -1;
-      goto skip_update;
-    }
-
-    // Grab current PMIC status, issuing charger on / charger off events:
-    if (check_status() < 0) {
-      err = -1;
-    }
-
-    // Measure battery level, issuing battery ok / critical / low events:
-    if (check_battery() < 0) {
-      err = -1;
-    }
-
-    // Handle interrupts from PMIC
-    if (handle_interrupts() < 0) {
-      err = -1;
-    }
-
-    // Snapshot for pwr_get_status() and the event callback:
-    if (err == 0) {
-      events = collect_events();
-    }
-
-    // Handle button press that are longer than 2 seconds
-    if (last_keyup_ms - last_keydown_ms > THREAD_PWR_SOFT_RESET_LATENCY_MS) {
-      LOG_INF("Button pressed for more than 2 seconds");
-      last_keydown_ms = 0;
-      last_keyup_ms = 0;
-      pwr_kill();
-    }
-
-    // Re-apply charger configuration periodically. Recommended by PMIC Datasheet.
-    if ((k_uptime_get() - last_reconfig_ms) > THREAD_PWR_CHARGER_RECONIFG_PERIOD_MS) {
-      last_reconfig_ms = k_uptime_get();
-      LOG_INF("Re-applying PMIC configuration");
-      if (reapply_config() < 0) {
+    } else {
+      // Grab current PMIC status, issuing charger on / charger off events:
+      if (check_status() < 0) {
         err = -1;
-      };
+      }
+
+      // Measure battery level, issuing battery ok / critical / low events:
+      if (check_battery() < 0) {
+        err = -1;
+      }
+
+      // Handle interrupts from PMIC
+      if (handle_interrupts() < 0) {
+        err = -1;
+      }
+
+      // Snapshot for pwr_get_status() and the event callback. The flags were read (and cleared in the PMIC)
+      // even when something after them failed, so their events must not be dropped:
+      if (flags_valid) {
+        events = collect_events();
+      }
+
+      // nEN pressed (key-down), Soft_nRST edge (key-up). A press longer than 2 seconds switches off and reboots:
+      if (pmic.flags.nen_f) {
+        sensei_button_down(&button, pmic_irq_ms);
+      }
+      if (atomic_cas(&keyup_pending, 1, 0)) {
+        if (sensei_button_up(&button, keyup_ms, THREAD_PWR_SOFT_RESET_LATENCY_MS) == SENSEI_BUTTON_LONG) {
+          LOG_INF("Button pressed for more than 2 seconds");
+          pwr_off_and_reboot();
+        }
+      }
+
+      // Re-apply charger configuration periodically. Recommended by PMIC Datasheet.
+      if ((k_uptime_get() - last_reconfig_ms) > THREAD_PWR_CHARGER_RECONIFG_PERIOD_MS) {
+        last_reconfig_ms = k_uptime_get();
+        LOG_INF("Re-applying PMIC configuration");
+        if (reapply_config() < 0) {
+          err = -1;
+        };
+      }
+
+      k_mutex_unlock(&pwr_mutex);
     }
 
-  skip_update:
     if (err < 0) {
       LOG_ERR("Error in power thread!");
     }
-
-    k_mutex_unlock(&pwr_mutex);
 
     if (events != 0 && pwr_event_cb != NULL) {
       (void)pwr_get_status(&status_copy);
@@ -233,31 +253,37 @@ static void thread_pwr(void *_a, void *_b, void *_c) {
 
 static void pmic_int_cb_handler(const struct device *port, struct gpio_callback *cb, gpio_port_pins_t pins) {
   LOG_DBG("PMIC interrupt!");
-  last_keydown_ms = k_uptime_get();
+  pmic_irq_ms = k_uptime_get_32();
   k_sem_give(&pmic_update_sem);
 }
 
 static void softRst_int_cb_handler(const struct device *port, struct gpio_callback *cb, gpio_port_pins_t pins) {
   LOG_DBG("Soft RST interrupt!");
-  last_keyup_ms = k_uptime_get();
+  keyup_ms = k_uptime_get_32();
+  atomic_set(&keyup_pending, 1);
   k_sem_give(&pmic_update_sem);
 }
 
 static int check_status() {
   // Flags of a failed read must not be taken as new events:
   memset(&pmic.flags, 0, sizeof(pmic.flags));
+  flags_valid = false;
+  status_valid = false;
 
   // Grab pmic flags to clear interrupt:
   if (max77654_get_int_flags(&pmic_h, &pmic.flags) != E_MAX77654_SUCCESS) {
     LOG_ERR("pmic get_int_flags failed!");
+    memset(&pmic.flags, 0, sizeof(pmic.flags));
     return -1;
   }
+  flags_valid = true;
 
   // Get current status:
   if (max77654_get_stat(&pmic_h, &pmic.status) != E_MAX77654_SUCCESS) {
     LOG_ERR("pmic get_stat failed!");
     return -1;
   }
+  status_valid = true;
 
   // Notify state machine of current charger status:
   // bool chg_active = status.chgin_status != MAX77654_CHGIN_DTLS_UVLO;
@@ -269,6 +295,10 @@ static int check_status() {
 static int handle_interrupts() {
   // Check PMIC interrupt flags if button was pressed:
   if (pmic.flags.nen_f) {
+#ifdef CONFIG_SENSEI_GAP9
+    // The GAP9 link owns the GAP9 rail: it power cycles GAP9 on its own thread and keeps its state right.
+    gap9_link_reset();
+#else
     if (atomic_get(&gap9_pwr_state) == 1) {
       // Reset GAP9
       LOG_WRN("Resetting GAP9");
@@ -284,6 +314,7 @@ static int handle_interrupts() {
     } else {
       LOG_INF("GAP9 is off. Ignoring reset.");
     }
+#endif
   }
 
   return 0;
@@ -421,47 +452,9 @@ static int reapply_config() {
   return 0;
 }
 
-// A battery mV / charge percentage reference point.
-struct reference_point {
-  uint32_t mV;
-  uint32_t perc;
-};
-
-static const struct reference_point perc_ref_points[] = {
-    {.mV = 4200, .perc = 100}, {.mV = 4000, .perc = 85}, {.mV = 3900, .perc = 60}, {.mV = 3700, .perc = 40},
-    {.mV = 3600, .perc = 20},  {.mV = 3500, .perc = 10}, {.mV = 3400, .perc = 5},  {.mV = 3300, .perc = 0},
-};
-
-static const uint32_t perc_ref_points_count = sizeof(perc_ref_points) / sizeof(struct reference_point);
-
 static uint32_t battery_perc_conversion(uint32_t mV) {
-
-  // Edge cases:
-  if (mV > perc_ref_points[0].mV) {
-    return 100;
-  }
-  if (mV <= perc_ref_points[perc_ref_points_count - 1].mV) {
-    return 0;
-  }
-
-  // Find two reference points between which the reading lies:
-  const struct reference_point *ref_high = 0;
-  const struct reference_point *ref_low = 0;
-
-  for (uint32_t i = 1; i < perc_ref_points_count; i++) {
-    if (mV > perc_ref_points[i].mV) {
-      ref_low = &perc_ref_points[i];
-      ref_high = &perc_ref_points[i - 1];
-      break;
-    }
-  }
-  __ASSERT_NO_MSG(ref_high != 0);
-  __ASSERT_NO_MSG(ref_low != 0);
-  __ASSERT_NO_MSG(ref_high->mV >= mV);
-  __ASSERT_NO_MSG(ref_low->mV < mV);
-
-  // Linearly interpolate:
-  return ref_low->perc + ((mV - ref_low->mV) * (ref_high->perc - ref_low->perc)) / (ref_high->mV - ref_low->mV);
+  return sensei_battery_perc(
+      IS_ENABLED(CONFIG_SENSEI_PWR_BATTERY_LIION) ? SENSEI_BATTERY_LIION : SENSEI_BATTERY_LISOCL2, mV);
 }
 
 // ======== Thread Setup ===========================================================================
@@ -508,7 +501,8 @@ static enum pwr_charger_state charger_state_from_dtls(max77654_chg_dtls_t d) {
   }
 }
 
-// Called by the power thread with the power mutex held, after check_status() and check_battery().
+// Called by the power thread with the power mutex held, after check_status() and check_battery(), when the flags
+// were read.
 static uint32_t collect_events() {
   uint32_t events = 0;
   uint32_t mv = (uint32_t)atomic_get(&battery_mV);
@@ -552,10 +546,13 @@ static uint32_t collect_events() {
   k_spinlock_key_t key = k_spin_lock(&pwr_status_lock);
   pwr_status_last.bat_mv = mv;
   pwr_status_last.bat_perc = (uint32_t)atomic_get(&battery_perc);
-  pwr_status_last.charger = charger_state_from_dtls(pmic.status.charger_status);
-  pwr_status_last.chgin = (enum pwr_chgin_state)pmic.status.chgin_status;
-  pwr_status_last.charging = pmic.status.charging_active;
-  pwr_status_last.valid = true;
+  if (status_valid) {
+    // A failed status read keeps the last charger state.
+    pwr_status_last.charger = charger_state_from_dtls(pmic.status.charger_status);
+    pwr_status_last.chgin = (enum pwr_chgin_state)pmic.status.chgin_status;
+    pwr_status_last.charging = pmic.status.charging_active;
+    pwr_status_last.valid = true;
+  }
   k_spin_unlock(&pwr_status_lock, key);
 
   return events;

@@ -50,8 +50,6 @@
 #include <bluetooth/services/nus.h>
 
 #include "pwr/pwr.h"
-#include "pwr/pwr_common.h"
-#include "pwr/thread_pwr.h"
 
 #include "common.h"
 

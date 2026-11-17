@@ -27,7 +27,7 @@
  */
 
 #include "bsp/pwr_bsp.h"
-#include "pwr/pwr_common.h"
+#include "pwr/pwr_board.h"
 
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/kernel.h>
@@ -119,7 +119,7 @@ int pwr_bsp_init() {
 
 int pwr_bsp_start() {
   // Configure PMIC
-  struct max77654_conf *pmic_conf = &pmic_h.conf;
+  struct max77654_conf *pmic_conf = &pwr_pmic()->conf;
 
   pmic_conf->sbb_conf[0].mode = MAX77654_SBB_MODE_BUCKBOOST;
   pmic_conf->sbb_conf[0].peak_current = MAX77654_SBB_PEAK_CURRENT_1A;
@@ -144,7 +144,7 @@ int pwr_bsp_start() {
   pmic_conf->ldo_conf[0].en = MAX77654_REG_ON;
   pmic_conf->ldo_conf[0].output_voltage_mV = 3300;
 
-  max77654_config(&pmic_h);
+  max77654_config(pwr_pmic());
 
   LOG_INF("PMIC configured for UT SensorShield");
 

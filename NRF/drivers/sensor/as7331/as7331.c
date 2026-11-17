@@ -101,7 +101,7 @@ static int as7331_power_up_dev(const struct device *dev) {
   d->powered = true;
   if (!d->probed) {
     d->present = check_chip(cfg, d) == 0;
-    d->probed = true;
+    d->probed = d->present; /* a chip that did not answer is probed again on the next power-up */
   }
   if (!d->present) {
     (void)sensei_supply_disable(&cfg->supply);

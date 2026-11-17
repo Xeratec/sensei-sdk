@@ -61,7 +61,36 @@ static void test_scd41_bh1730(void) {
   CHECK(sensei_bh1730_meas_ms(0xED) == 108); /* 19 * 2.7 ms * 2 = 102.6 + 5 */
 }
 
+static void test_lis2duxs12_wake_ths(void) {
+  uint8_t w, t;
+
+  /* 2 g: fine step 7.81 mg up to 63 steps (492 mg), coarse step 31.24 mg up to 63 steps (1968 mg) */
+  CHECK(sensei_lis2duxs12_wake_ths(2, 100, &w, &t) == 94 && w == 1 && t == 12);
+  CHECK(sensei_lis2duxs12_wake_ths(2, 1, &w, &t) == 8 && w == 1 && t == 1);
+  CHECK(sensei_lis2duxs12_wake_ths(2, 495, &w, &t) == 492 && w == 1 && t == 63);
+  CHECK(sensei_lis2duxs12_wake_ths(2, 500, &w, &t) == 500 && w == 0 && t == 16); /* was 64 fine steps, wrapped to 0 */
+  CHECK(sensei_lis2duxs12_wake_ths(2, 600, &w, &t) == 594 && w == 0 && t == 19); /* was 76 fine steps */
+  CHECK(sensei_lis2duxs12_wake_ths(2, 1000, &w, &t) == 1000 && w == 0 && t == 32);
+  CHECK(sensei_lis2duxs12_wake_ths(2, 2000, &w, &t) == 1968 && w == 0 && t == 63); /* capped */
+  CHECK(sensei_lis2duxs12_wake_ths(2, 60000, &w, &t) == 1968 && w == 0 && t == 63);
+  CHECK(sensei_lis2duxs12_wake_ths(16, 100, &w, &t) == 63 && w == 1 && t == 1);
+  CHECK(sensei_lis2duxs12_wake_ths(0, 100, &w, &t) == 0);
+
+  /* the field never exceeds 6 bits, and the actual value follows the request up to the cap */
+  for (uint8_t fs = 2; fs <= 16; fs *= 2) {
+    uint32_t prev = 0;
+    for (uint32_t mg = 1; mg <= 20000; mg++) {
+      uint32_t used = sensei_lis2duxs12_wake_ths(fs, mg, &w, &t);
+      CHECK(t >= 1 && t <= 63);
+      CHECK(used >= prev);
+      CHECK(used <= mg + 1u || t == 1); /* rounds down, except the minimum of one step */
+      prev = used;
+    }
+  }
+}
+
 int main(void) {
+  test_lis2duxs12_wake_ths();
   test_sgp41();
   test_as7331();
   test_scd41_bh1730();

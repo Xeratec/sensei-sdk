@@ -42,8 +42,6 @@
 #include <zephyr/usb/usbd.h>
 
 #include "pwr/pwr.h"
-#include "pwr/pwr_common.h"
-#include "pwr/thread_pwr.h"
 
 /* 1000 msec = 1 sec */
 #define SLEEP_TIME_MS 3000
@@ -77,9 +75,7 @@ int main(void) {
   while (1) {
     k_msleep(SLEEP_TIME_MS);
 
-    k_mutex_lock(&pwr_mutex, K_FOREVER);
-    measure_voltages();
-    k_mutex_unlock(&pwr_mutex);
+    pwr_log_voltages();
   }
   return 0;
 }

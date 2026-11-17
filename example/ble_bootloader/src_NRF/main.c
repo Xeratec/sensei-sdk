@@ -46,8 +46,6 @@
 #include <zephyr/usb/usbd.h>
 
 #include "pwr/pwr.h"
-#include "pwr/pwr_common.h"
-#include "pwr/thread_pwr.h"
 #include <zephyr/storage/flash_map.h>
 
 #include "common.h"

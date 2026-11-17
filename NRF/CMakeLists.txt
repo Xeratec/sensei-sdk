@@ -16,6 +16,7 @@ add_subdirectory_ifdef(CONFIG_SENSEI_DELTA ${CMAKE_CURRENT_LIST_DIR}/../lib/sens
 add_subdirectory_ifdef(CONFIG_SENSEI_SECURE ${CMAKE_CURRENT_LIST_DIR}/../lib/sensei_secure/zephyr sensei_secure)
 add_subdirectory_ifdef(CONFIG_SENSEI_GAS_INDEX ${CMAKE_CURRENT_LIST_DIR}/../lib/sensei_gas_index/zephyr sensei_gas_index)
 add_subdirectory_ifdef(CONFIG_SENSEI_SENSOR_MATH ${CMAKE_CURRENT_LIST_DIR}/../lib/sensei_sensor_math/zephyr sensei_sensor_math)
+add_subdirectory_ifdef(CONFIG_SENSEI_PWR_MATH ${CMAKE_CURRENT_LIST_DIR}/../lib/sensei_pwr_math/zephyr sensei_pwr_math)
 
 target_include_directories_ifdef(CONFIG_SENSEI app PRIVATE
     system

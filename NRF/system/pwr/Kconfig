@@ -1,0 +1,55 @@
+# SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+# SPDX-License-Identifier: Apache-2.0
+#
+# Authors:
+# - Philip Wiese <wiesep@iis.ee.ethz.ch>
+
+if SENSEI_PWR
+
+choice SENSEI_PWR_BATTERY
+	prompt "Battery"
+	default SENSEI_PWR_BATTERY_LISOCL2
+	help
+	  The battery of the board. One choice sets the charger, the charge table and the level thresholds,
+	  so they cannot disagree.
+
+config SENSEI_PWR_BATTERY_LISOCL2
+	bool "Li-SOCl2 primary cell, 3.6 V (Saft LS33600, the SENSEI battery)"
+	help
+	  Not rechargeable: the charger of the MAX77654 is off (charging a primary cell is dangerous).
+	  Charge table for a Li-SOCl2 cell. The input (USB) still powers the board.
+
+config SENSEI_PWR_BATTERY_LIION
+	bool "Li-ion or LiPo cell, 4.2 V"
+	help
+	  The charger is on with a constant voltage of 4.2 V and 15 mA (raise the current in
+	  config/pmic_default.h for a larger cell). Charge table for a 4.2 V cell.
+
+endchoice
+
+config SENSEI_PWR_BAT_CRITICAL_MV
+	int "Battery critical level (mV)"
+	default 3100 if SENSEI_PWR_BATTERY_LIION
+	default 2900
+
+config SENSEI_PWR_BAT_LOW_MV
+	int "Battery low level (mV)"
+	default 3300 if SENSEI_PWR_BATTERY_LIION
+	default 3100
+
+config SENSEI_PWR_BAT_OK_MV
+	int "Battery ok level (mV)"
+	default 3500 if SENSEI_PWR_BATTERY_LIION
+	default 3300
+
+config SENSEI_PWR_BOOT_RAILS
+	bool "Turn the PMIC rails on at boot, before the shield drivers start"
+	default y if SHIELD_UT_SENSORSHIELD
+	help
+	  The chips of the sensor shield (PCA6416A expander, ISM330DHCX) are powered by the PMIC rails (3.3 V, 2.8 V,
+	  1.2 V, LDO 3.3 V). Their drivers start at POST_KERNEL, long before main(), so the power module resets the
+	  PMIC and switches the rails on in a SYS_INIT hook between the I2C bus and the expander. pwr_start() and the
+	  application's board hook do not cycle the rails again. Without it the rails stay off until the board hook
+	  turns them on.
+
+endif # SENSEI_PWR

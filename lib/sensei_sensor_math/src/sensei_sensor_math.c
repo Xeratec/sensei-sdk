@@ -61,3 +61,28 @@ uint32_t sensei_bh1730_meas_ms(uint8_t itime) {
   /* Tint = 2.7 ms * (256 - ITIME) per channel, both channels measured: x2, plus margin. */
   return ((256u - itime) * 27u * 2u + 9u) / 10u + 5u;
 }
+
+uint32_t sensei_lis2duxs12_wake_ths(uint8_t fs_g, uint32_t threshold_mg, uint8_t *weight, uint8_t *ths) {
+  uint32_t fine_x100 = (uint32_t)fs_g * 1000u * 100u / 256u; /* step in 0.01 mg */
+  uint32_t coarse_x100 = fine_x100 * 4u;
+  uint32_t th_x100 = threshold_mg * 100u;
+  uint32_t n;
+
+  if (fine_x100 == 0) {
+    *weight = 1;
+    *ths = 0;
+    return 0;
+  }
+  if (th_x100 / fine_x100 <= 63u) {
+    n = th_x100 / fine_x100;
+    n = n < 1u ? 1u : n;
+    *weight = 1;
+    *ths = (uint8_t)n;
+    return (n * fine_x100 + 50u) / 100u;
+  }
+  n = th_x100 / coarse_x100;
+  n = n > 63u ? 63u : n;
+  *weight = 0;
+  *ths = (uint8_t)n;
+  return (n * coarse_x100 + 50u) / 100u;
+}

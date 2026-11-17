@@ -38,8 +38,6 @@
 #include <zephyr/usb/usbd.h>
 
 #include "pwr/pwr.h"
-#include "pwr/pwr_common.h"
-#include "pwr/thread_pwr.h"
 
 /* 1000 msec = 1 sec */
 #define SLEEP_TIME_MS 3000

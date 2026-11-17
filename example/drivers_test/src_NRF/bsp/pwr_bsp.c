@@ -16,7 +16,7 @@
 #include <zephyr/logging/log.h>
 
 #include "max77654.h"
-#include "pwr/pwr_common.h"
+#include "pwr/pwr_board.h"
 
 LOG_MODULE_REGISTER(pwr_bsp, LOG_LEVEL_INF);
 
@@ -40,7 +40,7 @@ int pwr_bsp_init() {
 
 /* Rails as in the node firmware: SBB0 3.3 V, SBB1 2.8 V, SBB2 1.2 V, LDO0 3.3 V. */
 int pwr_bsp_start() {
-  struct max77654_conf *c = &pmic_h.conf;
+  struct max77654_conf *c = &pwr_pmic()->conf;
   static const uint16_t sbb_mv[3] = {3300, 2800, 1200};
 
   for (int i = 0; i < 3; i++) {
@@ -55,7 +55,7 @@ int pwr_bsp_start() {
   c->ldo_conf[0].en = MAX77654_REG_ON;
   c->ldo_conf[0].output_voltage_mV = 3300;
 
-  if (max77654_config(&pmic_h) != E_MAX77654_SUCCESS) {
+  if (max77654_config(pwr_pmic()) != E_MAX77654_SUCCESS) {
     LOG_ERR("PMIC configuration failed");
     return -1;
   }

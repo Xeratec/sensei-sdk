@@ -1,7 +1,7 @@
 /*
  * ----------------------------------------------------------------------
  *
- * File: thread_pwr.h
+ * File: pwr_priv.h
  *
  * Last edited: 30.10.2025
  *
@@ -27,57 +27,58 @@
  * limitations under the License.
  */
 
-#ifndef THREAD_PWR_H_
-#define THREAD_PWR_H_
+#ifndef PWR_PRIV_H_
+#define PWR_PRIV_H_
+
+/* Internal to NRF/system/pwr (pwr.c and thread_pwr.c). Applications use pwr/pwr.h. */
 
 #include "zephyr/kernel.h"
+
+#include "max77654.h"
+
+#define PWR_MUTEX_TIMEOUT K_MSEC(50)
+
+/** Held to operate on the PMIC. */
+extern struct k_mutex pwr_mutex;
+
+/** PMIC driver handle. */
+extern struct max77654_h pmic_h;
 
 /**
  * @brief Initialise the power thread
  * @note pwr mutex must be held when this function is called.
  * @return negative on error, 0 otherwise.
  */
-int thread_pwr_init();
+int thread_pwr_init(void);
 
 /**
  * @brief Start the pwr thread.
  * @note May only be called once.
  */
-void thread_pwr_start();
+void thread_pwr_start(void);
 
 /**
- * @brief Measure currents
- * @note pwr mutex must be held when this function is called.
+ * @brief Log the currents. @note pwr mutex must be held.
  * @return negative on error, 0 otherwise.
  */
-int measure_currents();
+int measure_currents(void);
 
 /**
- * @brief Measure battery voltage and percentage.
- * @note pwr mutex must be held when this function is called.
+ * @brief Log the voltages. @note pwr mutex must be held.
  * @return negative on error, 0 otherwise.
  */
-int measure_voltages();
+int measure_voltages(void);
 
-/**
- * @brief Current battery charge state, in percent.
- * @note 0 before first read, which is performed by thread_pwr_init.
- */
+/** @brief Current battery charge state, in percent. 0 before the first reading. */
 extern atomic_t battery_perc;
 
-/**
- * @brief Current battery voltage, in millivolts
- * @note 0 before first read, which is performed by thread_pwr_init.
- */
+/** @brief Current battery voltage, in millivolts. 0 before the first reading. */
 extern atomic_t battery_mV;
 
-/**
- * @brief Current GAP9 power state.
- * @note 0 before first read, which is performed by thread_pwr_init.
- */
+/** @brief Current GAP9 power state (1 on, 0 off). */
 extern atomic_t gap9_pwr_state;
 
 /** @brief Power thread ID */
 extern k_tid_t pwr_t;
 
-#endif /* THREAD_PWR_H_ */
+#endif /* PWR_PRIV_H_ */

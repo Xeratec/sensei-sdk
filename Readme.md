@@ -98,7 +98,7 @@ to configure the configuration with a graphical interface in the terminal.
 
 
 ## BareMetal Drivers
-- **MAX77654**: Analog Devices Power Management IC. The power module (`CONFIG_SENSEI_PWR`) gives `pwr_get_status()` (battery voltage through the PMIC AMUX on P0.07, charger and input state) and `pwr_set_event_cb()` for nIRQ events (charger, input, button, battery level).
+- **MAX77654**: Analog Devices Power Management IC. The power module (`CONFIG_SENSEI_PWR`) gives `pwr_get_status()` (battery voltage through the PMIC AMUX on P0.07, charger and input state) and `pwr_set_event_cb()` for nIRQ events (charger, input, button, battery level). It switches the PMIC rails on at boot, before the shield chips start, and takes the battery from one Kconfig choice (Li-SOCl2 primary cell by default, charger off), see [NRF/system/pwr](NRF/system/pwr/README.md).
 
 
 ## Zephyr Drivers
@@ -145,7 +145,8 @@ Plain C libraries for nRF (Zephyr), GAP9 and host builds. Each folder has `inclu
 | [lib/sensei_gap9](lib/sensei_gap9/README.md) | `CONFIG_SENSEI_GAP9` | Link between the nRF5340 and GAP9 (jobs and results over SPI, power sequencing); GAP9 side for GAP9 apps |
 | [lib/sensei_busarb](lib/sensei_busarb/README.md) | `CONFIG_SENSEI_BUSARB` | One owner at a time for the shared SPI_A bus and the LTE current peaks |
 | [lib/sensei_gas_index](lib/sensei_gas_index/README.md) | `CONFIG_SENSEI_GAS_INDEX` | VOC and NOx index from SGP41 raw ticks (Sensirion gas index algorithm inside) |
-| [lib/sensei_sensor_math](lib/sensei_sensor_math/README.md) | `CONFIG_SENSEI_SENSOR_MATH` | Unit conversions of the sensor shield drivers (SGP41 ticks, AS7331 uW/cm2, SCD41 ASC hours) |
+| [lib/sensei_sensor_math](lib/sensei_sensor_math/README.md) | `CONFIG_SENSEI_SENSOR_MATH` | Unit conversions of the sensor shield drivers (SGP41 ticks, AS7331 uW/cm2, SCD41 ASC hours, LIS2DUXS12 wake threshold) |
+| [lib/sensei_pwr_math](lib/sensei_pwr_math/README.md) | `CONFIG_SENSEI_PWR_MATH` | Battery charge estimate per chemistry and button press detection of the power module |
 
 ## Applications (`NRF/apps/`)
 - [lpwan_shield](NRF/apps/lpwan_shield/README.md): firmware of the LPWAN shield's nRF9151 (LTE-M, NB-IoT, LoRaWAN over an LR1121). Board `sensei_lpwan_nrf9151/nrf9151/ns`.

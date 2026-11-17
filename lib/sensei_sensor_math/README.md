@@ -8,6 +8,7 @@ firmware and the host tests use the same code.
   and integration time (datasheet DS001047 v4-00, Figure 7).
 - `sensei_scd41_asc_hours()`: SCD41 ASC periods scaled to the single-shot period.
 - `sensei_bh1730_meas_ms()`: BH1730 measurement time for an ITIME value.
+- `sensei_lis2duxs12_wake_ths()`: LIS2DUXS12 wake-up threshold as the 6-bit register field and step weight.
 
 ## Use
 

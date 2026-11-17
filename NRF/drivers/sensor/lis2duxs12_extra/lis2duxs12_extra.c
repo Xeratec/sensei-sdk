@@ -10,6 +10,7 @@
 #include <zephyr/kernel.h>
 
 #include <sensei/drivers/lis2duxs12_extra.h>
+#include <sensei_sensor_math.h>
 
 #include "lis2duxs12_reg.h"
 
@@ -38,18 +39,12 @@ int sensei_lis2duxs12_wake_enable(const struct i2c_dt_spec *i2c, const struct se
   }
   make_ctx(&ctx, i2c);
 
-  /* LSB is FS / 2^6 (coarse) or FS / 2^8 (fine). Use the fine step when the threshold is below 127 of them. */
-  uint32_t fine_mg_x100 = (uint32_t)cfg->fs_g * 1000U * 100U / 256U;
-  uint32_t coarse_mg_x100 = fine_mg_x100 * 4U;
-  uint32_t th_x100 = (uint32_t)cfg->threshold_mg * 100U;
+  /* The threshold field has 6 bits: fine step (FS/256) up to 63, then the coarse step (FS/64), capped. */
+  uint8_t weight, ths;
 
-  if (th_x100 / fine_mg_x100 <= 127U) {
-    wk.wake_ths_weight = 1;
-    wk.wake_ths = (uint8_t)MAX(1U, th_x100 / fine_mg_x100);
-  } else {
-    wk.wake_ths_weight = 0;
-    wk.wake_ths = (uint8_t)MIN(127U, th_x100 / coarse_mg_x100);
-  }
+  (void)sensei_lis2duxs12_wake_ths(cfg->fs_g, cfg->threshold_mg, &weight, &ths);
+  wk.wake_ths_weight = weight;
+  wk.wake_ths = ths;
   wk.wake_dur = dur[cfg->duration];
   wk.sleep_dur = 1;
   wk.wake_enable = LIS2DUXS12_SLEEP_ON;

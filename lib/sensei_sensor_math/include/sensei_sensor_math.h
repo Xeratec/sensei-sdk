@@ -54,6 +54,21 @@ uint16_t sensei_scd41_asc_hours(uint16_t hours_at_5min, uint32_t period_s);
 /** @brief BH1730 time for one measurement of both channels in ms, for the ITIME register value. */
 uint32_t sensei_bh1730_meas_ms(uint8_t itime);
 
+/**
+ * @brief LIS2DUXS12 wake-up threshold as register fields.
+ *
+ * WAKE_UP_THS holds 6 bits (0 to 63). One step is FS/256 with the fine weight (weight 1) or FS/64 with the
+ * coarse one (weight 0). The fine step is used up to 63 steps, then the coarse step, capped at 63 steps. The value
+ * is at least 1 step and rounds down.
+ *
+ * @param fs_g full scale in g (2, 4, 8 or 16)
+ * @param threshold_mg wanted threshold in mg
+ * @param[out] weight value for WAKE_THS_W (1 fine, 0 coarse)
+ * @param[out] ths value for WK_THS (1 to 63)
+ * @return the threshold in mg that the register fields give (rounded), 0 if fs_g is 0
+ */
+uint32_t sensei_lis2duxs12_wake_ths(uint8_t fs_g, uint32_t threshold_mg, uint8_t *weight, uint8_t *ths);
+
 #ifdef __cplusplus
 }
 #endif

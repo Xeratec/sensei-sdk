@@ -12,4 +12,13 @@ config GPIO
 config SENSOR
 	default y
 
+# The expander and the chips behind it are powered by the PMIC rails. The power module switches the rails on at
+# priority 55 (SENSEI_PWR_BOOT_RAILS, after the I2C bus at 50), so the expander starts after it.
+config GPIO_PCA_SERIES_INIT_PRIORITY
+	default 60
+
+# The GPIO hog of the camera clock gate sits on the expander, so it runs after it.
+config GPIO_HOGS_INIT_PRIORITY
+	default 61
+
 endif # SHIELD_UT_SENSORSHIELD

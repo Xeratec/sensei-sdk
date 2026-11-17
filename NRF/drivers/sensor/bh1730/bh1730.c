@@ -77,7 +77,7 @@ static int check_chip(struct bh1730_data *d) {
 static int bh_probe_once(struct bh1730_data *d) {
   if (!d->probed) {
     d->present = check_chip(d) == 0;
-    d->probed = true;
+    d->probed = d->present; /* a chip that did not answer is probed again on the next call */
   }
   return d->present ? 0 : -ENODEV;
 }

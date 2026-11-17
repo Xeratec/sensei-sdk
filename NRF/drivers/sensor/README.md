@@ -31,7 +31,8 @@ The ISM330DHCX and the LIS2DUXS12 use the Zephyr drivers, which need the `hal_st
   depend on `CONFIG_PM_DEVICE_RUNTIME=y` (set it with `CONFIG_PM_DEVICE=y` in the application) and are off by
   default. The BME688 and the ILPS28QSW sleep by themselves and need no PM.
 - **Probe**: nothing touches the hardware at boot (the board rails may not be up yet). `sensei_<name>_probe()` checks
-  the ID at the first use and keeps the result.
+  the ID at the first use and keeps the result once the chip answered. A chip that did not answer is probed again
+  at the next use.
 - **Vendor libraries**: compiled by the drivers from `NRF/system/third_party` (see its README). The two Sensirion
   libraries keep the I2C address and the bus in globals, so there is one SCD41 and one SGP41, and every use of
   them goes through one mutex (`<sensei/drivers/sensirion_hal.h>`).

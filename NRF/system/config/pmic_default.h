@@ -32,6 +32,21 @@
 
 #include "max77654.h"
 
+/*
+ * Charger and battery. One setting, CONFIG_SENSEI_PWR_BATTERY_* (pwr/Kconfig), chooses the charger, the charge
+ * voltage, the charge table and the level thresholds. The SENSEI board has a Li-SOCl2 primary cell (Saft LS33600,
+ * 3.6 V): it must not be charged, so the charger is off. 4.2 V and 15 mA are for a Li-ion cell.
+ */
+#ifdef CONFIG_SENSEI_PWR_BATTERY_LIION
+#define PMIC_CHARGER_ENABLED true
+#define PMIC_CHARGE_CV MAX77654_CHG_CV_4V2
+#define PMIC_CHARGE_CV_JEITA MAX77654_CHG_CV_4V
+#else
+#define PMIC_CHARGER_ENABLED false
+#define PMIC_CHARGE_CV MAX77654_CHG_CV_3V6 /* the lowest the charger can do */
+#define PMIC_CHARGE_CV_JEITA MAX77654_CHG_CV_3V6
+#endif
+
 #define PMIC_CONFIG_DEFAULT                                                                                            \
   {                                                                                                                    \
       .cid = 0x2, /* Device ID. 0x2 = 'B' variant  */                                                                  \
@@ -55,8 +70,8 @@
       .wdt_action_on_ovf = MAX77654_WDT_DO_PWR_RESET, /* Action performed when Watchdog timer overflows. */            \
                                                                                                                        \
       /* === Charger configuration === */                                                                              \
-      .charger_enabled = true, /* Do not enable the charger. */                                                        \
-      .USB_suspend = false,    /* Do not place the charger into USB suspend mode. */                                   \
+      .charger_enabled = PMIC_CHARGER_ENABLED, /* Off for the primary cell, see above. */                              \
+      .USB_suspend = false,                    /* Do not place the charger into USB suspend mode. */                   \
                                                                                                                        \
       .chgin_v_min = MAX77654_VCHGIN_MIN_4V,     /* Minimum CHGIN regulation voltage. */                               \
       .chgin_i_lim = MAX77654_ICHGIN_LIM_0A285,  /* CHGIN IN current limit. */                                         \
@@ -65,8 +80,8 @@
                                                                                                                        \
       .fast_chg_cc = MAX77654_CHG_CC_15MA,       /* Fast-charge constant current setting. */                           \
       .fast_chg_cc_jeita = MAX77654_CHG_CC_15MA, /* JEITA fast-charge constant current setting. */                     \
-      .fast_chg_cv = MAX77654_CHG_CV_3V6,        /* Fast-charge battery voltage regulation. */                         \
-      .fast_chg_cv_jeita = MAX77654_CHG_CV_4V,   /* JEITA fast-charge battery voltage regulation. */                   \
+      .fast_chg_cv = PMIC_CHARGE_CV,             /* Fast-charge battery voltage regulation. */                         \
+      .fast_chg_cv_jeita = PMIC_CHARGE_CV_JEITA, /* JEITA fast-charge battery voltage regulation. */                   \
       .t_fast_chg = MAX77654_T_FAST_CHG_3H,      /* Fast-charge safety timer. */                                       \
                                                                                                                        \
       .preq_i = MAX77654_I_PQ_10PERCENT, /* Prequalifaction charge current, as a percent of cc current*/               \

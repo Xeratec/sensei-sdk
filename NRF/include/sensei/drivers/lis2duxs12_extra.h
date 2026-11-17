@@ -30,7 +30,8 @@ extern "C" {
 #endif
 
 struct sensei_lis2duxs12_wake_cfg {
-  uint16_t threshold_mg; /**< motion threshold */
+  uint16_t threshold_mg; /**< motion threshold; the sensor takes steps of FS/256 up to 63 of them, then FS/64, so the
+                              largest is about 0.98 * FS (see sensei_lis2duxs12_wake_ths()) */
   uint8_t fs_g;          /**< full scale set in the Zephyr driver: 2, 4, 8 or 16 */
   uint8_t duration;      /**< samples above the threshold, 0 to 3 */
 };

@@ -57,6 +57,16 @@ int gnss_m10s_wake(const struct device *dev);
 /** @brief Hardware reset through RESET_N. Needs reset-gpios. */
 int gnss_m10s_reset(const struct device *dev);
 
+/**
+ * @brief Share the I2C bus with other users (the GAP9 camera owns it while it captures).
+ *
+ * The polling work calls lock() before it touches the bus and unlock() after. lock() must not block: return 0
+ * when the bus is yours, or -EBUSY when it is not. On -EBUSY the driver skips the round and looks again after
+ * 100 ms. Pass NULL to remove the hooks. The calls made by the application (configure, standby, wake,
+ * reset, power save) do not use the hooks: take your own lock around them.
+ */
+void gnss_m10s_set_bus_hooks(const struct device *dev, int (*lock)(void *ctx), void (*unlock)(void *ctx), void *ctx);
+
 /** @brief True if the module answered and accepted the configuration. */
 bool gnss_m10s_is_configured(const struct device *dev);
 

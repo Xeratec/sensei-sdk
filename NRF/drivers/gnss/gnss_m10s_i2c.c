@@ -38,6 +38,7 @@ LOG_MODULE_REGISTER(gnss_m10s, CONFIG_GNSS_LOG_LEVEL);
 #define M10S_TX_SIZE 128
 #define M10S_BOOT_MS 500
 #define M10S_RETRY_MS 5000
+#define M10S_BUSY_RETRY_MS 100 /* bus owned by someone else: look again soon */
 #define M10S_ACK_TIMEOUT_MS 600
 #define M10S_WAKE_PULSE_MS 20
 #define M10S_STANDBY_TRIES 10
@@ -82,6 +83,9 @@ struct m10s_data {
   bool systems_set;
   bool active;     /* not in standby */
   bool configured; /* module answered and took the configuration */
+  int (*bus_lock)(void *ctx);
+  void (*bus_unlock)(void *ctx);
+  void *bus_ctx;
   bool polled;
   bool poll_wait; /* polled mode: requests sent, answer not read yet */
   uint8_t standby_tries;
@@ -424,6 +428,12 @@ static void m10s_work(struct k_work *work) {
   int ret = 0;
 
   k_mutex_lock(&data->lock, K_FOREVER);
+  if (data->bus_lock != NULL && data->bus_lock(data->bus_ctx) != 0) {
+    /* Someone else (the GAP9 camera) owns the bus: no I2C this round. */
+    k_work_reschedule(&data->work, K_MSEC(M10S_BUSY_RETRY_MS));
+    k_mutex_unlock(&data->lock);
+    return;
+  }
   if (!data->active) {
     if (cfg->standby_at_boot && data->standby_tries > 0) {
       /* Boot-time standby: the module may need a moment before it answers. */
@@ -479,6 +489,9 @@ static void m10s_work(struct k_work *work) {
   }
   k_work_reschedule(&data->work, K_MSEC(next_ms));
 out:
+  if (data->bus_unlock != NULL) {
+    data->bus_unlock(data->bus_ctx);
+  }
   k_mutex_unlock(&data->lock);
 }
 
@@ -687,6 +700,16 @@ int gnss_m10s_wake(const struct device *dev) {
   data->active = true;
   k_mutex_unlock(&data->lock);
   return gnss_m10s_reset(dev);
+}
+
+void gnss_m10s_set_bus_hooks(const struct device *dev, int (*lock)(void *ctx), void (*unlock)(void *ctx), void *ctx) {
+  struct m10s_data *data = dev->data;
+
+  k_mutex_lock(&data->lock, K_FOREVER);
+  data->bus_lock = lock;
+  data->bus_unlock = unlock;
+  data->bus_ctx = ctx;
+  k_mutex_unlock(&data->lock);
 }
 
 bool gnss_m10s_is_configured(const struct device *dev) {

@@ -30,37 +30,55 @@
 #ifndef PWR_H_
 #define PWR_H_
 
+#include <stdbool.h>
 #include <stdint.h>
 #include <zephyr/kernel.h>
 
-#define PWR_BAT_CRITICAL_MV (2900)
-#define PWR_BAT_LOW_MV (3100)
-#define PWR_BAT_OK_MV (3300)
+/*
+ * Battery level thresholds in mV. They follow the battery chemistry of CONFIG_SENSEI_PWR_BATTERY_*, see
+ * pwr/Kconfig. The battery table and the charger voltage follow the same setting.
+ */
+#define PWR_BAT_CRITICAL_MV (CONFIG_SENSEI_PWR_BAT_CRITICAL_MV)
+#define PWR_BAT_LOW_MV (CONFIG_SENSEI_PWR_BAT_LOW_MV)
+#define PWR_BAT_OK_MV (CONFIG_SENSEI_PWR_BAT_OK_MV)
 
 /**
- * @brief Initialise the power sub-system
- * @return negative on error, 0 otherwise.
+ * @brief Prepare the power sub-system: pin set-up, board hooks, battery reading.
+ *
+ * The PMIC itself is already up: a boot-time hook (SYS_INIT) resets it and, with CONFIG_SENSEI_PWR_BOOT_RAILS, turns
+ * the shield rails on before the shield drivers start. Call this once from main().
+ * @return 0, or a negative value on error
  */
-int pwr_init();
+int pwr_init(void);
 
 /**
- * @brief Start the power sub-system
- * @note May only be called once.
- * @return negative on error, 0 otherwise.
+ * @brief Start the power sub-system: board hook (switches), LED supply and the power thread.
+ * @note Call once, after pwr_init().
+ * @return 0, or a negative value on error
  */
-int pwr_start();
+int pwr_start(void);
 
-// note: mutex lock dies
-void pwr_kill();
+/**
+ * @brief Switch the PMIC rails off and reboot the node. Does not return.
+ *
+ * Used for the long button press. It retries the PMIC write a few times, then reboots anyway.
+ */
+void pwr_off_and_reboot(void);
 
-// Note must be active or init?
-uint32_t pwr_bat_perc();
+/** @brief Log the PMIC voltages (bring-up). Takes the power mutex. @return 0, or a negative value on error */
+int pwr_log_voltages(void);
 
-// Note must be active or init?
-uint32_t pwr_bat_mV();
+/** @brief Battery charge estimate in percent, from the last reading. Needs pwr_init(). */
+uint32_t pwr_bat_perc(void);
 
-// Configure GAP9 power supply
-void gap9_pwr(bool);
+/** @brief Battery voltage in mV, from the last reading (0 before the first). Needs pwr_init(). */
+uint32_t pwr_bat_mV(void);
+
+/**
+ * @brief Switch the GAP9 supply (P1.15). In the node firmware the GAP9 link library calls this; applications
+ * that use it need CONFIG_SENSEI_PWR.
+ */
+void gap9_pwr(bool on);
 
 /** Charger state, from the MAX77654 CHG_DTLS field. */
 enum pwr_charger_state {

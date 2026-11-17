@@ -89,6 +89,20 @@
 	};
 };
 
+/*
+ * APS12804O 128 Mbit QSPI PSRAM. Disabled until it has been tested on hardware: enable it with
+ * &psram { status = "okay"; }; and keep &qspi disabled (the driver uses nrfx directly).
+ * Load switch P1.14, chip select mux P0.19 (low = PSRAM).
+ */
+/ {
+	psram: psram {
+		compatible = "apmemory,aps12804o";
+		power-gpios = <&gpio1 14 GPIO_ACTIVE_HIGH>;
+		cs-select-gpios = <&gpio0 19 GPIO_ACTIVE_HIGH>;
+		status = "disabled";
+	};
+};
+
 &gpio0 {
 	status = "okay";
 };
@@ -137,6 +151,19 @@
 };
 
 &i2c0 {
+	/*
+	 * LIS2DUXS12 accelerometer with QVAR, I2C_A, INT1 on P0.23. Zephyr driver (needs hal_st).
+	 * Powered down until the application sets a sampling frequency. SA0 has no pull resistor on
+	 * the base board (R18 not fitted), so the address is 0x18 or 0x19: check at bring-up.
+	 * Wake-up/motion events are not part of the Zephyr driver, see NRF/include/sensei/drivers.
+	 */
+	lis2duxs12: lis2duxs12@18 {
+		compatible = "st,lis2duxs12";
+		reg = <0x18>;
+		int1-gpios = <&gpio0 23 GPIO_ACTIVE_HIGH>;
+	};
+
+	/* IS31FL3194 RGB LED, SDB on P0.22 (LED_EN above). Zephyr driver. */
 	led_0: is31fl3194@53 {
 		compatible = "issi,is31fl3194";
 		reg = <0x53>;

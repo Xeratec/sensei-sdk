@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+# SPDX-License-Identifier: Apache-2.0
+
+config PSRAM_APS12804O
+	bool "APS12804O QSPI PSRAM on the nRF5340 QSPI pins"
+	default y
+	depends on DT_HAS_APMEMORY_APS12804O_ENABLED
+	depends on SOC_NRF5340_CPUAPP
+	select NRFX_QSPI
+	select GPIO
+	help
+	  16 MiB PSRAM of the SENSEI base board. Untested on hardware.
+
+if PSRAM_APS12804O
+module = PSRAM_APS12804O
+module-str = APS12804O PSRAM
+source "subsys/logging/Kconfig.template.log_config"
+endif

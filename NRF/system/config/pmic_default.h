@@ -127,6 +127,7 @@
           {                                                                                                            \
               .chgin_ctrl = true, /* Interrupt on charge-input uvlo/over current */                                    \
               .chgin = true,      /* Interrupt on charge-input-status change */                                        \
+              .chg = true,        /* Interrupt on charger-state change (charging, done, fault) */                      \
               .nen_f = true,      /* Interrupt on nEN falling edge */                                                  \
           },                                                                                                           \
                                                                                                                        \

@@ -1,0 +1,25 @@
+# SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+# SPDX-License-Identifier: Apache-2.0
+---
+description: |
+  AP Memory APS12804O 128 Mbit (16 MiB) QSPI PSRAM on the nRF5340 QSPI pins (P0.13 to P0.18).
+  1.8 V, supplied through a load switch. The chip select goes through a mux (TS5A3153) that also
+  reaches the board-to-board connector. The driver uses the nrfx QSPI driver directly, so the Zephyr
+  QSPI NOR flash driver must stay disabled (keep &qspi disabled).
+
+compatible: "apmemory,aps12804o"
+
+include: base.yaml
+
+properties:
+  power-gpios:
+    type: phandle-array
+    required: true
+    description: Load switch of the PSRAM supply (P1.14, high = on).
+
+  cs-select-gpios:
+    type: phandle-array
+    required: true
+    description: |
+      Chip select mux input (P0.19). Low connects the QSPI chip select to the PSRAM, high to the
+      board-to-board connector.

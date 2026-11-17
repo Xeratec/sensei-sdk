@@ -3,3 +3,4 @@
 
 eth-zurich	ETH Zurich and University of Bologna
 sensei	SENSEI project
+apmemory	AP Memory Technology

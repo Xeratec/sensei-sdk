@@ -40,6 +40,7 @@
 #include <zephyr/logging/log.h>
 
 #include <stdio.h>
+#include <string.h>
 
 // ======== Definitions/Variables ==================================================================
 
@@ -103,6 +104,18 @@ struct max77654_device {
 
 struct max77654_device pmic;
 
+// Last status and event callback, see pwr.h:
+static struct pwr_status pwr_status_last;
+static struct k_spinlock pwr_status_lock;
+static pwr_event_cb_t pwr_event_cb;
+static void *pwr_event_cb_data;
+
+// Battery level class for the BAT_OK / LOW / CRITICAL events (0 = unknown, 1 critical, 2 low, 3 ok):
+static uint8_t battery_class;
+
+// Update the status snapshot and return the events since the last call:
+static uint32_t collect_events();
+
 // ======== Thread =================================================================================
 
 int thread_pwr_init() {
@@ -152,6 +165,8 @@ static void thread_pwr(void *_a, void *_b, void *_c) {
   while (1) {
 
     int err = 0;
+    uint32_t events = 0;
+    struct pwr_status status_copy;
 
     // Grab power mutex to be allowed to operate on PMIC:
     if (k_mutex_lock(&pwr_mutex, PWR_MUTEX_TIMEOUT) < 0) {
@@ -173,6 +188,11 @@ static void thread_pwr(void *_a, void *_b, void *_c) {
     // Handle interrupts from PMIC
     if (handle_interrupts() < 0) {
       err = -1;
+    }
+
+    // Snapshot for pwr_get_status() and the event callback:
+    if (err == 0) {
+      events = collect_events();
     }
 
     // Handle button press that are longer than 2 seconds
@@ -199,6 +219,11 @@ static void thread_pwr(void *_a, void *_b, void *_c) {
 
     k_mutex_unlock(&pwr_mutex);
 
+    if (events != 0 && pwr_event_cb != NULL) {
+      (void)pwr_get_status(&status_copy);
+      pwr_event_cb(events, &status_copy, pwr_event_cb_data);
+    }
+
     // Update on pmic interrupt but at least every PWR_THREAD_UPDATE_PERIOD_MS
     k_sem_take(&pmic_update_sem, K_MSEC(THREAD_PWR_UPDATE_PERIOD_MS));
   }
@@ -219,6 +244,9 @@ static void softRst_int_cb_handler(const struct device *port, struct gpio_callba
 }
 
 static int check_status() {
+  // Flags of a failed read must not be taken as new events:
+  memset(&pmic.flags, 0, sizeof(pmic.flags));
+
   // Grab pmic flags to clear interrupt:
   if (max77654_get_int_flags(&pmic_h, &pmic.flags) != E_MAX77654_SUCCESS) {
     LOG_ERR("pmic get_int_flags failed!");
@@ -454,3 +482,95 @@ void thread_pwr_start() {
   );
   k_thread_name_set(pwr_t, "pwr");
 }
+
+// ======== Status and events ======================================================================
+
+static enum pwr_charger_state charger_state_from_dtls(max77654_chg_dtls_t d) {
+  switch (d) {
+  case MAX77654_CHG_DTLS_OFF:
+    return PWR_CHG_OFF;
+  case MAX77654_CHG_DTLS_PREQUAL:
+    return PWR_CHG_PREQUAL;
+  case MAX77654_CHG_DTLS_CC:
+  case MAX77654_CHG_DTLS_CC_JEITA:
+    return PWR_CHG_CC;
+  case MAX77654_CHG_DTLS_CV:
+  case MAX77654_CHG_DTLS_CV_JEITA:
+    return PWR_CHG_CV;
+  case MAX77654_CHG_DTLS_TOP_OFF:
+  case MAX77654_CHG_DTLS_TOP_OFF_JEITA:
+    return PWR_CHG_TOP_OFF;
+  case MAX77654_CHG_DTLS_DONE:
+  case MAX77654_CHG_DTLS_DONE_JEITA:
+    return PWR_CHG_DONE;
+  default:
+    return PWR_CHG_FAULT;
+  }
+}
+
+// Called by the power thread with the power mutex held, after check_status() and check_battery().
+static uint32_t collect_events() {
+  uint32_t events = 0;
+  uint32_t mv = (uint32_t)atomic_get(&battery_mV);
+  uint8_t cls = battery_class;
+
+  if (pmic.flags.chgin) {
+    events |= PWR_EVT_CHGIN_CHANGE;
+  }
+  if (pmic.flags.chg) {
+    events |= PWR_EVT_CHG_CHANGE;
+  }
+  if (pmic.flags.chgin_ctrl) {
+    events |= PWR_EVT_CHGIN_CTRL;
+  }
+  if (pmic.flags.nen_f) {
+    events |= PWR_EVT_BUTTON;
+  }
+  if (pmic.flags.tj_reg || pmic.flags.tjal1_r || pmic.flags.tjal2_r) {
+    events |= PWR_EVT_THERMAL;
+  }
+
+  // Three levels with hysteresis: LOW is left upwards only above CRITICAL + 100 mV, OK is entered at
+  // PWR_BAT_OK_MV. Between LOW and OK the class stays as it was.
+  if (mv != 0) {
+    if (mv <= PWR_BAT_CRITICAL_MV) {
+      cls = 1;
+    } else if (mv <= PWR_BAT_LOW_MV) {
+      cls = (cls == 1 && mv <= PWR_BAT_CRITICAL_MV + 100) ? 1 : 2;
+    } else if (mv >= PWR_BAT_OK_MV || cls == 0) {
+      cls = 3;
+    }
+  }
+  if (cls != battery_class) {
+    // The first reading only sets the class, it is no event.
+    if (battery_class != 0) {
+      events |= (cls == 3) ? PWR_EVT_BAT_OK : (cls == 2) ? PWR_EVT_BAT_LOW : PWR_EVT_BAT_CRITICAL;
+    }
+    battery_class = cls;
+  }
+
+  k_spinlock_key_t key = k_spin_lock(&pwr_status_lock);
+  pwr_status_last.bat_mv = mv;
+  pwr_status_last.bat_perc = (uint32_t)atomic_get(&battery_perc);
+  pwr_status_last.charger = charger_state_from_dtls(pmic.status.charger_status);
+  pwr_status_last.chgin = (enum pwr_chgin_state)pmic.status.chgin_status;
+  pwr_status_last.charging = pmic.status.charging_active;
+  pwr_status_last.valid = true;
+  k_spin_unlock(&pwr_status_lock, key);
+
+  return events;
+}
+
+int pwr_get_status(struct pwr_status *status) {
+  k_spinlock_key_t key = k_spin_lock(&pwr_status_lock);
+  *status = pwr_status_last;
+  k_spin_unlock(&pwr_status_lock, key);
+  return status->valid ? 0 : -EAGAIN;
+}
+
+void pwr_set_event_cb(pwr_event_cb_t cb, void *user_data) {
+  pwr_event_cb_data = user_data;
+  pwr_event_cb = cb;
+}
+
+void pwr_refresh(void) { k_sem_give(&pmic_update_sem); }

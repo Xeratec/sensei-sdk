@@ -1,0 +1,30 @@
+// SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+// SPDX-License-Identifier: Apache-2.0
+
+/*
+ * nRF21540 front-end module of the LPWAN shield, network core side. Disabled by default and not
+ * tested on hardware. A shield overlay cannot carry it (shields apply to the application core only),
+ * so pass it to the network core image, for example with sysbuild:
+ *   -Dipc_radio_EXTRA_DTC_OVERLAY_FILE=$SENSEI_SDK_ROOT/NRF/overlays/lpwan_fem_cpunet.overlay
+ * To use it (GPIO mode, the SPI interface is not needed):
+ *   1. set the node below to okay and add  &radio { fem = <&nrf_radio_fem>; };
+ *   2. enable gpio_fwd in the application core overlay of the LPWAN shield, so the network core owns the pins
+ *   3. build the network core with CONFIG_MPSL_FEM_NRF21540_GPIO=y
+ *   4. from the application core: nPD (expander P5) high, MODE (expander P6) as wanted
+ *
+ * Pins and conflicts:
+ *   TX_EN  P0.27  also the debug signal 2 of the sensor shield and MSP_DR2
+ *   RX_EN  P1.13  also MSP_DR1
+ *   CS     P0.07  also the PMIC AMUX battery input (SAADC AIN3): not usable together
+ *   SPI    SPI_A (P0.08 to P0.11), shared with GAP9 and the nRF9151
+ *   TX_EN and RX_EN pass the TXB0108 level shifter, check its delay against the FEM timing.
+ */
+
+/ {
+	nrf_radio_fem: nrf21540 {
+		compatible = "nordic,nrf21540-fem";
+		tx-en-gpios = <&gpio0 27 GPIO_ACTIVE_HIGH>;
+		rx-en-gpios = <&gpio1 13 GPIO_ACTIVE_HIGH>;
+		status = "disabled";
+	};
+};

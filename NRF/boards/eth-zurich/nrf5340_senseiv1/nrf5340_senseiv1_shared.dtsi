@@ -57,14 +57,17 @@
 
 	buttons {
 		compatible = "gpio-keys";
+		/* SW3 on the base board (nRF_btn). The pull-up is internal in case the board has none. */
 		button0: button0 {
 			label = "nRF_btn";
-			gpios = <&gpio0 25 GPIO_ACTIVE_LOW>;
+			gpios = <&gpio0 25 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
+			zephyr,code = <INPUT_KEY_0>;
 		};
 	};
 
 
 	aliases {
+		sw0 = &button0;
 		mcuboot-button0 = &button0;
 		watchdog0 = &wdt0;
 	};

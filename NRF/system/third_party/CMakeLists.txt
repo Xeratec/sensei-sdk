@@ -4,8 +4,6 @@
 add_subdirectory(max77654)
 add_subdirectory_ifdef(CONFIG_SHIELD_UT_SENSORSHIELD bh1730fvc)
 add_subdirectory_ifdef(CONFIG_SHIELD_UT_SENSORSHIELD st/ilps28qsw)
-add_subdirectory_ifdef(CONFIG_SHIELD_UT_SENSORSHIELD st/ism330dhcx)
-add_subdirectory_ifdef(CONFIG_SHIELD_UT_SENSORSHIELD st/lis2duxs12)
 add_subdirectory_ifdef(CONFIG_SHIELD_UT_SENSORSHIELD as7331)
 # The SDK's own copies of the Bosch and Sensirion libraries. An application that brings the
 # upstream libraries sets CONFIG_SENSEI_SDK_VENDOR_COPIES=n to avoid duplicate symbols.

@@ -1,8 +1,19 @@
 # Copyright (c) 2025 ETH Zurich and University of Bologna
 # SPDX-License-Identifier: Apache-2.0
 
+# Public headers (<sensei/drivers/...>) and the drivers, which are enabled by their devicetree nodes.
+zephyr_include_directories(include)
+add_subdirectory(drivers)
+
 add_subdirectory_ifdef(CONFIG_SENSEI system)
-add_subdirectory_ifdef(CONFIG_SENSEI drivers)
+
+# Portable libraries of lib/ (Zephyr part)
+add_subdirectory_ifdef(CONFIG_SENSEI_LINK ${CMAKE_CURRENT_LIST_DIR}/../lib/sensei_link/zephyr sensei_link)
+add_subdirectory_ifdef(CONFIG_SENSEI_BUSARB ${CMAKE_CURRENT_LIST_DIR}/../lib/sensei_busarb/zephyr sensei_busarb)
+add_subdirectory_ifdef(CONFIG_SENSEI_GAP9 ${CMAKE_CURRENT_LIST_DIR}/../lib/sensei_gap9/zephyr sensei_gap9)
+add_subdirectory_ifdef(CONFIG_SENSEI_LPWAN_PROTO ${CMAKE_CURRENT_LIST_DIR}/../lib/sensei_lpwan/zephyr sensei_lpwan)
+add_subdirectory_ifdef(CONFIG_SENSEI_DELTA ${CMAKE_CURRENT_LIST_DIR}/../lib/sensei_delta/zephyr sensei_delta)
+add_subdirectory_ifdef(CONFIG_SENSEI_SECURE ${CMAKE_CURRENT_LIST_DIR}/../lib/sensei_secure/zephyr sensei_secure)
 
 target_include_directories_ifdef(CONFIG_SENSEI app PRIVATE
     system

@@ -98,19 +98,31 @@ to configure the configuration with a graphical interface in the terminal.
 
 
 ## BareMetal Drivers
-- **MAX77654**: Analog Devices Power Management IC,
+- **MAX77654**: Analog Devices Power Management IC. The power module (`CONFIG_SENSEI_PWR`) gives `pwr_get_status()` (battery voltage through the PMIC AMUX on P0.07, charger and input state) and `pwr_set_event_cb()` for nIRQ events (charger, input, button, battery level).
 
 
-## Zephyr Divers
-- **PCA6416A**: NXP GPIO Expander,
-  - Requires `CONFIG_GPIO` and `CONFIG_GPIO_PCA64XXA` to be enabled.
-- **IS31FL3194**: I2C RGB LED,
-  - In Zephyr (driver `IS31FL319X`, see [Docs](https://docs.zephyrproject.org/latest/build/dts/api/bindings/led/issi%2Cis31fl3194.html#std-dtcompatible-issi-is31fl3194)). The SDK no longer carries its own copy.
+## Zephyr Drivers
+The nodes are in the board and shield devicetrees. The drivers turn on by themselves (Kconfig default `y` for an enabled node). The ST sensor drivers need the `hal_st` module in the west workspace.
+
+| IC | Where | Driver |
+|---|---|---|
+| IS31FL3194 RGB LED | base board, I2C_A 0x53 | Zephyr `issi,is31fl3194` |
+| LIS2DUXS12 accelerometer | base board, I2C_A 0x18 or 0x19, INT1 P0.23 | Zephyr `st,lis2duxs12`, wake-up and deep power-down in [NRF/drivers/sensor](NRF/drivers/sensor/README.md) |
+| PCA6416A expander | sensor shield, I2C_B 0x20 | Zephyr `nxp,pca6416` (the SDK copy `gpio_pca64xxa` is gone) |
+| TCAL6408 expander | LPWAN shield, I2C_A 0x20 | Zephyr `nxp,pcal6408a` |
+| ISM330DHCX IMU | sensor shield, I2C_A 0x6A | Zephyr `st,ism330dhcx` |
+| ILPS28QSW pressure | sensor shield, I2C_B 0x5C | SDK `st,ilps28qsw`, [NRF/drivers/sensor](NRF/drivers/sensor/README.md) |
+| MAX-M10S GNSS | sensor shield, I2C_B 0x42 | SDK `u-blox,max-m10s`, [NRF/drivers/gnss](NRF/drivers/gnss/README.md) |
+| APS12804O PSRAM | base board, QSPI | SDK `apmemory,aps12804o`, disabled, [NRF/drivers/memory](NRF/drivers/memory/README.md) |
+| nRF21540 FEM | LPWAN shield | Zephyr `nordic,nrf21540-fem`, node only, disabled |
+
+All SDK drivers are untested on hardware. `example/drivers_test` probes every IC and puts it into its lowest-power state.
 
 
 ## System Libraries
 - **Crypto**: Simplified crypto library on top of the PSA Crypto API (AES-GCM, SHA-256, HMAC, HKDF, ECDH and ECDSA on P-256), see [NRF/system/crypto](NRF/system/crypto/README.md).
   - Enable with `CONFIG_SENSEI_CRYPTO`, example in `example/crypto_api`.
+
 
 
 ## Maintainers

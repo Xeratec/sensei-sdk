@@ -6,6 +6,16 @@ config HW_STACK_PROTECTION
 
 if BOARD_NRF5340_SENSEIV1_NRF5340_CPUAPP
 
+# Drivers for the ICs on the base board (LIS2DUXS12, IS31FL3194, MAX-M10S through the sensor shield).
+config I2C
+	default y
+
+config SENSOR
+	default y
+
+config LED
+	default y
+
 # The Bluetooth controller runs on the network core: use the HCI IPC driver.
 config BT_HCI_IPC
 	default y if BT_HCI

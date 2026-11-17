@@ -1,0 +1,29 @@
+# SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+# SPDX-License-Identifier: Apache-2.0
+
+config GNSS_M10S
+	bool "u-blox MAX-M10S GNSS receiver on I2C"
+	default y
+	depends on DT_HAS_U_BLOX_MAX_M10S_ENABLED
+	select GNSS
+	select I2C
+	help
+	  Driver for the u-blox MAX-M10S on I2C (DDC) with the UBX protocol. Delivers fixes and satellites
+	  through the Zephyr GNSS API. Zephyr's own u-blox drivers are UART only.
+
+if GNSS_M10S
+
+config GNSS_M10S_RX_BUFFER_SIZE
+	int "Largest UBX payload the driver accepts"
+	default 512
+	range 128 2048
+	help
+	  UBX-NAV-SAT needs 8 + 12 bytes per satellite. Longer messages are dropped.
+
+config GNSS_M10S_MAX_SATELLITES
+	int "Satellites kept for the satellites callback"
+	default 40
+	range 8 96
+	depends on GNSS_SATELLITES
+
+endif # GNSS_M10S

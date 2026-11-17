@@ -83,36 +83,43 @@
 		reg = <0x76>;
 		status = "okay";
 	};
+
+	/*
+	 * ISM330DHCX IMU. The shield schematic puts it on I2C_A (i2c0), SA0 low, so 0x6A. INT1 and
+	 * INT2 go to expander pins 8 and 9, which are not wired to an interrupt line: polling only.
+	 * Zephyr driver (needs hal_st). Both sensors are powered down until an odr is set.
+	 */
+	ism330dhcx: ism330dhcx@6a {
+		compatible = "st,ism330dhcx";
+		reg = <0x6a>;
+	};
 };
 
 &i2c1 {
 	status = "okay";
     pca6416a_20: pca6416a@20 {
-        compatible = "nxp,pca6416a";
+        compatible = "nxp,pca6416";
         reg = < 0x20 >;
         gpio-controller;
         ngpios = < 16 >;
         #gpio-cells = < 2 >;
     };
 
-    // Use our custom driver
-    // ism330dhcx: ism330dhcx@6a {
-	// 	compatible = "st,ism330dhcx";
-	// 	status = "okay";
-	// 	reg = <0x6A>;
-	// };
-};
+    /* ILPS28QSW pressure sensor on I2C_B, 0x5C. Not power gated. Driver in NRF/drivers/sensor. */
+    ilps28qsw: ilps28qsw@5c {
+        compatible = "st,ilps28qsw";
+        reg = <0x5c>;
+    };
 
-/ {
-    cfg-device-gnss-0 {
-        compatible = "u-blox,ubxlib-device-gnss";
-        status = "okay";
-        transport-type = "i2c1";
-        i2c-clock-hertz = <1000>;
-        i2c-already-open;
-        i2c-address = <0x42>;
-        i2c-max-segment-size = <256>;
-        module-type = "U_GNSS_MODULE_TYPE_M10";
-        power-off-to-backup;
+    /* MAX-M10S GNSS, driver in NRF/drivers/gnss. RESET_N, TIMEPULSE (also SAFEBOOT_N, keep it an
+     * input) and EXTINT are on the expander. SAFEBOOT_N itself has no net on the shield. */
+    gnss: gnss@42 {
+        compatible = "u-blox,max-m10s";
+        reg = <0x42>;
+        reset-gpios = <&pca6416a_20 13 GPIO_ACTIVE_LOW>;
+        timepulse-gpios = <&pca6416a_20 14 GPIO_ACTIVE_HIGH>;
+        extint-gpios = <&pca6416a_20 15 GPIO_ACTIVE_HIGH>;
+        /* No traffic or fixes until the application wakes the module. */
+        standby-at-boot;
     };
 };

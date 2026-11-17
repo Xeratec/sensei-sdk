@@ -1,0 +1,70 @@
+# SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+# SPDX-License-Identifier: Apache-2.0
+---
+description: |
+  u-blox MAX-M10S GNSS module on I2C (DDC, address 0x42). UBX protocol only.
+
+  The pins RESET_N, EXTINT and TIMEPULSE are optional. On the SENSEI sensor shield they sit on the
+  PCA6416A expander. Never drive TIMEPULSE low while the module starts: the pin is shared with SAFEBOOT_N.
+
+compatible: "u-blox,max-m10s"
+
+include: i2c-device.yaml
+
+properties:
+  reset-gpios:
+    type: phandle-array
+    description: |
+      RESET_N. Use GPIO_ACTIVE_LOW, so that "active" means reset asserted. Used by the reset call and
+      as a wake-up fallback if there is no EXTINT pin.
+
+  extint-gpios:
+    type: phandle-array
+    description: |
+      EXTINT, used to wake the module from software standby (UBX-RXM-PMREQ). An edge on the pin wakes it.
+
+  timepulse-gpios:
+    type: phandle-array
+    description: |
+      TIMEPULSE (also SAFEBOOT_N). The driver configures it as an input and does not use it.
+      On the sensor shield it is behind the expander, which has no interrupt line to the nRF5340.
+
+  fix-rate:
+    type: int
+    default: 1000
+    description: Fix interval in milliseconds at start-up. Can be changed with gnss_set_fix_rate().
+
+  standby-at-boot:
+    type: boolean
+    description: |
+      Send the module to software standby right after start-up and leave it there until the
+      application wakes it (gnss_m10s_wake() or PM_DEVICE_ACTION_RESUME). Without this property the
+      driver configures the module and starts delivering fixes at boot.
+
+  polled:
+    type: boolean
+    description: |
+      Poll UBX-NAV-PVT (and NAV-SAT) once per fix interval instead of letting the module output
+      them periodically.
+
+  poll-interval-ms:
+    type: int
+    default: 200
+    description: |
+      How often the driver reads the I2C stream in periodic mode. Keep it well below the fix interval.
+
+  power-save:
+    type: string
+    default: "full"
+    enum:
+      - "full"
+      - "psmoo"
+      - "psmct"
+    description: |
+      Power save mode of the receiver: full power, ON/OFF operation (PSMOO) or cyclic tracking (PSMCT).
+
+  power-save-period:
+    type: int
+    default: 10
+    description: |
+      Position update period in seconds for PSMOO and PSMCT (at least 5 s).

@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+# SPDX-License-Identifier: Apache-2.0
+
+config ILPS28QSW_SENSEI
+	bool "ILPS28QSW pressure sensor"
+	default y
+	depends on DT_HAS_ST_ILPS28QSW_ENABLED
+	depends on SENSOR
+	depends on SENSEI
+	select I2C
+	help
+	  Driver for the ILPS28QSW on I2C, built on the SDK register library (NRF/system/third_party/st).
+	  Needs CONFIG_SENSEI=y, which compiles the register library.
+
+config LIS2DUXS12_EXTRA
+	bool "LIS2DUXS12 wake-up interrupt and deep power-down"
+	default y
+	depends on DT_HAS_ST_LIS2DUXS12_ENABLED
+	depends on LIS2DUX12
+	help
+	  Helpers for what the Zephyr LIS2DUX12 driver lacks. They use the register library of the
+	  Zephyr ST HAL (hal_st), which the Zephyr driver already selects.

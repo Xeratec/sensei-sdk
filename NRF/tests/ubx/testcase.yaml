@@ -1,0 +1,9 @@
+# SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+# SPDX-License-Identifier: Apache-2.0
+---
+tests:
+  sensei.drivers.gnss.ubx:
+    platform_allow:
+      - native_sim
+      - qemu_cortex_m3
+    tags: sensei gnss

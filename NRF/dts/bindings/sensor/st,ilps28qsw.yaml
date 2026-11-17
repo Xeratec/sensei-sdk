@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+# SPDX-License-Identifier: Apache-2.0
+---
+description: |
+  STMicroelectronics ILPS28QSW pressure and temperature sensor on I2C. Not covered by Zephyr 4.4
+  (its register map differs from the ILPS22QS and LPS28DFW drivers). The driver in NRF/drivers/sensor
+  works in one-shot mode: the sensor powers down by itself after every conversion.
+
+compatible: "st,ilps28qsw"
+
+include: [sensor-device.yaml, i2c-device.yaml]
+
+properties:
+  avg:
+    type: int
+    default: 16
+    enum: [4, 8, 16, 32, 64, 128, 256, 512]
+    description: Number of samples averaged per conversion.
+
+  full-scale:
+    type: int
+    default: 1260
+    enum: [1260, 4060]
+    description: Full scale in hPa.

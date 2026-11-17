@@ -1,0 +1,93 @@
+# SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+# SPDX-License-Identifier: Apache-2.0
+#
+# Authors:
+# - Philip Wiese <wiesep@iis.ee.ethz.ch>
+
+mainmenu "SENSEI LPWAN service (nRF9151)"
+
+config LPWAN_SHIELD_LTE
+	bool "LTE-M and NB-IoT"
+	default y
+	select NETWORKING
+	select NET_SOCKETS
+	select NET_SOCKETS_OFFLOAD
+	select NET_SOCKETS_POSIX_NAMES
+	select NRF_MODEM_LIB
+	select LTE_LINK_CONTROL
+	select LTE_LC_PSM_MODULE
+	select LTE_LC_EDRX_MODULE
+	select DATE_TIME
+	help
+	  UDP or TCP uplink and downlink over the LTE modem. The modem library starts at the first
+	  connect request.
+
+config LPWAN_SHIELD_LORA
+	bool "LoRaWAN on the LR1121 (Modem-E firmware)"
+	default y
+	help
+	  LoRaWAN class A (class C on request), OTAA, over the LR1121 on the shield.
+
+if LPWAN_SHIELD_LTE
+
+config LPWAN_SHIELD_LTE_STACK
+	int "LTE worker stack size"
+	default 4096
+
+config LPWAN_SHIELD_LTE_CONNECT_TIMEOUT_S
+	int "Time to wait for the network registration, s"
+	default 600
+
+config LPWAN_SHIELD_LTE_TIME_WAIT_S
+	int "Time to wait for the network time after connect, s"
+	default 10
+
+endif # LPWAN_SHIELD_LTE
+
+if LPWAN_SHIELD_LORA
+
+config LPWAN_SHIELD_LORA_STACK
+	int "LoRa worker stack size"
+	default 3072
+
+config LPWAN_SHIELD_LORA_JOIN_ATTEMPTS
+	int "Join attempts before giving up"
+	default 10
+
+config LPWAN_SHIELD_LORA_TX_OFFSET_DB
+	int "TX power offset of the RF path, dB"
+	default -2
+	help
+	  Compensation for the shield's RF switch and matching, found during commissioning.
+
+endif # LPWAN_SHIELD_LORA
+
+config LPWAN_SHIELD_LINK_STACK
+	int "SPI link thread stack size"
+	default 2048
+
+config LPWAN_SHIELD_LINK_PRIO
+	int "SPI link thread priority (preemptible, lower is higher)"
+	default 2
+
+config LPWAN_SHIELD_WORKER_PRIO
+	int "Priority of the LTE and LoRa workers (lower is higher)"
+	default 6
+
+config LPWAN_SHIELD_VERSION_MAJOR
+	int "Firmware version, major"
+	default 0
+
+config LPWAN_SHIELD_VERSION_MINOR
+	int "Firmware version, minor"
+	default 1
+
+config LPWAN_SHIELD_VERSION_PATCH
+	int "Firmware version, patch"
+	default 0
+
+config LPWAN_SHIELD_LOG_LEVEL
+	int "Log level of the service modules (0 off ... 4 debug)"
+	default 3
+
+source "Kconfig.zephyr"

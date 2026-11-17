@@ -7,6 +7,7 @@ help:
 	@echo "Targets:"
 	@echo "  format    - Format code using clang-format and yapf"
 	@echo "  test-host - Build and run the host tests of lib/ and NRF/system/ (CMake, ctest)"
+	@echo "  twister   - Run the Zephyr tests of NRF/tests on native_sim in Docker (scripts/twister.sh)"
 	@echo "  help      - Display this help message"
 
 format:
@@ -26,4 +27,8 @@ test-host:
 	  ctest --test-dir $(BUILD_DIR)/host/$$name --output-on-failure; \
 	done
 
-.PHONY: help format test-host
+# Zephyr tests (NRF/tests) with Twister on native_sim, in Docker. Arguments for Twister: make twister ARGS="-s sensei.busarb"
+twister:
+	@scripts/twister.sh -- $(ARGS)
+
+.PHONY: help format test-host twister

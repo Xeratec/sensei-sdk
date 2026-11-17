@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+# SPDX-License-Identifier: Apache-2.0
+---
+common:
+  platform_allow:
+    - native_sim/native/64
+  tags: sensei drivers sgp41
+tests:
+  sensei.drivers.sgp41:
+    extra_configs:
+      - CONFIG_SGP41_SENSEI_CONDITIONING_S=10
+  # no conditioning in sensor_sample_fetch(): the application does it with the split calls
+  sensei.drivers.sgp41.no_conditioning:
+    extra_configs:
+      - CONFIG_SGP41_SENSEI_CONDITIONING_S=0

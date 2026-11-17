@@ -11,7 +11,9 @@ Authors:
 Drivers for the ICs of the SENSEI boards that Zephyr 4.4 does not cover, or covers in a way that does not fit.
 Each driver has a devicetree binding (`NRF/dts/bindings/sensor`), a header with its extras
 (`<sensei/drivers/...>`) and a Kconfig symbol. The nodes of the sensor shield are in
-`NRF/boards/shields/UT_SensorShield`. Everything is untested on hardware.
+`NRF/boards/shields/UT_SensorShield`. Everything is untested on hardware. The SCD41, SGP41 and BH1730 drivers are
+tested against I2C emulators on `native_sim` (`NRF/tests/scd41`, `sgp41`, `bh1730`; `make twister`). The emulators
+follow the datasheets, but a real sensor can differ.
 
 | Node | Driver | Kconfig | Zephyr alternative and why it is not used |
 |---|---|---|---|
@@ -34,10 +36,12 @@ The ISM330DHCX and the LIS2DUXS12 use the Zephyr drivers, which need the `hal_st
   sensor API fetch is built from the two.
 - **Power**: the SCD41, SGP41, AS7331 and BH1730 drivers use runtime device PM. `pm_device_runtime_get()` switches
   on the rail and the I2C isolation switch (`vdd-supply` and `bus-switch-supply`, regulators in the shield
-  devicetree) or clears the software power-down; `pm_device_runtime_put()` reverses it. `sensor_sample_fetch()` takes
-  and drops a reference itself; hold one yourself to keep a sensor powered between measurements. These drivers
-  depend on `CONFIG_PM_DEVICE_RUNTIME=y` (set it with `CONFIG_PM_DEVICE=y` in the application) and are off by
-  default. The BME688 and the ILPS28QSW sleep by themselves and need no PM.
+  devicetree) or clears the software power-down; `pm_device_runtime_put()` reverses it. The driver waits the
+  `startup-delay-us` of the regulators itself, because `regulator_enable()` of NCS v3.4.1 does not (it waits
+  `off-on-delay-us`). `sensor_sample_fetch()` takes and drops a reference itself; hold one yourself to keep a sensor
+  powered between measurements. These drivers depend on `CONFIG_PM_DEVICE_RUNTIME=y` (set it with
+  `CONFIG_PM_DEVICE=y` in the application) and are off by default. The BME688 and the ILPS28QSW sleep by themselves
+  and need no PM.
 - **Probe**: nothing touches the hardware at boot (the board rails may not be up yet). `sensei_<name>_probe()` checks
   the ID at the first use and keeps the result once the chip answered. A chip that did not answer is probed again
   at the next use.

@@ -1,0 +1,41 @@
+# SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+# SPDX-License-Identifier: Apache-2.0
+#
+# Authors:
+# - Philip Wiese <wiesep@iis.ee.ethz.ch>
+
+# West manifest for the Twister tests (CI, or a fresh workspace for scripts/twister.sh): NCS v3.4.1 without the
+# projects that native_sim builds do not need. The SDK itself is the manifest repository (west.yml in the root of
+# this repository fetches everything, which is several GB more).
+#
+#   mkdir ws && git clone <this repository> ws/sensei-sdk && cd ws
+#   west init -l --mf scripts/west-twister.yml sensei-sdk
+#   west update --narrow --fetch-opt=--depth=1
+#
+# Keep the allowlist in step with firmware/west.yml of the SENSEI IEQ node repository.
+
+manifest:
+  version: "0.13"
+
+  self:
+    path: sensei-sdk
+
+  remotes:
+    - name: ncs
+      url-base: https://github.com/nrfconnect
+
+  projects:
+    - name: sdk-nrf
+      remote: ncs
+      path: nrf
+      revision: v3.4.1
+      import:
+        name-allowlist:
+          - zephyr
+          - cmsis_6
+          - hal_nordic
+          - nrfxlib
+          - mbedtls
+          - tf-psa-crypto
+          - oberon-psa-crypto
+          - nanopb

@@ -29,6 +29,7 @@ block the others for ever.
   must not block). A claim that follows an expired one counts as a new claim and is reported too. The LPWAN client uses it to switch the level shifter of the shield off while GAP9 owns SPI_A.
 - Zephyr: `CONFIG_SENSEI_BUSARB` (selected by `SENSEI_GAP9` and `SENSEI_LPWAN`).
 - Host test: `cmake -S tests -B <builddir>`, or `make test-host` in the SDK root. It also compiles the Zephyr wrapper
-  against a stub of the few kernel calls it uses (`tests/stub/zephyr/kernel.h`, fake clock).
+  against a stub of the few kernel calls it uses (`tests/stub/zephyr/kernel.h`, fake clock). With the real kernel on
+  `native_sim`: `NRF/tests/busarb` (`make twister`).
 
 Moved from the SENSEI IEQ node firmware (`nrf5340/src/core/bus_arb.*` and `app_bus.c`).

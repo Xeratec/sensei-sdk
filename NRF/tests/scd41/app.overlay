@@ -1,0 +1,38 @@
+/*
+ * SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Authors:
+ * - Philip Wiese <wiesep@iis.ee.ethz.ch>
+ */
+
+/* The SCD41 as on the sensor shield: a supply rail and an I2C isolation switch, both on GPIOs (emulated). The
+ * emulator of the sensor answers only while both are on. */
+
+#include <zephyr/dt-bindings/gpio/gpio.h>
+
+/ {
+	rail_vdd: rail-vdd {
+		compatible = "regulator-fixed";
+		regulator-name = "scd41-vdd";
+		enable-gpios = <&gpio0 1 GPIO_ACTIVE_HIGH>;
+		startup-delay-us = <1000000>; /* power-up time of the SCD4x, datasheet 3.1 */
+		off-on-delay-us = <20000>;
+	};
+
+	rail_bus: rail-bus {
+		compatible = "regulator-fixed";
+		regulator-name = "scd41-bus";
+		enable-gpios = <&gpio0 2 GPIO_ACTIVE_HIGH>;
+		off-on-delay-us = <20000>;
+	};
+};
+
+&i2c0 {
+	scd41: scd41@62 {
+		compatible = "sensei,scd41";
+		reg = <0x62>;
+		vdd-supply = <&rail_vdd>;
+		bus-switch-supply = <&rail_bus>;
+	};
+};

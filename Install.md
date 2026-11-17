@@ -40,6 +40,16 @@ Then install the required packages:
 pip install -r $ZEPHYR_BASE/scripts/requirements.txt
 ```
 
+## Tests without hardware
+
+The Zephyr tests (`NRF/tests`) run on `native_sim` with Twister. They need Docker and an NCS v3.4.1 west workspace:
+
+```bash
+make twister                      # or scripts/twister.sh
+```
+
+Details: [NRF/tests/README.md](NRF/tests/README.md).
+
 # Install the GAP SDK
 
 The GAP9 code (`GAP9/`, the GAP9 side of the examples) builds with **GAP SDK 5.22.3**, in a Docker image tagged

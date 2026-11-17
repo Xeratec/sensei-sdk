@@ -1,0 +1,18 @@
+/*
+ * SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Authors:
+ * - Philip Wiese <wiesep@iis.ee.ethz.ch>
+ */
+
+/* The BH1730 as on the sensor shield: address 0x29, gain x64, integration time 51 ms, no rail switch. */
+
+&i2c0 {
+	bh1730: bh1730@29 {
+		compatible = "sensei,bh1730";
+		reg = <0x29>;
+		gain = <2>;
+		itime = <0xED>;
+	};
+};

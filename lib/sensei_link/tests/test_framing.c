@@ -313,7 +313,7 @@ static void test_frag(void) {
   {
     size_t len = 1000;
     size_t count = sensei_frag_count(len, 222);
-    sensei_reasm_status_t st;
+    sensei_reasm_status_t st = SENSEI_REASM_INCOMPLETE;
     fill(msg, len, 13);
     sensei_reasm_init(&r, rbuf, sizeof(rbuf), 222, 1000);
     for (size_t i = count; i-- > 0;) {

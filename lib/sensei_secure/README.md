@@ -68,3 +68,6 @@ without the library).
 --test-dir build`. `test_secure` checks keys, envelopes (both directions), tampering, replay and counters
 against the vectors in `tests/generated/vectors.h`. The vectors come from the Python implementation in the SENSEI
 IEQ node repository (`python -m sensei_host.vectors`); do not edit the file by hand.
+
+The same test file and vectors run with the Zephyr backend (PSA, Mbed TLS) on `native_sim`: `NRF/tests/secure`
+(`make twister`).

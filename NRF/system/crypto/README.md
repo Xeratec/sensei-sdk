@@ -60,7 +60,7 @@ Notes:
 
 ## Example
 
-[`example/crypto_api`](../../../example/crypto_api) runs a test suite (known-answer tests from NIST, RFC 4231, RFC 5869, RFC 6979 and RFC 5903, plus round-trip and negative tests) and a short benchmark of every operation.
+[`example/crypto_api`](../../../example/crypto_api) runs a test suite (known-answer tests from NIST, RFC 4231, RFC 5869, RFC 6979 and RFC 5903, plus round-trip and negative tests) and a short benchmark of every operation. The same known-answer tests run on `native_sim` (PSA with Mbed TLS) in `NRF/tests/crypto` (`make twister`).
 
 ## Not included
 

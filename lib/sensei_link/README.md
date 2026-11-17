@@ -29,7 +29,8 @@ short) and import `sensei/types.proto` and `sensei/lpwan.proto`. The SENSEI IEQ 
   The nanopb runtime is the one of the NCS module (`CONFIG_NANOPB`).
 - Host and GAP9: `add_subdirectory(${SENSEI_SDK_ROOT}/lib/sensei_link sensei_link)` and link `sensei_link`, or take the
   source lists of `sensei_link.cmake`. GAP9 needs `-std=gnu99` (the generated code uses anonymous unions).
-- Host tests: `cmake -S tests -B <builddir>`, or `make test-host` in the SDK root.
+- Host tests: `cmake -S tests -B <builddir>`, or `make test-host` in the SDK root. The same tests run on the Zephyr
+  library with the NCS nanopb on `native_sim`: `NRF/tests/link` (`make twister`).
 
 ## nanopb
 

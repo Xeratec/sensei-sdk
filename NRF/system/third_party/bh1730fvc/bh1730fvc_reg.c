@@ -118,20 +118,24 @@ int bh1730_read_lux(bh1730_t *sensor, uint32_t *lux) {
     }
 
     uint32_t ratio = (ch1 * 1000) / ch0;
-    uint32_t calc_lux;
+    /* 64 bit and signed: 1290 * ch0 * 100 does not fit 32 bit above about 33000 counts, and the last branch is
+     * slightly negative for a ratio just below 2.13 */
+    int64_t calc_lux;
 
     if (ratio < 260)
-        calc_lux = (1290 * ch0 - 2733 * ch1);
+        calc_lux = (1290 * (int64_t)ch0 - 2733 * (int64_t)ch1);
     else if (ratio < 550)
-        calc_lux = (795 * ch0 - 859 * ch1);
+        calc_lux = (795 * (int64_t)ch0 - 859 * (int64_t)ch1);
     else if (ratio < 1090)
-        calc_lux = (510 * ch0 - 345 * ch1);
+        calc_lux = (510 * (int64_t)ch0 - 345 * (int64_t)ch1);
     else if (ratio < 2130)
-        calc_lux = (276 * ch0 - 130 * ch1);
+        calc_lux = (276 * (int64_t)ch0 - 130 * (int64_t)ch1);
     else
         calc_lux = 0;
+    if (calc_lux < 0)
+        calc_lux = 0;
 
-    *lux = calc_lux * 100 / (sensor->gain * sensor->integration_time_us);
+    *lux = (uint32_t)((uint64_t)calc_lux * 100 / ((uint64_t)sensor->gain * sensor->integration_time_us));
 
     return 0;
 }

@@ -1,0 +1,8 @@
+# SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+# SPDX-License-Identifier: Apache-2.0
+---
+tests:
+  sensei.link:
+    platform_allow:
+      - native_sim/native/64
+    tags: sensei link

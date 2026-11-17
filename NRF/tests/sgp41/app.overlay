@@ -1,0 +1,39 @@
+/*
+ * SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Authors:
+ * - Philip Wiese <wiesep@iis.ee.ethz.ch>
+ */
+
+/* The SGP41 as on the sensor shield: a supply rail and an I2C isolation switch, both on GPIOs (emulated). The
+ * emulator of the sensor answers only while both are on. The power-up time of the SGP41 is 0.6 ms (datasheet 3.6);
+ * the shield uses 50 ms. */
+
+#include <zephyr/dt-bindings/gpio/gpio.h>
+
+/ {
+	rail_vdd: rail-vdd {
+		compatible = "regulator-fixed";
+		regulator-name = "sgp41-vdd";
+		enable-gpios = <&gpio0 1 GPIO_ACTIVE_HIGH>;
+		startup-delay-us = <50000>;
+		off-on-delay-us = <20000>;
+	};
+
+	rail_bus: rail-bus {
+		compatible = "regulator-fixed";
+		regulator-name = "sgp41-bus";
+		enable-gpios = <&gpio0 2 GPIO_ACTIVE_HIGH>;
+		off-on-delay-us = <20000>;
+	};
+};
+
+&i2c0 {
+	sgp41: sgp41@59 {
+		compatible = "sensirion,sgp41";
+		reg = <0x59>;
+		vdd-supply = <&rail_vdd>;
+		bus-switch-supply = <&rail_bus>;
+	};
+};

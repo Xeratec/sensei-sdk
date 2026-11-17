@@ -57,8 +57,24 @@ static void count_error(struct g9 *g) {
   g->ops->error();
 }
 
+/* The end of g9_reboot(): once, through the platform. */
+static void reboot_done(struct g9 *g, int err, const sensei_Version *hello) {
+  g9_reboot_fn fn = g->reboot_fn;
+  void *user = g->reboot_user;
+
+  if (fn == NULL) {
+    return;
+  }
+  g->reboot_fn = NULL;
+  g->reboot_user = NULL;
+  if (g->ops->reboot_done != NULL) {
+    g->ops->reboot_done(fn, user, err, hello);
+  }
+}
+
 /* GAP9 has the job: wait for its first answer. */
 static void mark_sent(struct g9 *g, struct g9_entry *e) {
+  g->grace = false;
   e->st = G9E_SENT;
   set_timer(g, uses_bus(g, e) ? G9T_BUSFREE : G9T_JOB, uses_bus(g, e) ? g->cfg.busfree_ms : g->cfg.job_ms);
 }
@@ -169,7 +185,7 @@ static void fail_all(struct g9 *g, int err) {
 
 /* After power_off() and the failed entry: wait, then boot again if jobs are left. */
 static void restart(struct g9 *g) {
-  if (oldest_pending(g) != NULL) {
+  if (oldest_pending(g) != NULL || g->hold || g->reboot_fn != NULL) {
     g->state = G9_CYCLE;
     set_timer(g, G9T_CYCLE, g->cfg.restart_off_ms);
   }
@@ -201,7 +217,7 @@ bool g9_full(const struct g9 *g) {
 }
 
 bool g9_busy(const struct g9 *g) {
-  if (g->state != G9_OFF) {
+  if (g->state != G9_OFF || g->hold || g->reboot_fn != NULL) {
     return true;
   }
   for (int i = 0; i < G9_QUEUE_DEPTH; i++) {
@@ -251,6 +267,39 @@ int g9_submit(struct g9 *g, const void *job, g9_done_fn done, void *user) {
 void g9_shutdown(struct g9 *g) {
   power_off(g);
   fail_all(g, -ECANCELED);
+  g->hold = false;
+  reboot_done(g, -ECANCELED, NULL);
+}
+
+int g9_reboot(struct g9 *g, g9_reboot_fn fn, void *user) {
+  if (fn == NULL) {
+    return -EINVAL;
+  }
+  if (g->reboot_fn != NULL) {
+    return -EBUSY;
+  }
+  g->reboot_fn = fn;
+  g->reboot_user = user;
+  g->boot_retry = false; /* the same image would fail again */
+  if (g->state != G9_OFF) {
+    power_off(g);
+  }
+  fail_all(g, -ECANCELED);
+  g->state = G9_CYCLE;
+  set_timer(g, G9T_CYCLE, g->cfg.restart_off_ms);
+  return 0;
+}
+
+void g9_hold(struct g9 *g, bool on) {
+  g->hold = on;
+  if (on) {
+    if (g->state == G9_OFF) {
+      g->boot_retry = true;
+      start_boot(g);
+    }
+  } else if (g->state == G9_RUN && find(g, G9E_SENT) == NULL && oldest_pending(g) == NULL && g->timer != G9T_FETCH) {
+    set_timer(g, G9T_IDLE, g->cfg.idle_off_ms);
+  }
 }
 
 void g9_reset(struct g9 *g) {
@@ -268,11 +317,15 @@ void g9_reset(struct g9 *g) {
 
 /* Returns false if the frame ended the session (GAP9 is off now). */
 static bool on_hello(struct g9 *g, const uint8_t *p, size_t len) {
-  if (!sensei_decode_Version(p, len, &g->version) || g->version.major != g->codec->gap9_major) {
+  bool decoded = sensei_decode_Version(p, len, &g->version);
+
+  if (!decoded || g->version.major != g->codec->gap9_major) {
     /* GAP9 runs a firmware with other job messages: no job can work. */
     count_error(g);
     power_off(g);
     fail_all(g, -EPROTO);
+    g->hold = false;
+    reboot_done(g, -EPROTO, decoded ? &g->version : NULL);
     return false;
   }
   if (g->state == G9_RUN) {
@@ -293,6 +346,10 @@ static bool on_hello(struct g9 *g, const uint8_t *p, size_t len) {
     g->boot_retry = true;
     g->state = G9_RUN;
     set_timer(g, G9T_NONE, 0);
+    if (g->reboot_fn != NULL) {
+      g->grace = true;
+      reboot_done(g, 0, &g->version);
+    }
   }
   return true;
 }
@@ -398,7 +455,8 @@ void g9_spi_done(struct g9 *g, const uint8_t *rx, size_t rx_len) {
     } else if (consumed && g->armed < 0 && g->state == G9_RUN && find(g, G9E_SENT) == NULL) {
       /* "no more jobs" served: GAP9 sleeps, the idle timer decides the power-off */
       arm_next(g, false);
-      set_timer(g, G9T_IDLE, g->cfg.idle_off_ms);
+      set_timer(g, G9T_IDLE, g->grace && g->cfg.reboot_grace_ms != 0 ? g->cfg.reboot_grace_ms : g->cfg.idle_off_ms);
+      g->grace = false;
     } else {
       arm_next(g, true);
     }
@@ -432,7 +490,12 @@ void g9_timer_expired(struct g9 *g) {
   switch (kind) {
   case G9T_BOOT:
     count_error(g);
-    if (g->boot_retry) {
+    if (g->reboot_fn != NULL) {
+      power_off(g);
+      fail_all(g, -ETIMEDOUT);
+      g->hold = false;
+      reboot_done(g, -ETIMEDOUT, NULL);
+    } else if (g->boot_retry) {
       g->boot_retry = false;
       power_off(g);
       g->state = G9_CYCLE;
@@ -440,6 +503,7 @@ void g9_timer_expired(struct g9 *g) {
     } else {
       power_off(g);
       fail_all(g, -ETIMEDOUT);
+      g->hold = false;
     }
     break;
   case G9T_FETCH:
@@ -457,12 +521,12 @@ void g9_timer_expired(struct g9 *g) {
     break;
   }
   case G9T_IDLE:
-    if (find(g, G9E_SENT) == NULL && oldest_pending(g) == NULL) {
+    if (!g->hold && find(g, G9E_SENT) == NULL && oldest_pending(g) == NULL) {
       power_off(g);
     }
     break;
   case G9T_CYCLE:
-    if (oldest_pending(g) != NULL) {
+    if (oldest_pending(g) != NULL || g->hold || g->reboot_fn != NULL) {
       start_boot(g);
     } else {
       g->state = G9_OFF;

@@ -18,7 +18,11 @@
  * The link moves opaque job and result messages, described by a struct g9_codec. The app wraps
  * the calls with its own typed API and defines the storage with GAP9_LINK_STORAGE_DEFINE().
  * The devicetree needs lib/sensei_gap9/zephyr/gap9_link.overlay (aliases gap9-trigger,
- * gap9-spi-sel, gap9-i2c-sel, gap9-spis).
+ * gap9-spi-sel, gap9-i2c-sel, gap9-spis, gap9-slot-sel).
+ *
+ * Firmware slots: GAP9 holds two firmware images (slots A and B, lib/sensei_gap9/include/sensei_gap9/gap9_slot.h). The
+ * slot line (alias gap9-slot-sel, nRF P1.04 to GAP9 pad 56) tells its SSBL which one to start (low A, high B). The link
+ * drives it before it powers GAP9 and low whenever GAP9 is off.
  */
 
 #ifndef SENSEI_GAP9_ZEPHYR_H_
@@ -102,6 +106,36 @@ void gap9_link_power_off_now(void);
  * nothing while GAP9 is off. Safe from any thread.
  */
 void gap9_link_reset(void);
+
+/** What GAP9 reports in its HELLO (firmware version). */
+typedef sensei_Version sensei_gap9_hello;
+
+/**
+ * Choose the slot (0 = A, 1 = B) that GAP9 boots from at every later power-up. It does not touch a GAP9 that is on.
+ * Returns -EINVAL for another slot. The default is slot A. The slot is not stored: the app sets it at start-up.
+ */
+int gap9_link_set_slot(uint8_t slot);
+
+/**
+ * Keep GAP9 powered and SPI_A claimed between jobs (an update session): on powers GAP9 up if it is off, with the
+ * slot line set; off lets it power off after the idle time again. Returns 0, -EBUSY (the LPWAN client holds SPI_A or
+ * LTE transmits: nothing happens, try again later) or -ENODEV (link not initialised). The session owner releases it.
+ * The link also releases it after CONFIG_SENSEI_GAP9_HOLD_MAX_S and when GAP9 does not boot. Blocks until the link
+ * thread has acted (a few ms): do not call it from a result callback that runs on the link thread (they run on
+ * hooks->deliver_wq).
+ */
+int gap9_link_hold(bool on);
+
+/**
+ * Power cycle GAP9 with the slot line set to `slot` (this also sets the slot of later power-ups, as
+ * gap9_link_set_slot() does) and call cb with the HELLO of the new boot. The jobs queued or in flight fail with
+ * -ECANCELED. cb runs on hooks->deliver_wq, once. err: 0; -ETIMEDOUT (no HELLO in CONFIG_SENSEI_GAP9_BOOT_TIMEOUT_MS,
+ * GAP9 is off, no retry); -EPROTO (other major version, hello is set when it decoded, GAP9 is off); -ECANCELED (power
+ * off or button); -EBUSY (SPI_A or LTE busy and the caller does not hold the bus). hello is NULL unless a HELLO
+ * decoded. After a good HELLO GAP9 stays on for CONFIG_SENSEI_GAP9_REBOOT_GRACE_MS, so that a job submitted from cb
+ * needs no new boot. Returns 0 (cb will be called), -EINVAL, -EBUSY (a reboot is pending already) or -ENODEV.
+ */
+int gap9_link_reboot(uint8_t slot, void (*cb)(int err, const sensei_gap9_hello *hello, void *user), void *user);
 
 struct gap9_link_status {
   enum g9_state state;

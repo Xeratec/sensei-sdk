@@ -50,6 +50,11 @@
 			gpios = <&gpio1 5 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
 			label = "GAP9_nIRQ";
 		};
+		/* CS_nRF_GAP, wired straight to GAP9 pad 56: the boot slot (low A, high B), read by the SSBL. */
+		gpio_gap9_slot_sel: gpio_gap9_slot_sel {
+			gpios = <&gpio1 4 GPIO_ACTIVE_HIGH>;
+			label = "GAP9_slot_sel";
+		};
 	};
 
 	rtt0: rtt_chan0 {

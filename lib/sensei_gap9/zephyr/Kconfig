@@ -86,6 +86,21 @@ config SENSEI_GAP9_BUS_WAIT_S
 	  GAP9 is not powered while the LPWAN client uses SPI_A or LTE is connecting or transmitting
 	  (lib/sensei_busarb). Jobs wait; after this time they fail with -EBUSY.
 
+config SENSEI_GAP9_REBOOT_GRACE_MS
+	int "Time GAP9 stays on after the HELLO of gap9_link_reboot() (ms)"
+	default 2000
+	depends on SENSEI_GAP9
+	help
+	  A job submitted by the reboot callback in this time runs on the booted GAP9 without a new power cycle.
+
+config SENSEI_GAP9_HOLD_MAX_S
+	int "Longest gap9_link_hold() (s)"
+	default 3600
+	depends on SENSEI_GAP9
+	help
+	  The session owner releases the hold. This is the limit if it does not: the link releases it and GAP9
+	  powers off after the idle time.
+
 config SENSEI_GAP9_SHARED_GPIOS
 	bool "Connect the shared GPIO lines (P0.28) while GAP9 is on"
 	depends on SENSEI_GAP9

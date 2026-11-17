@@ -18,10 +18,11 @@ numbers, status to errno, which job needs the camera bus), so any message schema
 | Folder | Side | What |
 |---|---|---|
 | `include/sensei_gap9/gap9_link.h` | both | frame types, flags, buffer sizes, timing constants |
-| `src/gap9_core.c`, `gap9_core.h` | nRF5340 | protocol state machine: job queue, boot, frames, retries, timeouts, bus lock, idle power-off (no OS, host tested) |
-| `zephyr/` | nRF5340 | `gap9_link.c` (thread, SPIS3, trigger line, power, shared SPI_A), `gap9_shell.c`, `gap9_link.overlay` |
+| `include/sensei_gap9/gap9_slot.h` | all | A/B firmware slots in the GAP9 MRAM: layout, slot format, checks of the SSBL (header only) |
+| `src/gap9_core.c`, `gap9_core.h` | nRF5340 | protocol state machine: job queue, boot, frames, retries, timeouts, bus lock, idle power-off, hold, reboot (no OS, host tested) |
+| `zephyr/` | nRF5340 | `gap9_link.c` (thread, SPIS3, trigger line, slot line, power, shared SPI_A), `gap9_shell.c`, `gap9_link.overlay` |
 | `gap9/gap9_side.c`, `gap9_side.h` | GAP9 | SPI master, trigger line, hello, fetch, result, bus free (GAP SDK) |
-| `tests/` | host | the state machine against a simulated GAP9 master |
+| `tests/` | host | the state machine against a simulated GAP9 master (`test_gap9_core.c`), the slot checks (`test_gap9_slot.c`) |
 
 ## nRF5340 (Zephyr)
 
@@ -29,11 +30,15 @@ numbers, status to errno, which job needs the camera bus), so any message schema
   timeouts, idle power-off, bus wait. `SENSEI_GAP9_SHELL` adds `sensei gap9 [on|off|ping|status]` (needs an app shell root
   command `sensei`).
 - Add `zephyr/gap9_link.overlay` to `EXTRA_DTC_OVERLAY_FILE` of the app. It defines the aliases `gap9-trigger`, `gap9-spi-sel`,
-  `gap9-i2c-sel`, `gap9-spis` (SPIS3 on P0.08 to P0.11, trigger P1.05).
+  `gap9-i2c-sel`, `gap9-spis` (SPIS3 on P0.08 to P0.11, trigger P1.05), `gap9-slot-sel` (P1.04).
 - The app defines the storage with `GAP9_LINK_STORAGE_DEFINE(name, job_t, result_t)`, fills `struct gap9_link_cfg` (codec, hooks,
   storage) and calls `gap9_link_init()`, then `gap9_link_submit()`. Hooks: camera bus lock, camera clock, error counter, energy
   marker, the work queue for the result callbacks. The codec also names the GAP9 firmware major version it needs
   (`gap9_major`, checked against HELLO).
+- Firmware slots (A and B in the GAP9 MRAM, started by the SSBL in `GAP9/ssbl`): the alias `gap9-slot-sel` (P1.04 to GAP9
+  pad 56) is driven before GAP9 is powered and low when it is off. `gap9_link_set_slot()` picks the slot of the next
+  power-ups, `gap9_link_hold()` keeps GAP9 on for an update session, `gap9_link_reboot()` power cycles it into a slot and
+  reports its HELLO. Details in [PROTOCOL.md](PROTOCOL.md).
 - `gap9_link_submit()` returns `-ENOMEM` when all staging slots are taken; every other error comes through the callback
   (`final` is set on the last call of a job). `gap9_link_reset()` is for the user button.
 - SPI_A is shared with the LPWAN shield (`sensei_busarb`): GAP9 starts only when the shield holds neither the bus nor an LTE transmission.

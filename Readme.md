@@ -151,13 +151,16 @@ Plain C libraries for nRF (Zephyr), GAP9 and host builds. Each folder has `inclu
 | [lib/sensei_secure](lib/sensei_secure/README.md) | `CONFIG_SENSEI_SECURE` | End-to-end envelope (ECDH P-256, HKDF, AES-GCM, replay window) on the crypto library |
 | [lib/sensei_link](lib/sensei_link/README.md) | `CONFIG_SENSEI_LINK` | Message framing (COBS and CRC streams, SPI frames, fragments), nanopb glue, `types.proto` and `lpwan.proto` |
 | [lib/sensei_lpwan](lib/sensei_lpwan/README.md) | `CONFIG_SENSEI_LPWAN` | Client of the LPWAN shield's nRF9151 (LTE-M, NB-IoT, LoRaWAN) and the protocol cores of both sides |
-| [lib/sensei_gap9](lib/sensei_gap9/README.md) | `CONFIG_SENSEI_GAP9` | Link between the nRF5340 and GAP9 (jobs and results over SPI, power sequencing); GAP9 side for GAP9 apps |
+| [lib/sensei_gap9](lib/sensei_gap9/README.md) | `CONFIG_SENSEI_GAP9` | Link between the nRF5340 and GAP9 (jobs and results over SPI, power sequencing, firmware slot select); GAP9 side for GAP9 apps |
 | [lib/sensei_busarb](lib/sensei_busarb/README.md) | `CONFIG_SENSEI_BUSARB` | One owner at a time for the shared SPI_A bus and the LTE current peaks |
 | [lib/sensei_gas_index](lib/sensei_gas_index/README.md) | `CONFIG_SENSEI_GAS_INDEX` | VOC and NOx index from SGP41 raw ticks (Sensirion gas index algorithm inside) |
 | [lib/sensei_sensor_math](lib/sensei_sensor_math/README.md) | `CONFIG_SENSEI_SENSOR_MATH` | Unit conversions of the sensor shield drivers (SGP41 ticks, AS7331 uW/cm2, SCD41 ASC hours, LIS2DUXS12 wake threshold) |
 | [lib/sensei_pwr_math](lib/sensei_pwr_math/README.md) | `CONFIG_SENSEI_PWR_MATH` | Battery charge estimate per chemistry and button press detection of the power module |
 | [lib/sensei_diag](lib/sensei_diag/README.md) | `CONFIG_SENSEI_DIAG_CODEC` | Reset cause bits, fault record and boot state of the diagnostics module (byte layout, names) |
 | [lib/sensei_charge](lib/sensei_charge/README.md) | `CONFIG_SENSEI_CHARGE` | Software charge counter: states and events from a table, self-discharge, days left, retained record, swap rules |
+
+## GAP9 bootloader (`GAP9/ssbl`, `GAP9/layouts`)
+Optional second stage bootloader for over-the-air updates of the GAP9 firmware: two firmware slots (A and B) in the MRAM, selected by the nRF5340 through one wire (P1.04 to GAP9 pad 56). Apps that keep the SDK bootloader and the default layout are not affected. See [GAP9/ssbl](GAP9/ssbl/README.md) and [GAP9/layouts](GAP9/layouts/README.md).
 
 ## Applications (`NRF/apps/`)
 - [lpwan_shield](NRF/apps/lpwan_shield/README.md): firmware of the LPWAN shield's nRF9151 (LTE-M, NB-IoT, LoRaWAN over an LR1121). Board `sensei_lpwan_nrf9151/nrf9151/ns`.

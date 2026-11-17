@@ -1,0 +1,85 @@
+{
+  "flashes": [
+    {
+      "name": "mram",
+      "sections": [
+        {
+          "name": "fsbl",
+          "template": "rom",
+          "properties": {
+            "binary": null,
+            "boot": true,
+            "subtype": "fsbl"
+          }
+        },
+        {
+          "name": "meta_table",
+          "template": "meta table",
+          "properties": {
+            "ssbl_a": "ssbl",
+            "pt_a": "partition_table"
+          }
+        },
+        {
+          "name": "ssbl",
+          "template": "app binary",
+          "properties": {
+            "subtype": "ssbl",
+            "compressed": true,
+            "binary": null,
+            "size": 28672
+          }
+        },
+        {
+          "name": "partition_table",
+          "template": "partition table v2",
+          "properties": {
+            "size": 1024
+          }
+        },
+        {
+          "name": "volume_table",
+          "template": "volume table",
+          "properties": {
+            "volumes": [
+              {
+                "name": "factory",
+                "partitions": [
+                  "partition_table",
+                  "volume_table",
+                  "meta_table"
+                ]
+              }
+            ],
+            "size": 32144
+          }
+        },
+        {
+          "name": "checkpoint",
+          "template": "raw",
+          "properties": {
+            "size": 16384
+          }
+        },
+        {
+          "name": "slot_a",
+          "template": "raw",
+          "properties": {
+            "size": 1007616
+          }
+        },
+        {
+          "name": "slot_b",
+          "template": "raw",
+          "properties": {
+            "size": 1007616
+          }
+        }
+      ]
+    },
+    {
+      "name": "flash",
+      "sections": []
+    }
+  ]
+}

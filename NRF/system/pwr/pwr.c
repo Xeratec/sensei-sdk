@@ -59,13 +59,15 @@ LOG_MODULE_REGISTER(pwr);
 static const struct gpio_dt_spec gpio_gap9_pwr_sel = GPIO_DT_SPEC_GET(GPIO_NODE_gap9_pwr, gpios);
 static const struct gpio_dt_spec gpio_led_pwr = GPIO_DT_SPEC_GET(GPIO_NODE_led_pwr, gpios);
 
-// Lines that must be inactive before the rails come on: the GAP9 supply select and the I2C, SPI and shared-GPIO
-// muxes to GAP9 (nodes of the board devicetree). Floating, they could let GAP9 boot and use the buses.
+// Lines that must be inactive before the rails come on: the GAP9 supply select, the I2C, SPI and shared-GPIO
+// muxes to GAP9 and the GAP9 slot line P1.04 (nodes of the board devicetree). Floating, they could let GAP9 boot,
+// use the buses, or be back-powered through the slot pad.
 static const struct gpio_dt_spec gap9_lines[] = {
     GPIO_DT_SPEC_GET(DT_NODELABEL(gpio_gap9_pwr), gpios),
     GPIO_DT_SPEC_GET(DT_NODELABEL(gpio_gap9_i2c_ctrl), gpios),
     GPIO_DT_SPEC_GET(DT_NODELABEL(gpio_gap9_spi_ctrl), gpios),
     GPIO_DT_SPEC_GET(DT_NODELABEL(gpio_gap9_shared_ctrl), gpios),
+    GPIO_DT_SPEC_GET(DT_NODELABEL(gpio_gap9_slot_sel), gpios),
 };
 
 static const struct device *pwr_i2c = DEVICE_DT_GET(DT_ALIAS(i2ca));

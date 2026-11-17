@@ -31,6 +31,7 @@ LOG_MODULE_REGISTER(gap9, CONFIG_SENSEI_GAP9_LOG_LEVEL);
 static const struct gpio_dt_spec trig_pin = GPIO_DT_SPEC_GET(DT_ALIAS(gap9_trigger), gpios);
 static const struct gpio_dt_spec spi_sel = GPIO_DT_SPEC_GET(DT_ALIAS(gap9_spi_sel), gpios);
 static const struct gpio_dt_spec i2c_sel = GPIO_DT_SPEC_GET(DT_ALIAS(gap9_i2c_sel), gpios);
+static const struct gpio_dt_spec slot_sel = GPIO_DT_SPEC_GET(DT_ALIAS(gap9_slot_sel), gpios);
 #ifdef CONFIG_SENSEI_GAP9_SHARED_GPIOS
 static const struct gpio_dt_spec shared_sel = GPIO_DT_SPEC_GET(DT_ALIAS(gap9_shared_sel), gpios);
 #endif
@@ -46,6 +47,10 @@ static struct k_work spi_work;
 static struct k_work_delayable submit_work;
 static struct k_work shutdown_work;
 static struct k_work reset_work;
+static struct k_work reboot_work;
+static struct k_work reboot_done_work;
+static struct k_work hold_work;
+static struct k_work_delayable hold_tick_work;
 
 static const struct gap9_link_cfg *lcfg;
 static const struct gap9_link_hooks *hooks;
@@ -58,6 +63,7 @@ static volatile bool spis_armed;
 static volatile int spis_rx_amount;
 static bool trig_want;
 static volatile bool link_ready; /* gap9_link_init() is done */
+static atomic_t boot_slot;       /* the level of the slot line at the next power-up: 0 = A, 1 = B */
 
 static void report_error(void) {
   if (hooks != NULL && hooks->error != NULL) {
@@ -162,6 +168,8 @@ static void link_sync(void) {
 
 static void op_power(bool on) {
   if (on) {
+    /* The slot line is read by the SSBL right after power-up: set it first. */
+    gpio_pin_set_dt(&slot_sel, atomic_get(&boot_slot) != 0);
     camera_clock(true);
     gpio_pin_set_dt(&i2c_sel, 1);
 #ifdef CONFIG_SENSEI_GAP9_SHARED_GPIOS
@@ -172,6 +180,7 @@ static void op_power(bool on) {
     gap9_pwr(true);
   } else {
     gap9_pwr(false);
+    gpio_pin_set_dt(&slot_sel, 0); /* never drive the pad of an unpowered GAP9 */
     gap9_spi_bus(false);
     gpio_pin_set_dt(&i2c_sel, 0);
     camera_clock(false);
@@ -280,6 +289,43 @@ static void op_marker(bool on) {
   }
 }
 
+/* The end of a reboot goes to the delivery work queue: the callback may call into the link. */
+static struct {
+  g9_reboot_fn fn;
+  void *user;
+  int err;
+  sensei_Version hello;
+  bool has_hello;
+} rb;
+static atomic_t reboot_pending; /* from gap9_link_reboot() to the end of its callback */
+
+static void reboot_done_handler(struct k_work *w) {
+  ARG_UNUSED(w);
+  g9_reboot_fn fn = rb.fn;
+  void *user = rb.user;
+  int err = rb.err;
+  sensei_Version hello = rb.hello;
+  bool has_hello = rb.has_hello;
+
+  atomic_clear(&reboot_pending);
+  fn(err, has_hello ? &hello : NULL, user);
+}
+
+static void op_reboot_done(g9_reboot_fn fn, void *user, int err, const sensei_Version *hello) {
+  rb.fn = fn;
+  rb.user = user;
+  rb.err = err;
+  rb.has_hello = hello != NULL;
+  if (hello != NULL) {
+    rb.hello = *hello;
+  }
+  if (hooks != NULL && hooks->deliver_wq != NULL) {
+    k_work_submit_to_queue(hooks->deliver_wq, &reboot_done_work);
+  } else {
+    k_work_submit(&reboot_done_work);
+  }
+}
+
 static const struct g9_ops ops = {
     .power = op_power,
     .trigger = op_trigger,
@@ -289,6 +335,7 @@ static const struct g9_ops ops = {
     .deliver = op_deliver,
     .error = op_error,
     .marker = op_marker,
+    .reboot_done = op_reboot_done,
 };
 
 /* ---- work handlers (all run on the link thread) ---- */
@@ -400,13 +447,74 @@ static void reset_handler(struct k_work *w) {
   link_sync();
 }
 
+/* Reboot: the slot is set by gap9_link_reboot(). GAP9 needs SPI_A like for a job. */
+static g9_reboot_fn reboot_cb;
+static void *reboot_user;
+
+static void reboot_handler(struct k_work *w) {
+  ARG_UNUSED(w);
+  if (!bus_held && !bus_take()) {
+    op_reboot_done(reboot_cb, reboot_user, -EBUSY, NULL);
+    return;
+  }
+  int ret = g9_reboot(&core, reboot_cb, reboot_user);
+
+  if (ret != 0) {
+    op_reboot_done(reboot_cb, reboot_user, ret, NULL);
+  }
+  link_sync();
+}
+
+/* Hold: GAP9 stays on and SPI_A claimed. The tick renews the claim (it lapses after BUS_HOLD_MS without link events)
+ * and ends a hold that nobody released. */
+#define HOLD_TICK_MS 10000
+
+static K_MUTEX_DEFINE(hold_lock);
+static K_SEM_DEFINE(hold_done, 0, 1);
+static bool hold_req;
+static int hold_ret;
+static int64_t hold_since;
+
+static void hold_handler(struct k_work *w) {
+  ARG_UNUSED(w);
+  if (hold_req) {
+    if (!bus_held && !bus_take()) {
+      hold_ret = -EBUSY;
+    } else {
+      hold_ret = 0;
+      hold_since = k_uptime_get();
+      g9_hold(&core, true);
+      k_work_reschedule_for_queue(&link_wq, &hold_tick_work, K_MSEC(HOLD_TICK_MS));
+    }
+  } else {
+    hold_ret = 0;
+    k_work_cancel_delayable(&hold_tick_work);
+    g9_hold(&core, false);
+  }
+  link_sync();
+  k_sem_give(&hold_done);
+}
+
+static void hold_tick_handler(struct k_work *w) {
+  ARG_UNUSED(w);
+  if (!core.hold) { /* a failed boot cleared it */
+    return;
+  }
+  if (k_uptime_get() - hold_since >= CONFIG_SENSEI_GAP9_HOLD_MAX_S * 1000LL) {
+    LOG_WRN("GAP9 hold not released after %d s, released", CONFIG_SENSEI_GAP9_HOLD_MAX_S);
+    g9_hold(&core, false);
+    link_sync();
+    return;
+  }
+  bus_sync();
+  k_work_reschedule_for_queue(&link_wq, &hold_tick_work, K_MSEC(HOLD_TICK_MS));
+}
+
 /* ---- public API (gap9_zephyr.h) ---- */
 
 int gap9_link_init(const struct gap9_link_cfg *cfg) {
   const struct gpio_dt_spec *outs[] = {
-      &trig_pin,
-      &spi_sel,
-      &i2c_sel,
+      &trig_pin,   &spi_sel, &i2c_sel, &slot_sel,
 #ifdef CONFIG_SENSEI_GAP9_SHARED_GPIOS
       &shared_sel,
 #endif
@@ -431,6 +539,7 @@ int gap9_link_init(const struct gap9_link_cfg *cfg) {
       .job_ms = CONFIG_SENSEI_GAP9_JOB_TIMEOUT_MS,
       .idle_off_ms = CONFIG_SENSEI_GAP9_IDLE_OFF_MS,
       .restart_off_ms = CONFIG_SENSEI_GAP9_RESTART_OFF_MS,
+      .reboot_grace_ms = CONFIG_SENSEI_GAP9_REBOOT_GRACE_MS,
   };
 
   g9_init(&core, &ops, cfg->codec, &gcfg, cfg->storage.jobs, cfg->storage.result);
@@ -440,6 +549,10 @@ int gap9_link_init(const struct gap9_link_cfg *cfg) {
   k_work_init_delayable(&submit_work, submit_handler);
   k_work_init(&shutdown_work, shutdown_handler);
   k_work_init(&reset_work, reset_handler);
+  k_work_init(&reboot_work, reboot_handler);
+  k_work_init(&reboot_done_work, reboot_done_handler);
+  k_work_init(&hold_work, hold_handler);
+  k_work_init_delayable(&hold_tick_work, hold_tick_handler);
   k_work_init(&deliver_work, deliver_handler);
   k_work_init_delayable(&timer_work, timer_handler);
   link_ready = true;
@@ -477,6 +590,48 @@ void gap9_link_reset(void) {
   if (link_ready) {
     k_work_submit_to_queue(&link_wq, &reset_work);
   }
+}
+
+int gap9_link_set_slot(uint8_t slot) {
+  if (slot > 1) {
+    return -EINVAL;
+  }
+  atomic_set(&boot_slot, slot);
+  return 0;
+}
+
+int gap9_link_hold(bool on) {
+  if (!link_ready) {
+    return -ENODEV;
+  }
+  if (k_current_get() == &link_wq.thread) {
+    return -EDEADLK;
+  }
+  k_mutex_lock(&hold_lock, K_FOREVER);
+  hold_req = on;
+  k_sem_reset(&hold_done);
+  k_work_submit_to_queue(&link_wq, &hold_work);
+  int ret = k_sem_take(&hold_done, K_SECONDS(2)) == 0 ? hold_ret : -ETIMEDOUT;
+
+  k_mutex_unlock(&hold_lock);
+  return ret;
+}
+
+int gap9_link_reboot(uint8_t slot, void (*cb)(int err, const sensei_gap9_hello *hello, void *user), void *user) {
+  if (cb == NULL || slot > 1) {
+    return -EINVAL;
+  }
+  if (!link_ready) {
+    return -ENODEV;
+  }
+  if (!atomic_cas(&reboot_pending, 0, 1)) {
+    return -EBUSY;
+  }
+  atomic_set(&boot_slot, slot);
+  reboot_cb = cb;
+  reboot_user = user;
+  k_work_submit_to_queue(&link_wq, &reboot_work);
+  return 0;
 }
 
 void gap9_link_status_get(struct gap9_link_status *st) {

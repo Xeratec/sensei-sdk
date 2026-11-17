@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+# SPDX-License-Identifier: Apache-2.0
+#
+# Authors:
+# - Philip Wiese <wiesep@iis.ee.ethz.ch>
+
+source "$(GAP_SDK_HOME)/utils/kconfig/Kconfig"
+
+menu "SENSEI SSBL"
+
+    config MANDATORY
+        bool
+        default y
+        select DRIVER_BOOTLOADER
+        select DRIVER_PARTITION
+        select DRIVER_MRAM
+        select DRIVER_CRC32
+
+endmenu

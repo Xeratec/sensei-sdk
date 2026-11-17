@@ -22,11 +22,12 @@ messages are the app's: the link moves them as opaque payloads (`struct g9_codec
 | SPI select | P0.20 (SPI_GAP_SEL) | | high connects SPI_A to GAP9 |
 | I2C select | P0.06 (I2C_GAP_SEL) | | high connects the camera bus to GAP9 |
 | Power | P1.15 (`gap9_pwr()` of the SDK) | | |
+| Slot select (net CS_nRF_GAP) | P1.04, output | pad 56, input (read by the SSBL) | low = firmware slot A, high = slot B |
 
 The SPI is mode 3 (CPOL 1, CPHA 1), 8 bit, MSB first, 2 MHz (`SENSEI_SPI_HZ`). The wire is called `GAP9_nIRQ` in the SDK device tree (input of the
 nRF5340). The link uses it the other way round, as an output. Both ends are plain GPIOs, no buffer between them.
-Two more direct lines exist and stay unused: P1.04 `CS_nRF_GAP` (GAP9 pad 56) and P1.06 `EXT_RX_SPI` (pad 57).
-SPI_B (P1.07 and following, GAP9 SPI2) is a different path and not used.
+One more direct line stays unused: P1.06 `EXT_RX_SPI` (pad 57). SPI_B (P1.07 and following, GAP9 SPI2) is a
+different path and not used.
 
 ## Frames
 
@@ -139,6 +140,28 @@ driver cannot abort a transfer, and disabling the peripheral under it would leav
 the pins are parked (sleep state: input buffers off) and the select lines are low. The LPWAN client's SPIM4 sets
 its own pin states on the same pads. Untested on hardware: the idle current with GAP9 off, and MISO (P0.10)
 during an LPWAN exchange, are in the node's `docs/TESTING.md` (T7.14).
+
+## Firmware slots, hold and reboot
+
+GAP9 can hold two firmware images (slots A and B in the MRAM, `include/sensei_gap9/gap9_slot.h`). Its SSBL
+(`GAP9/ssbl`) reads the slot line (pad 56) a few ms after power-up and starts that slot; a slot that is not a complete
+image or fails its CRC is skipped and the other one starts. The nRF5340 decides which slot is good (trial boot and
+confirm, `NRF/system/ota/sensei_gap9_trial.h`); the SSBL only follows the line.
+
+- The line is set before the GAP9 rail comes on (`op_power()`), and low whenever GAP9 is off, also while the nRF5340
+  boots (`pwr_boot_hook`): a high pin must never feed an unpowered GAP9. Untested on hardware: level at power-up.
+- `gap9_link_set_slot(slot)` chooses the slot of every later power-up (default A; the app sets it from its stored
+  state). A GAP9 that is on is not touched.
+- `gap9_link_hold(true)` keeps GAP9 powered and SPI_A claimed between jobs, for an update session: it takes the bus like
+  a job (`-EBUSY` if the LPWAN client holds it), powers GAP9 up and blocks the idle power-off. `gap9_link_hold(false)`
+  lets the idle timer run. The session owner releases it; the link also releases it after `SENSEI_GAP9_HOLD_MAX_S` and
+  when GAP9 fails to boot twice. The bus claim is renewed every 10 s.
+- `gap9_link_reboot(slot, cb, user)` sets the slot, power cycles GAP9 (rail off 150 ms, boot) and calls `cb` with the
+  HELLO of the new boot: `0`, `-ETIMEDOUT` (no HELLO in the boot time, GAP9 off, no retry: the same image would fail
+  again), `-EPROTO` (other major version), `-ECANCELED` or `-EBUSY`. Jobs queued or in flight fail with `-ECANCELED`;
+  jobs submitted later run on the new boot. After a good HELLO GAP9 stays on for `SENSEI_GAP9_REBOOT_GRACE_MS`, so a
+  job sent from `cb` (the status job of the trial) needs no second boot. The slot stays set: after a failed trial the app
+  calls `gap9_link_set_slot(confirmed)`.
 
 ## Sizes
 

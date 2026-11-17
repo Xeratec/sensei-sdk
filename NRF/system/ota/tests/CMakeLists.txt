@@ -27,3 +27,8 @@ add_executable(test_ota_reset test_ota_reset.c)
 target_include_directories(test_ota_reset PRIVATE ${CMAKE_CURRENT_LIST_DIR}/..)
 target_compile_options(test_ota_reset PRIVATE -Wall -Wextra -Werror)
 add_test(NAME ota_reset COMMAND test_ota_reset)
+
+add_executable(test_gap9_trial test_gap9_trial.c)
+target_include_directories(test_gap9_trial PRIVATE ${CMAKE_CURRENT_LIST_DIR}/..)
+target_compile_options(test_gap9_trial PRIVATE -Wall -Wextra -Werror)
+add_test(NAME gap9_trial COMMAND test_gap9_trial)

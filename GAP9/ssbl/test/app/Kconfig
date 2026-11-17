@@ -1,0 +1,7 @@
+# SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+# SPDX-License-Identifier: Apache-2.0
+#
+# Authors:
+# - Philip Wiese <wiesep@iis.ee.ethz.ch>
+
+source "$(GAP_SDK_HOME)/utils/kconfig/Kconfig"

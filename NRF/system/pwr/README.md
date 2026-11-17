@@ -49,8 +49,9 @@ Both are independent of `CONFIG_SENSEI_PWR` (no PMIC needed).
 
 1. GPIO and the I2C buses: the TWIM driver starts at `POST_KERNEL` 50 (`CONFIG_I2C_INIT_PRIORITY`). The PSRAM
    driver (opt-in) also starts at 50 and keeps its supply off.
-2. `POST_KERNEL` 55, `pwr_boot_hook`: first drives the GAP9 supply select (P1.15) and the GAP9 I2C, SPI and shared-GPIO
-   mux selects (P0.06, P0.20, P0.28) inactive, so GAP9 cannot boot or use the buses while the rails come up. Then it
+2. `POST_KERNEL` 55, `pwr_boot_hook`: first drives the GAP9 supply select (P1.15), the GAP9 I2C, SPI and shared-GPIO
+   mux selects (P0.06, P0.20, P0.28) and the GAP9 slot line (P1.04) inactive, so GAP9 cannot boot or use the buses
+   while the rails come up and the slot pad is not driven into an unpowered chip. Then it
    resets the PMIC (rails go off for 300 ms), applies the config, and with
    `SENSEI_PWR_BOOT_RAILS` (default with the sensor shield) switches the rails on (SBB0 3.3 V, SBB1 2.8 V, SBB2 1.2 V,
    LDO0 3.3 V), waits 50 ms, and switches the LED supply (SDB, P0.22) on.

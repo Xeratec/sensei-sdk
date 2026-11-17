@@ -20,3 +20,9 @@ add_executable(test_gap9_core test_gap9_core.c)
 target_link_libraries(test_gap9_core PRIVATE sensei_gap9_core)
 target_compile_options(test_gap9_core PRIVATE -Wall -Wextra -Werror)
 add_test(NAME gap9_core COMMAND test_gap9_core)
+
+# Slot format and checks of the SSBL (header only, no link library).
+add_executable(test_gap9_slot test_gap9_slot.c)
+target_include_directories(test_gap9_slot PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../include)
+target_compile_options(test_gap9_slot PRIVATE -Wall -Wextra -Werror)
+add_test(NAME gap9_slot COMMAND test_gap9_slot)

@@ -113,6 +113,9 @@ static int idx(const char *s) {
 }
 
 static bool powered, trig, locked;
+static uint8_t slot_req;   /* what gap9_link_set_slot() / gap9_link_reboot() store (platform) */
+static int power_slot[16]; /* the slot line at each power-up, like the platform sets it before gap9_pwr(true) */
+static int power_ups;
 static int lock_n, unlock_n;
 static uint32_t timer_ms;
 static int timer_n; /* timers started */
@@ -120,6 +123,9 @@ static struct g9 g;
 
 static void op_power(bool on) {
   powered = on;
+  if (on && power_ups < 16) {
+    power_slot[power_ups++] = slot_req;
+  }
   ev(on ? "P1" : "P0");
 }
 /* The frame is g.tx. Log what is offered when the line goes high. */
@@ -174,8 +180,26 @@ static unsigned nerr;
 static void op_error(void) { nerr++; }
 static void op_marker(bool on) { (void)on; }
 
-static const struct g9_ops ops = {op_power, op_trigger, op_lock, op_unlock, op_timer, deliver, op_error, op_marker};
-static const struct g9_cfg cfg = {4000, 3000, 8000, 200, 150};
+/* g9_reboot() results (the platform runs the callback outside the core; here it is a plain call). */
+static struct {
+  int n;
+  int err;
+  bool has_hello;
+  uint32_t major;
+  void *user;
+} rbk;
+static void reboot_cb(int err, const sensei_Version *hello, void *user) {
+  rbk.n++;
+  rbk.err = err;
+  rbk.has_hello = hello != NULL;
+  rbk.major = hello ? hello->major : 0;
+  rbk.user = user;
+}
+static void op_reboot_done(g9_reboot_fn fn, void *user, int err, const sensei_Version *hello) { fn(err, hello, user); }
+
+static const struct g9_ops ops = {op_power, op_trigger, op_lock,   op_unlock,     op_timer,
+                                  deliver,  op_error,   op_marker, op_reboot_done};
+static const struct g9_cfg cfg = {4000, 3000, 8000, 200, 150, 2000};
 
 static void reset(void) {
   memset(evlog, 0, sizeof(evlog));
@@ -185,6 +209,9 @@ static void reset(void) {
   timer_n = 0;
   ngot = 0;
   nerr = 0;
+  slot_req = 0;
+  power_ups = 0;
+  memset(&rbk, 0, sizeof(rbk));
   g9_init(&g, &ops, &codec, &cfg, jobs_pool, &res_buf);
 }
 
@@ -820,6 +847,183 @@ static void test_reset_button(void) {
   CHECK(gap9_do_job() == 2 && ngot == 2 && gots[1].err == 0);
 }
 
+/* ---- reboot into a slot ---- */
+
+static void test_reboot(void) {
+  tjob j = job_forecast();
+  tjob fj;
+  bool bad;
+  int tag;
+
+  reset();
+  CHECK(g9_reboot(&g, NULL, NULL) == -EINVAL);
+
+  /* from a running GAP9 with a job in flight and one waiting */
+  g9_submit(&g, &j, done_cb, NULL);
+  g9_submit(&g, &j, done_cb, NULL);
+  sim_hello();
+  sim_poll(true, false, &fj, &bad, 0);
+  CHECK(power_ups == 1 && power_slot[0] == 0);
+  slot_req = 1; /* gap9_link_reboot(1, ...) stores the slot, then asks the core */
+  CHECK(g9_reboot(&g, reboot_cb, &tag) == 0);
+  CHECK(g9_reboot(&g, reboot_cb, &tag) == -EBUSY);
+  CHECK(!powered && ngot == 2 && gots[0].err == -ECANCELED && gots[1].err == -ECANCELED);
+  CHECK(timer_ms == cfg.restart_off_ms && g9_busy(&g) && rbk.n == 0);
+  g9_timer_expired(&g);
+  CHECK(powered && power_ups == 2 && power_slot[1] == 1 && timer_ms == cfg.boot_ms);
+  CHECK(g.tx_len == G9L_HDR); /* only NONE during boot */
+  sim_hello();
+  CHECK(rbk.n == 1 && rbk.err == 0 && rbk.has_hello && rbk.major == TEST_GAP9_MAJOR && rbk.user == &tag);
+  CHECK(powered && !g.reboot_fn);
+
+  /* GAP9 stays on for the grace time, and a job submitted in it needs no new boot */
+  sensei_spi_header_t h = sim_poll(true, false, NULL, &bad, 0);
+  CHECK(h.type == G9L_TYPE_NONE && timer_ms == cfg.reboot_grace_ms && !trig);
+  CHECK(g9_submit(&g, &j, done_cb, NULL) == 0);
+  CHECK(power_ups == 2 && trig);
+  gap9_do_job();
+  CHECK(ngot == 3 && gots[2].err == 0);
+  /* the next idle time is the normal one */
+  h = sim_poll(true, false, NULL, &bad, 0);
+  CHECK(h.type == G9L_TYPE_NONE && timer_ms == cfg.idle_off_ms);
+  g9_timer_expired(&g);
+  CHECK(!powered && !g9_busy(&g));
+
+  /* from GAP9 off: the off time first, then the boot; a job submitted meanwhile runs on the new boot */
+  reset();
+  slot_req = 1;
+  CHECK(g9_reboot(&g, reboot_cb, NULL) == 0);
+  CHECK(!powered && timer_ms == cfg.restart_off_ms);
+  CHECK(g9_submit(&g, &j, done_cb, NULL) == 0);
+  g9_timer_expired(&g);
+  CHECK(powered && power_slot[0] == 1);
+  sim_hello();
+  CHECK(rbk.n == 1 && rbk.err == 0 && has("armJ"));
+  gap9_do_job();
+  CHECK(ngot == 1 && gots[0].err == 0);
+}
+
+static void test_reboot_failures(void) {
+  tjob j = job_forecast();
+
+  /* no HELLO: -ETIMEDOUT, GAP9 off, no second try, nothing booted again */
+  reset();
+  slot_req = 1;
+  g9_reboot(&g, reboot_cb, NULL);
+  g9_timer_expired(&g);
+  CHECK(powered);
+  g9_submit(&g, &j, done_cb, NULL);
+  g9_timer_expired(&g); /* boot timeout */
+  CHECK(rbk.n == 1 && rbk.err == -ETIMEDOUT && !rbk.has_hello);
+  CHECK(!powered && ngot == 1 && gots[0].err == -ETIMEDOUT && !g9_busy(&g) && power_ups == 1 && nerr == 1);
+  /* a later job boots normally (the platform keeps the slot it was given) */
+  g9_submit(&g, &j, done_cb, NULL);
+  CHECK(powered && power_ups == 2);
+
+  /* HELLO with another major version */
+  reset();
+  g9_reboot(&g, reboot_cb, NULL);
+  g9_timer_expired(&g);
+  sim_hello_major(TEST_GAP9_MAJOR + 1);
+  CHECK(rbk.n == 1 && rbk.err == -EPROTO && rbk.has_hello && rbk.major == TEST_GAP9_MAJOR + 1);
+  CHECK(!powered && !g9_busy(&g));
+
+  /* a HELLO that does not decode */
+  reset();
+  uint8_t junk[8] = {0xff, 0xff, 0xff, 0xff};
+
+  g9_reboot(&g, reboot_cb, NULL);
+  g9_timer_expired(&g);
+  sim_push(G9L_TYPE_HELLO, 0, junk, sizeof(junk), 0);
+  CHECK(rbk.n == 1 && rbk.err == -EPROTO && !rbk.has_hello && !powered);
+
+  /* power off now and the button while the reboot is pending */
+  reset();
+  g9_reboot(&g, reboot_cb, NULL);
+  g9_timer_expired(&g);
+  g9_shutdown(&g);
+  CHECK(rbk.n == 1 && rbk.err == -ECANCELED && !powered && !g9_busy(&g));
+  reset();
+  g9_reboot(&g, reboot_cb, NULL);
+  g9_timer_expired(&g);
+  g9_reset(&g);
+  CHECK(!powered && rbk.n == 0 && timer_ms == cfg.restart_off_ms);
+  g9_timer_expired(&g);
+  CHECK(powered);
+  sim_hello();
+  CHECK(rbk.n == 1 && rbk.err == 0);
+}
+
+/* ---- hold ---- */
+
+static void test_hold(void) {
+  tjob j = job_forecast();
+  bool bad;
+
+  reset();
+  slot_req = 1;
+  g9_hold(&g, true); /* off: powers up, no job */
+  CHECK(powered && power_slot[0] == 1 && g9_busy(&g) && timer_ms == cfg.boot_ms);
+  sim_hello();
+  sensei_spi_header_t h = sim_poll(true, false, NULL, &bad, 0);
+  CHECK(h.type == G9L_TYPE_NONE && timer_ms == cfg.idle_off_ms);
+  g9_timer_expired(&g); /* the idle time passes: held */
+  CHECK(powered && g9_busy(&g));
+  /* a job wakes it and runs */
+  g9_submit(&g, &j, done_cb, NULL);
+  CHECK(trig && power_ups == 1);
+  gap9_do_job();
+  CHECK(ngot == 1 && gots[0].err == 0);
+  h = sim_poll(true, false, NULL, &bad, 0);
+  g9_timer_expired(&g);
+  CHECK(powered && g9_busy(&g));
+  /* release: the idle timer runs again */
+  g9_hold(&g, false);
+  CHECK(powered && timer_ms == cfg.idle_off_ms);
+  g9_timer_expired(&g);
+  CHECK(!powered && !g9_busy(&g));
+
+  /* release while a job is in flight: no power-off before the job ends */
+  reset();
+  g9_hold(&g, true);
+  sim_hello();
+  g9_submit(&g, &j, done_cb, NULL);
+  tjob fj;
+
+  sim_poll(true, false, &fj, &bad, 0);
+  g9_hold(&g, false);
+  CHECK(powered && timer_ms == cfg.job_ms);
+  tres r;
+
+  res_forecast(&r, fj.seq);
+  sim_result(&r, 0, 0);
+  h = sim_poll(true, false, NULL, &bad, 0);
+  CHECK(h.type == G9L_TYPE_NONE && timer_ms == cfg.idle_off_ms);
+  g9_timer_expired(&g);
+  CHECK(!powered);
+
+  /* a boot that fails twice clears the hold (the bus claim of the platform goes with g9_busy) */
+  reset();
+  g9_hold(&g, true);
+  g9_timer_expired(&g);
+  CHECK(!powered && g9_busy(&g)); /* one retry: the cycle */
+  g9_timer_expired(&g);
+  CHECK(powered);
+  g9_timer_expired(&g);
+  CHECK(!powered && !g9_busy(&g) && !g.hold);
+
+  /* hold on a GAP9 that runs already: no new boot; shutdown clears it */
+  reset();
+  g9_submit(&g, &j, done_cb, NULL);
+  sim_hello();
+  g9_hold(&g, true);
+  CHECK(power_ups == 1);
+  g9_shutdown(&g);
+  CHECK(!powered && !g9_busy(&g));
+  g9_hold(&g, false); /* idempotent */
+  CHECK(!powered);
+}
+
 int main(void) {
   test_normal();
   test_result_crc_error();
@@ -842,6 +1046,9 @@ int main(void) {
   test_early_error_frees_bus();
   test_version_mismatch();
   test_reset_button();
+  test_reboot();
+  test_reboot_failures();
+  test_hold();
   printf("%d checks, %d failed\n", checks, fails);
   return fails ? 1 : 0;
 }

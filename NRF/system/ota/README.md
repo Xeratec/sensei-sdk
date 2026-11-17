@@ -81,6 +81,15 @@ the board TLV `0xa0`, a protected TLV (covered by the signature) that names the 
 app of this SDK checks it before it accepts an image; the host tools of SENSEI IEQ check it for both boards. MCUboot itself
 ignores it.
 
+## GAP9 firmware slots
+
+[`sensei_gap9_trial.h`](sensei_gap9_trial.h) is the pure rule for the trial boot of a GAP9 firmware slot (A or B in the
+GAP9 MRAM, started by the SSBL in `GAP9/ssbl`): state (confirmed slot, slot on trial, boots tried), events (HELLO ok or
+bad, no HELLO, status ok or bad, nRF5340 reset during the trial) and actions (boot a slot, confirm it, revert to the
+confirmed slot). It has the same shape as the nRF5340 rule above: the app stores the state (NVS) and acts on the result with
+`gap9_link_reboot()` and `gap9_link_set_slot()` of `lib/sensei_gap9`. It also covers lost settings (probe A, then B). Host
+test: `tests/test_gap9_trial.c`.
+
 ## Tests
 
 - Host (`tests/`, `make test-host`): the trial decision, the image TLVs, the recovery reset rule.
@@ -94,4 +103,4 @@ ignores it.
 - The network core of the nRF5340: the NCS update path needs the b0n bootloader and the partition manager.
 - Images for other processors: the nRF9151 of the LPWAN shield has its own MCUboot and is updated through the client of
   `lib/sensei_lpwan` (`sensei_lpwan_dfu_submit()`); the shield app uses the pure trial rule `sensei_ota_trial.h` of this folder.
-  GAP9 is not covered.
+  GAP9: only the trial rule above lives here; the transfer and the slots are in the node app and `GAP9/ssbl`.

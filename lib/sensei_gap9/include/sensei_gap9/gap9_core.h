@@ -33,6 +33,14 @@
 #endif
 
 /**
+ * Result of gap9_link_reboot(): the first HELLO of the new boot, or an error.
+ * err: 0, -ETIMEDOUT (no HELLO in boot_ms), -EPROTO (the HELLO has another major version, hello is
+ * set when it decoded), -ECANCELED (power off or button), -EBUSY (SPI_A or LTE busy, platform).
+ * hello is NULL when none came.
+ */
+typedef void (*g9_reboot_fn)(int err, const sensei_Version *hello, void *user);
+
+/**
  * Result callback, once per result frame. err < 0: timeout, link or GAP9 error (res may be NULL).
  * final: the last call of this job (a job with MORE frames calls it with final = false first).
  */
@@ -81,10 +89,17 @@ struct g9_ops {
   void (*deliver)(g9_done_fn fn, void *user, int err, const void *res, bool final);
   void (*error)(void);
   void (*marker)(bool on);
+  /**
+   * Report the end of g9_reboot(), once. May be NULL. The platform runs fn outside the link
+   * thread (fn may call back into the link).
+   */
+  void (*reboot_done)(g9_reboot_fn fn, void *user, int err, const sensei_Version *hello);
 };
 
 struct g9_cfg {
   uint32_t boot_ms, busfree_ms, job_ms, idle_off_ms, restart_off_ms;
+  /** Time GAP9 stays on after a reboot's HELLO when no job comes (0: idle_off_ms). */
+  uint32_t reboot_grace_ms;
 };
 
 enum g9_state { G9_OFF, G9_BOOT, G9_RUN, G9_CYCLE };
@@ -107,6 +122,10 @@ struct g9 {
   enum { G9T_NONE, G9T_BOOT, G9T_BUSFREE, G9T_JOB, G9T_IDLE, G9T_CYCLE, G9T_FETCH } timer;
   bool err_flag; /* last GAP9 frame was bad: set ERROR in our next header */
   bool boot_retry;
+  bool hold;              /* g9_hold(): stay powered with no jobs */
+  bool grace;             /* first idle after a reboot: wait reboot_grace_ms */
+  g9_reboot_fn reboot_fn; /* g9_reboot() is waiting for the HELLO */
+  void *reboot_user;
   int armed; /* index of the job frame in tx, -1 for NONE */
   size_t tx_len;
   uint32_t seq;
@@ -139,7 +158,21 @@ void g9_spi_done(struct g9 *g, const uint8_t *rx, size_t rx_len);
 
 void g9_timer_expired(struct g9 *g);
 
-/** True while GAP9 is powered, booting or restarting, or jobs are pending. */
+/**
+ * Power cycle GAP9 and report the HELLO of the new boot through ops->reboot_done (fn, once). The
+ * platform has set the boot selection (slot line) already. The jobs queued or in flight fail
+ * with -ECANCELED. Jobs submitted afterwards run on the new boot. No retry: a boot without HELLO
+ * ends with -ETIMEDOUT and GAP9 off. -EBUSY if a reboot is pending already.
+ */
+int g9_reboot(struct g9 *g, g9_reboot_fn fn, void *user);
+
+/**
+ * Keep GAP9 on without jobs (an update session): on powers it up if it is off and blocks the idle
+ * power-off; off lets the idle timer run again. A boot that fails twice clears the hold.
+ */
+void g9_hold(struct g9 *g, bool on);
+
+/** True while GAP9 is powered, booting or restarting, jobs are pending, or it is held. */
 bool g9_busy(const struct g9 *g);
 
 /** Power off now and fail all jobs (-ECANCELED). */

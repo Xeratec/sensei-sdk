@@ -1,0 +1,21 @@
+{
+  "flashes": [
+    {
+      "name": "mram",
+      "sections": [
+        {
+          "name": "app",
+          "template": "app binary",
+          "properties": {
+            "compressed": false,
+            "binary": null
+          }
+        }
+      ]
+    },
+    {
+      "name": "flash",
+      "sections": []
+    }
+  ]
+}

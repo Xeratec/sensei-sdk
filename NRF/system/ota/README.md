@@ -16,7 +16,7 @@ Firmware update for apps that MCUboot starts (sysbuild with `SB_CONFIG_BOOTLOADE
 | mcumgr | selects the image and OS groups, the flash helpers and `REBOOT` | `SENSEI_OTA` |
 | SMP over Bluetooth | the standard GATT SMP service | `SENSEI_OTA_SMP_BT` |
 | SMP on a shared byte stream | mcumgr serial lines on a stream that also carries 0x00-delimited frames of another protocol (USB CDC) | `SENSEI_OTA_SMP_STREAM` |
-| Trial boot | after an update the image runs on trial: `sensei_ota_init()` confirms it when the app's check passes and an SMP request came in on the image, and resets the node if that does not happen in time, so MCUboot reverts | `SENSEI_OTA_CONFIRM`, `_CONFIRM_NEEDS_LINK`, `_CONFIRM_DELAY_S`, `_TRIAL_TIMEOUT_S` |
+| Trial boot | after an update the image runs on trial: `sensei_ota_init()` confirms it when the app's check passes and an SMP request came in on the image (hook registered at boot, `SYS_INIT`), and resets the node if that does not happen in time, so MCUboot reverts | `SENSEI_OTA_CONFIRM`, `_CONFIRM_NEEDS_LINK`, `_CONFIRM_DELAY_S`, `_TRIAL_TIMEOUT_S` |
 
 API: [`sensei_ota.h`](sensei_ota.h).
 
@@ -39,8 +39,9 @@ sensei_ota_init(healthy);   /* at the end of start-up */
 Why the link counts: a new image that works but has a broken Bluetooth or USB link would otherwise confirm itself
 and could not be updated again. With `SENSEI_OTA_CONFIRM_NEEDS_LINK` (default on) it stays on trial until an SMP
 request came in on it (any mcumgr command, on BLE or USB), so MCUboot reverts it if the update path was never
-reachable. The option selects `MCUMGR_SMP_COMMAND_STATUS_HOOKS`, which calls the hook, and a `BUILD_ASSERT` fails
-the build if that option is off. A frame of the app's own protocol is no proof: it works with a broken SMP path.
+reachable. The option selects `MCUMGR_SMP_COMMAND_STATUS_HOOKS`, which calls the hook (registered at boot by
+`SYS_INIT`, so a request during start-up counts too), and a `BUILD_ASSERT` fails the build if that option is off. A
+frame of the app's own protocol is no proof: it works with a broken SMP path.
 Debug and Release can use the same setting; turn it off only when the host never sends SMP after an update.
 `sensei_ota_link_seen()` is for an update path other than SMP. The host tool must send one SMP request (for example
 the image list) after the reboot, or the image reverts. The decision is the pure function in

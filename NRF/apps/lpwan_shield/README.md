@@ -35,8 +35,8 @@ The SENSEI IEQ node builds it with `make nrf9151` and `make nrf9151-release` (`f
 
 | Build | Flash (non-secure image) | RAM |
 |---|---|---|
-| Release | 91 kB | 51 kB |
-| Debug (RTT log) | 141 kB | 59 kB |
+| Release | 93 kB | 51 kB |
+| Debug (RTT log) | 143 kB | 59 kB |
 
 The non-secure slot is 212 kB. Kconfig: `LPWAN_SHIELD_LTE`, `LPWAN_SHIELD_LORA` (both default y).
 Turn one off to save flash.

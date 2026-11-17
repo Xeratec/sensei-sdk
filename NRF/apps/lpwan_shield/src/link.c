@@ -37,12 +37,14 @@
 #include <zephyr/drivers/spi.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/task_wdt/task_wdt.h>
 
 #include "link.h"
 
 LOG_MODULE_REGISTER(link, CONFIG_LPWAN_SHIELD_LOG_LEVEL);
 
 #define LINK_NODE DT_ALIAS(lpwan_link)
+#define LINK_WDT_MS 15000
 #define SPIS_NODE DT_NODELABEL(spi0)
 
 static const struct device *const spis = DEVICE_DT_GET(SPIS_NODE);
@@ -118,16 +120,25 @@ static void link_main(void *a, void *b, void *c) {
   ARG_UNUSED(b);
   ARG_UNUSED(c);
 
+  /* Task watchdog: this thread must come round every few seconds. It waits for the master with a timeout
+   * (the armed transfer stays armed), and does not feed while a re-arm keeps failing, so a link that
+   * cannot be armed resets the chip. The hardware watchdog behind it catches a frozen kernel. */
+  int wdt_id = task_wdt_add(LINK_WDT_MS, NULL, NULL);
+
   /* The first arm may fail only if the driver is not ready: wait and retry. */
   while ((err = link_slave_start(&slave)) != 0) {
     LOG_ERR("arm failed: %d", err);
     k_msleep(100);
+    (void)task_wdt_feed(wdt_id);
   }
   LOG_INF("SPI slave ready");
 
   for (;;) {
-    /* Never time out: an armed transfer stays armed until the master comes. */
-    k_sem_take(&done_sem, K_FOREVER);
+    /* An armed transfer stays armed until the master comes: a timeout here only feeds the watchdog. */
+    (void)task_wdt_feed(wdt_id);
+    if (k_sem_take(&done_sem, K_MSEC(LINK_WDT_MS / 3)) != 0) {
+      continue;
+    }
     err = link_slave_done(&slave, done_result);
     while (err != 0) {
       /* Could not arm again: BUSY stays high, the master waits. Back off, then retry. */
@@ -164,3 +175,5 @@ int link_respond(const sensei_LpwanResponse *rsp) { return link_slave_respond(&s
 int link_push_event(const sensei_LpwanEvent *evt) { return link_slave_push_event(&slave, evt); }
 
 bool link_master_present(void) { return gpio_pin_get_dt(&pin_ack) > 0; }
+
+uint32_t link_dropped_events(void) { return link_slave_dropped_events(&slave); }

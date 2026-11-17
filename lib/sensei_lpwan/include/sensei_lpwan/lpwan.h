@@ -34,7 +34,8 @@
 extern "C" {
 #endif
 
-/** Payload limits of one send, in bytes (LoRa DR5, LTE UDP datagram). */
+/** Payload limits of one send, in bytes: the largest LoRa payload (EU868 DR4 and up) and an LTE UDP datagram.
+ *  The LoRa limit falls with the data rate: use sensei_lpwan_lora_mtu() to chunk. */
 #define SENSEI_LPWAN_MTU_LORA 222u
 #define SENSEI_LPWAN_MTU_LTE 1024u
 
@@ -86,6 +87,13 @@ void sensei_lpwan_set_config(const struct sensei_lpwan_config *cfg);
 bool sensei_lpwan_radio_ready(sensei_Radio radio);
 
 /**
+ * LoRa payload limit now, from the configured data rate (EU868, no MAC commands in the uplink): DR0 to 2: 51 B,
+ * DR3: 115 B, DR4 and up: 222 B. With ADR the network may lower the rate, so the DR0 value is the only safe
+ * one. An app chunks its uplinks to this, and re-reads it after a configuration change.
+ */
+uint32_t sensei_lpwan_lora_mtu(void);
+
+/**
  * Send one chunk (at most the MTU of the radio). done(err, user) runs on hooks.wq when it is out or
  * failed. Returns -EBUSY while a send is in flight, -EINVAL for a bad length.
  */
@@ -95,37 +103,25 @@ int sensei_lpwan_radio_send(sensei_Radio radio, const uint8_t *chunk, size_t len
 /**
  * Provision LoRaWAN keys (from the shell or the host link); never stored in git. The keys are
  * sent to the shield, joined, and then dropped from RAM: the LR1121 keeps them in its own flash,
- * so the nRF5340 stores nothing. Returns 0 if the request was accepted (the result is logged and
- * visible in `sensei lpwan status`), or a negative errno.
+ * so the nRF5340 stores nothing. They are wiped after the shield took them, or after three failed
+ * sends (provision again). Returns 0 if the request was accepted (the result is logged and visible
+ * in `sensei lpwan status`), or a negative errno. The shell command echoes the keys into the shell
+ * history: bench use only.
  */
 int sensei_lpwan_lora_provision(const sensei_LoraProvision *keys);
 
 /**
  * Query the nRF9151 firmware version, blocking up to timeout_ms. Powers the shield for the query.
- * Not for the work queue of the hooks.
+ * Not for the work queue of the hooks. Returns -EPROTONOSUPPORT if the shield speaks another
+ * protocol version (the client then refuses to use it until the node reboots).
  */
 int sensei_lpwan_query_version(sensei_LpwanVersion *out, uint32_t timeout_ms);
 
-/* ---- Shared SPI_A bus (nRF5340 P0.08 ... P0.11) ---- */
-
 /*
- * The pins of the nRF9151 link (SPIM4) are the same as those of GAP9 (SPIS3), switched by
- * SPI_GAP_SEL (P0.20). One side owns the bus at a time. The LPWAN client takes it for each exchange
- * with the shield and gives it back at once.
- *
- *   sensei_lpwan_spi_acquire(): waits up to timeout_ms for the bus (GAP9 off), isolates GAP9
- *       (SPI_GAP_SEL low), connects the SPIM4 pins. Returns 0, -EBUSY (GAP9 owns the bus), or
- *       -ETIMEDOUT.
- *   sensei_lpwan_spi_release(): parks the SPIM4 pins and the chip select (high impedance), so GAP9
- *       can take the bus.
- *
- * Arbitration is in lib/sensei_busarb: the GAP9 link claims the bus before it powers GAP9 and holds
- * it until GAP9 is off; the client claims it per exchange (waits for GAP9, then -EBUSY). GAP9 also
- * waits while an LTE connect or transmission runs.
+ * SPI_A (P0.08 to P0.11) is shared with GAP9 (see lib/sensei_busarb). The client takes the bus for each
+ * exchange with the shield; this is internal. While GAP9 holds the bus the level shifter of the shield is
+ * off.
  */
-int sensei_lpwan_spi_acquire(int32_t timeout_ms);
-void sensei_lpwan_spi_release(void);
-bool sensei_lpwan_spi_in_use(void);
 
 /** One-line state for the shell and status messages. */
 const char *sensei_lpwan_state_str(void);

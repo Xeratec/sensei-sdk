@@ -59,9 +59,25 @@ int main(void) {
   CHECK(lpwan_encode_edrx(100000, false, c) == 0 && strcmp(c, "0101") == 0);
   CHECK(lpwan_encode_edrx(10485760, false, c) == 0 && strcmp(c, "1111") == 0);
   CHECK(lpwan_encode_edrx(1000, false, c) != 0);
-  CHECK(lpwan_encode_edrx(20480, true, c) == 0 && strcmp(c, "0000") == 0);
-  CHECK(lpwan_encode_edrx(163840, true, c) == 0 && strcmp(c, "0011") == 0);
-  CHECK(lpwan_encode_edrx(10485760, true, c) == 0 && strcmp(c, "1001") == 0);
+  /* NB-IoT (NB-S1): ten values, the code is the 3GPP code, not the index (81.92 s is 0101 in both modes) */
+  CHECK(lpwan_encode_edrx(20480, true, c) == 0 && strcmp(c, "0010") == 0);
+  CHECK(lpwan_encode_edrx(40960, true, c) == 0 && strcmp(c, "0011") == 0);
+  CHECK(lpwan_encode_edrx(81920, true, c) == 0 && strcmp(c, "0101") == 0);
+  CHECK(lpwan_encode_edrx(100000, true, c) == 0 && strcmp(c, "0101") == 0); /* rounds down */
+  CHECK(lpwan_encode_edrx(163840, true, c) == 0 && strcmp(c, "1001") == 0);
+  CHECK(lpwan_encode_edrx(327680, true, c) == 0 && strcmp(c, "1010") == 0);
+  CHECK(lpwan_encode_edrx(10485760, true, c) == 0 && strcmp(c, "1111") == 0);
+  CHECK(lpwan_encode_edrx(20479, true, c) != 0);
+  /* LTE-M: the code is the index */
+  CHECK(lpwan_encode_edrx(163840, false, c) == 0 && strcmp(c, "1001") == 0);
+  CHECK(lpwan_encode_edrx(327680, false, c) == 0 && strcmp(c, "1010") == 0);
+
+  /* values near UINT32_MAX must not wrap to a small timer */
+  CHECK(lpwan_encode_tau(UINT32_MAX, b) != 0);
+  CHECK(lpwan_encode_tau(UINT32_MAX - 1u, b) != 0);
+  CHECK(lpwan_encode_active(UINT32_MAX, b) != 0);
+  CHECK(lpwan_encode_tau(31u * 1152000u, b) == 0 && strcmp(b, "11011111") == 0); /* 31 x 320 h */
+  CHECK(lpwan_encode_tau(31u * 1152000u + 1u, b) != 0);
 
   CHECK(lpwan_encode_ptw(1280, false, c) == 0 && strcmp(c, "0000") == 0);
   CHECK(lpwan_encode_ptw(5120, false, c) == 0 && strcmp(c, "0011") == 0);

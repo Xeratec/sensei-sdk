@@ -17,6 +17,8 @@ block the others for ever.
 - `include/sensei_busarb/bus_arb.h`: the API. `bus_arb_*` is the pure logic (time is an argument, no lock).
   `bus_claim()`, `bus_release()`, `bus_is_held()` and `bus_claim_wait()` use one global instance with a lock
   and the uptime clock (`zephyr/bus_arb_zephyr.c`).
+- `bus_set_listener()`: one callback is told when `BUS_GAP9` is claimed or released (on the thread of the claimer, it
+  must not block). The LPWAN client uses it to switch the level shifter of the shield off while GAP9 owns SPI_A.
 - Zephyr: `CONFIG_SENSEI_BUSARB` (selected by `SENSEI_GAP9` and `SENSEI_LPWAN`).
 - Host test: `cmake -S tests -B <builddir>`, or `make test-host` in the SDK root.
 

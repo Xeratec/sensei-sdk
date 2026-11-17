@@ -109,7 +109,8 @@ message LpwanRequest {
 
 message LpwanVersion {
   Version firmware = 1;
-  string modem = 2; // modem firmware, for example the Modem-E version
+  string modem = 2;    // modem firmware, for example the Modem-E version
+  uint32 protocol = 3; // LPWAN_PROTOCOL_VERSION of lpwan_link.h; the client refuses a different value
 }
 
 message LpwanStatus {
@@ -117,7 +118,8 @@ message LpwanStatus {
   bool lora_joined = 2;
   sint32 rssi_dbm = 3;
   sint32 snr_db = 4;
-  uint32 queued = 5; // messages waiting to be sent
+  uint32 queued = 5;         // messages waiting to be sent
+  uint32 dropped_events = 6; // events the shield could not queue since start (queue full)
 }
 
 message NetworkTime {

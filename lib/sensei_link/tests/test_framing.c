@@ -210,7 +210,7 @@ static void test_spi(void) {
     fill(payload, lens[k], 9);
     n = sensei_spi_frame_encode(SENSEI_SPI_GAP9_JOB, SENSEI_SPI_FLAG_MORE, payload, lens[k], buf, sizeof(buf));
     CHECK(n == SENSEI_SPI_HEADER_SIZE + lens[k]);
-    CHECK(buf[0] == 0x5E && buf[1] == 1 && buf[2] == SENSEI_SPI_GAP9_JOB && buf[3] == 2);
+    CHECK(buf[0] == 0x5E && buf[1] == SENSEI_LINK_VERSION && buf[2] == SENSEI_SPI_GAP9_JOB && buf[3] == 2);
     CHECK(sensei_spi_frame_decode(buf, n, &h, &p) == SENSEI_SPI_OK);
     CHECK(h.len == lens[k] && h.type == SENSEI_SPI_GAP9_JOB && h.flags == 2 && memcmp(p, payload, lens[k]) == 0);
     CHECK(sensei_spi_frame_decode(buf, n + 3, &h, &p) == SENSEI_SPI_OK); /* trailing bytes */
@@ -230,11 +230,44 @@ static void test_spi(void) {
     hdr[0] = 0x5E;
     hdr[1] = 9;
     CHECK(sensei_spi_header_parse(hdr, &h) == SENSEI_SPI_ERR_VERSION);
-    hdr[1] = 1;
+    hdr[1] = SENSEI_LINK_VERSION;
     hdr[4] = 0xFF;
     hdr[5] = 0xFF;
     CHECK(sensei_spi_header_parse(hdr, &h) == SENSEI_SPI_ERR_LEN);
   }
+}
+
+/* The CRC covers header bytes 0 to 5: a flipped type, flags or length bit is caught, not only a
+ * damaged payload. */
+static void test_spi_header_crc(void) {
+  static const uint8_t payload[3] = {'a', 'b', 'c'};
+  uint8_t buf[SENSEI_SPI_HEADER_SIZE + 8];
+  sensei_spi_header_t h;
+  const uint8_t *p;
+  size_t n = sensei_spi_frame_encode(SENSEI_SPI_LPWAN_REQUEST, 0x04, payload, sizeof(payload), buf, sizeof(buf));
+  uint16_t crc = sensei_crc16(sensei_crc16(SENSEI_CRC16_INIT, buf, 6), payload, sizeof(payload));
+
+  CHECK(n == SENSEI_SPI_HEADER_SIZE + 3);
+  CHECK(buf[6] == (crc & 0xFF) && buf[7] == (crc >> 8));
+  CHECK(sensei_spi_frame_decode(buf, n, &h, &p) == SENSEI_SPI_OK);
+  for (size_t byte = 2; byte <= 3; byte++) { /* type, flags */
+    for (unsigned bit = 0; bit < 8; bit++) {
+      buf[byte] ^= (uint8_t)(1u << bit);
+      CHECK(sensei_spi_frame_decode(buf, n, &h, &p) == SENSEI_SPI_ERR_CRC);
+      buf[byte] ^= (uint8_t)(1u << bit);
+    }
+  }
+  buf[4] ^= 0x01; /* length 3 -> 2: still inside the frame, header CRC fails */
+  CHECK(sensei_spi_frame_decode(buf, n, &h, &p) == SENSEI_SPI_ERR_CRC);
+  buf[4] ^= 0x01;
+  buf[6] ^= 0x80; /* the CRC itself */
+  CHECK(sensei_spi_frame_decode(buf, n, &h, &p) == SENSEI_SPI_ERR_CRC);
+  buf[6] ^= 0x80;
+  CHECK(sensei_spi_frame_decode(buf, n, &h, &p) == SENSEI_SPI_OK);
+  /* check_payload on a parsed header agrees with the decode */
+  CHECK(sensei_spi_header_parse(buf, &h) == SENSEI_SPI_OK && sensei_spi_check_payload(&h, buf + 8) == SENSEI_SPI_OK);
+  h.flags ^= 0x08;
+  CHECK(sensei_spi_check_payload(&h, buf + 8) == SENSEI_SPI_ERR_CRC);
 }
 
 static void test_frag(void) {
@@ -368,6 +401,7 @@ int main(void) {
   test_cobs();
   test_stream();
   test_spi();
+  test_spi_header_crc();
   test_frag();
   return CHECK_DONE();
 }

@@ -41,7 +41,11 @@ static uint32_t clock_ms;
 
 static int handler_calls;
 static int handler_sends;
+static int handler_dups; /* a request executed twice */
+static uint32_t handler_last_seq;
 static int events_rx;
+static uint32_t seen[512]; /* seq of every tx_done event, in order of delivery */
+static int nseen;
 static sensei_LpwanEvent last_event;
 static uint8_t last_downlink_len;
 
@@ -50,6 +54,9 @@ static int corrupt_m2s;    /* flip a payload byte of the master frame */
 static int corrupt_s2m;    /* flip a payload byte of the slave frame */
 static int blank_s2m;      /* slave frame lost (master reads zeros) */
 static int ready_timeouts; /* wait_ready times out */
+/* Called with both frames of a transfer, after the copy: m2s is what the slave received, s2m what the
+ * master received. May change them. */
+static void (*fault_hook)(uint8_t *m2s, uint8_t *s2m);
 
 static int s_arm(void *c, const uint8_t *tx, uint8_t *rx, size_t len) {
   (void)c;
@@ -73,6 +80,8 @@ static void on_request(struct link_slave *s, const sensei_LpwanRequest *req, voi
 
   (void)u;
   handler_calls++;
+  handler_dups += req->seq == handler_last_seq;
+  handler_last_seq = req->seq;
   r.seq = req->seq;
   r.result = lpwan_sm_admit(&slave_sm, req);
   if (r.result == sensei_LpwanResult_LPWAN_OK) {
@@ -110,6 +119,9 @@ static int m_xfer(void *c, const uint8_t *tx, uint8_t *rx, size_t len) {
     corrupt_s2m--;
     rx[SENSEI_SPI_HEADER_SIZE] ^= 0x55;
   }
+  if (fault_hook) {
+    fault_hook(armed_rx, rx);
+  }
   busy_pin = true; /* ISR on the slave */
   armed_tx = NULL;
   clock_ms += 2;
@@ -137,6 +149,9 @@ static void m_on_event(void *c, const sensei_LpwanEvent *e) {
   (void)c;
   events_rx++;
   last_event = *e;
+  if (e->which_body == sensei_LpwanEvent_tx_done_tag && nseen < (int)(sizeof(seen) / sizeof(seen[0]))) {
+    seen[nseen++] = e->tx_done.seq;
+  }
   if (e->which_body == sensei_LpwanEvent_downlink_rx_tag) {
     last_downlink_len = (uint8_t)(e->downlink_rx.payload.size & 0xFF);
   }
@@ -151,8 +166,10 @@ static void reset_sim(void) {
   lpwan_master_init(&mst, &mops, NULL);
   lpwan_sm_init(&slave_sm);
   lpwan_sm_init(&master_sm);
-  handler_calls = handler_sends = events_rx = 0;
+  handler_calls = handler_sends = handler_dups = events_rx = nseen = 0;
+  handler_last_seq = 0;
   corrupt_m2s = corrupt_s2m = blank_s2m = ready_timeouts = 0;
+  fault_hook = NULL;
   clock_ms = 0;
   armed_tx = NULL;
   link_slave_start(&slv);
@@ -179,6 +196,7 @@ static void test_roundtrip(void) {
 static void test_state_rules(void) {
   sensei_LpwanRequest rq = sensei_LpwanRequest_init_zero;
   sensei_LpwanResponse rs;
+  uint32_t send_seq;
 
   reset_sim();
   /* send before connect */
@@ -221,6 +239,7 @@ static void test_state_rules(void) {
   rq.send.payload.size = 4;
   CHECK(do_req(&rq, &rs) == 0 && rs.result == sensei_LpwanResult_LPWAN_OK);
   CHECK(slave_sm.state == LPWAN_ST_SENDING);
+  send_seq = rq.seq;
   CHECK(do_req(&rq, &rs) == 0 && rs.result == sensei_LpwanResult_LPWAN_BUSY);
   /* radio mismatch */
   rq.send.radio = sensei_Radio_RADIO_NBIOT;
@@ -230,7 +249,10 @@ static void test_state_rules(void) {
 
     ev.which_body = sensei_LpwanEvent_tx_done_tag;
     ev.tx_done.ok = true;
-    lpwan_sm_event(&slave_sm, &ev);
+    ev.tx_done.seq = send_seq + 1; /* another send: ignored (A7) */
+    CHECK(!lpwan_sm_event(&slave_sm, &ev) && slave_sm.state == LPWAN_ST_SENDING);
+    ev.tx_done.seq = send_seq;
+    CHECK(lpwan_sm_event(&slave_sm, &ev));
     CHECK(slave_sm.state == LPWAN_ST_CONNECTED);
   }
   /* disconnect releases the technology */
@@ -446,6 +468,350 @@ static void test_sm_table(void) {
   }
 }
 
+/* ---- helpers for the fault tests ---- */
+
+static void push_tx_done(uint32_t seq) {
+  sensei_LpwanEvent ev = sensei_LpwanEvent_init_zero;
+
+  ev.which_body = sensei_LpwanEvent_tx_done_tag;
+  ev.tx_done.seq = seq;
+  ev.tx_done.ok = true;
+  CHECK(link_slave_push_event(&slv, &ev) == 0);
+}
+
+/* Slave restart without a master restart (shield power cycle): what the master keeps is its own. */
+static void restart_slave(void) {
+  memset(&slv, 0, sizeof(slv));
+  link_slave_init(&slv, &sops, NULL, on_request, NULL);
+  lpwan_sm_init(&slave_sm);
+  armed_tx = NULL;
+  busy_pin = true;
+  link_slave_start(&slv);
+}
+
+static int msg_frame_no, corrupt_msg_frame;
+static void hook_corrupt_nth(uint8_t *m2s, uint8_t *s2m) {
+  (void)m2s;
+  if (s2m[2] != LPWAN_FRAME_IDLE) {
+    if (msg_frame_no == corrupt_msg_frame) {
+      s2m[SENSEI_SPI_HEADER_SIZE] ^= 0x55;
+    }
+    msg_frame_no++;
+  }
+}
+
+/* B2: the ACK names the message it confirms. A damaged first transmission of a message is not
+ * released by the ACK of the one before; every event arrives once, in order. */
+static void test_ack_names_message(void) {
+  for (int at = 0; at < 8; at++) {
+    reset_sim();
+    fault_hook = hook_corrupt_nth;
+    msg_frame_no = 0;
+    corrupt_msg_frame = at;
+    for (uint32_t i = 1; i <= 3; i++) {
+      push_tx_done(i);
+    }
+    CHECK(lpwan_master_fetch_events(&mst, 32) == 3);
+    CHECK(nseen == 3 && seen[0] == 1 && seen[1] == 2 && seen[2] == 3);
+    CHECK(link_slave_events_pending(&slv) == 0 && !event_pin);
+  }
+}
+
+static void master_frame(uint8_t flags) {
+  memset(armed_rx, 0, LPWAN_XFER_LEN);
+  sensei_spi_header_pack(armed_rx, LPWAN_FRAME_IDLE, flags, armed_rx + SENSEI_SPI_HEADER_SIZE, 0);
+  link_slave_done(&slv, 0);
+}
+
+/* B2 at the slave: an ACK for another toggle bit does not release the armed message. */
+static void test_stale_ack(void) {
+  reset_sim();
+  push_tx_done(1);
+  master_frame(0); /* the event is armed now, toggle bit 1 */
+  CHECK(slv.armed != 0 && link_slave_events_pending(&slv) == 1);
+  master_frame(LPWAN_FLAG_ACK); /* ACK of toggle 0: the one before */
+  CHECK(slv.armed != 0 && link_slave_events_pending(&slv) == 1);
+  master_frame(LPWAN_FLAG_ACK_TOGGLE); /* no ACK flag */
+  CHECK(slv.armed != 0 && link_slave_events_pending(&slv) == 1);
+  master_frame(LPWAN_FLAG_ACK | LPWAN_FLAG_ACK_TOGGLE);
+  CHECK(slv.armed == 0 && link_slave_events_pending(&slv) == 0);
+  /* a frame whose flags were damaged is dropped by the CRC, even if it would have been an ACK */
+  push_tx_done(2);
+  master_frame(0);
+  CHECK(slv.armed != 0);
+  memset(armed_rx, 0, LPWAN_XFER_LEN);
+  sensei_spi_header_pack(armed_rx, LPWAN_FRAME_IDLE, 0, armed_rx + SENSEI_SPI_HEADER_SIZE, 0);
+  armed_rx[3] = LPWAN_FLAG_ACK | LPWAN_FLAG_TOGGLE; /* the toggle of the armed message is 0 */
+  armed_rx[3] = LPWAN_FLAG_ACK | LPWAN_FLAG_ACK_TOGGLE;
+  link_slave_done(&slv, 0);
+  CHECK(slv.armed != 0 && link_slave_events_pending(&slv) == 1 && slv.n_bad_frames == 1);
+}
+
+static uint32_t rng_state;
+static uint32_t rnd(void) {
+  rng_state ^= rng_state << 13;
+  rng_state ^= rng_state >> 17;
+  rng_state ^= rng_state << 5;
+  return rng_state;
+}
+static unsigned fault_pct;
+static void hook_random(uint8_t *m2s, uint8_t *s2m) {
+  uint8_t *f[2] = {m2s, s2m};
+
+  for (int d = 0; d < 2; d++) {
+    if (rnd() % 100 < fault_pct) {
+      f[d][rnd() % 24] ^= (uint8_t)(1u << (rnd() % 8)); /* header and the start of the payload */
+    }
+  }
+  if (rnd() % 100 < fault_pct / 3) {
+    memset(s2m, 0, SENSEI_SPI_HEADER_SIZE); /* slave frame lost */
+  }
+}
+
+/* Events and requests under random corruption of both directions: every event once and in order,
+ * no request executed twice. */
+static void test_random_faults(void) {
+  for (uint32_t seed = 1; seed <= 40; seed++) {
+    uint32_t next = 1;
+    sensei_LpwanRequest rq = sensei_LpwanRequest_init_zero;
+    sensei_LpwanResponse rs;
+
+    reset_sim();
+    rng_state = seed * 2654435761u;
+    fault_pct = 12;
+    fault_hook = hook_random;
+    mst.retries = 6;
+    rq.which_body = sensei_LpwanRequest_get_status_tag;
+    for (int round = 0; round < 60; round++) {
+      unsigned k = rnd() % 4;
+
+      while (k-- > 0 && link_slave_events_pending(&slv) < LINK_SLAVE_EVENT_SLOTS) {
+        push_tx_done(next++);
+      }
+      if (rnd() % 3 == 0) {
+        int err = do_req(&rq, &rs);
+
+        CHECK(err == 0 ? rs.seq == rq.seq : err == -ETIMEDOUT);
+      }
+      (void)lpwan_master_fetch_events(&mst, 32);
+    }
+    fault_hook = NULL; /* faults off: everything still queued arrives */
+    for (int i = 0; i < 8 && (link_slave_events_pending(&slv) > 0 || event_pin); i++) {
+      (void)lpwan_master_fetch_events(&mst, 32);
+    }
+    CHECK(link_slave_events_pending(&slv) == 0);
+    CHECK(nseen == (int)next - 1);
+    for (int i = 0; i < nseen; i++) {
+      CHECK(seen[i] == (uint32_t)i + 1);
+    }
+    CHECK(handler_dups == 0);
+    CHECK(do_req(&rq, &rs) == 0 && mst.failures == 0);
+  }
+}
+
+/* A28, B16: the shield restarted. With lpwan_master_reset() the first message of the new session
+ * is taken at once. */
+static void test_shield_restart(void) {
+  sensei_LpwanRequest rq = sensei_LpwanRequest_init_zero;
+  sensei_LpwanResponse rs;
+  uint32_t t0;
+
+  rq.which_body = sensei_LpwanRequest_get_version_tag;
+  reset_sim();
+  CHECK(do_req(&rq, &rs) == 0);
+  restart_slave();
+  lpwan_master_reset(&mst);
+  handler_calls = 0;
+  t0 = clock_ms;
+  CHECK(do_req(&rq, &rs) == 0 && rs.seq == rq.seq);
+  CHECK(handler_calls == 1 && mst.n_retries == 0 && clock_ms - t0 < 20);
+
+  /* Without the reset the first response of the new session has the toggle bit the master saw last:
+   * it is taken as a repeat. The request still gets through with a retry. */
+  reset_sim();
+  CHECK(do_req(&rq, &rs) == 0);
+  restart_slave();
+  CHECK(do_req(&rq, &rs) == 0 && rs.seq == rq.seq);
+
+  /* The master restarted (lpwan_master_init) while the slave kept its toggle bit: the first
+   * message is taken whatever its bit is. */
+  for (int before = 0; before < 4; before++) {
+    reset_sim();
+    for (int i = 0; i < before; i++) {
+      push_tx_done((uint32_t)i + 1);
+    }
+    CHECK(lpwan_master_fetch_events(&mst, 16) == before);
+    push_tx_done(100);
+    lpwan_master_init(&mst, &mops, NULL);
+    nseen = 0;
+    CHECK(lpwan_master_fetch_events(&mst, 16) == 1);
+    CHECK(nseen == 1 && seen[0] == 100 && link_slave_events_pending(&slv) == 0);
+  }
+}
+
+/* B18: the ACK of a response waits for a frame that is sent; a response that does not decode is
+ * not confirmed. */
+static int garbage_left;
+static void hook_garbage_response(uint8_t *m2s, uint8_t *s2m) {
+  (void)m2s;
+  if (garbage_left > 0 && s2m[2] == SENSEI_SPI_LPWAN_RESPONSE) {
+    uint8_t flags = s2m[3];
+
+    garbage_left--;
+    memset(s2m + SENSEI_SPI_HEADER_SIZE, 0xFF, 2); /* not a protobuf message, valid frame */
+    sensei_spi_header_pack(s2m, SENSEI_SPI_LPWAN_RESPONSE, flags, s2m + SENSEI_SPI_HEADER_SIZE, 2);
+  }
+}
+
+static void test_ack_after_response(void) {
+  sensei_LpwanRequest rq = sensei_LpwanRequest_init_zero;
+  sensei_LpwanResponse rs;
+
+  reset_sim();
+  rq.which_body = sensei_LpwanRequest_get_status_tag;
+  CHECK(do_req(&rq, &rs) == 0);
+  CHECK(mst.ack_pending);      /* no frame carried it yet */
+  CHECK(slv.response_pending); /* so the slave still holds the response */
+  push_tx_done(1);
+  CHECK(lpwan_master_fetch_events(&mst, 8) == 1); /* this exchange sends the ACK and brings the event */
+  CHECK(!slv.response_pending && link_slave_events_pending(&slv) == 0);
+
+  reset_sim();
+  fault_hook = hook_garbage_response;
+  garbage_left = 1;
+  CHECK(do_req(&rq, &rs) == 0 && rs.seq == rq.seq);
+  CHECK(handler_calls == 1 && garbage_left == 0 && slv.n_repeats >= 1); /* sent again, not acked first */
+}
+
+/* B24 (link level): another SPI frame version is reported as -EPROTONOSUPPORT. A9: the master
+ * counts the requests that fail in a row. */
+static void hook_wrong_version(uint8_t *m2s, uint8_t *s2m) {
+  (void)m2s;
+  if (s2m[0] == SENSEI_SPI_MAGIC) {
+    s2m[1] = SENSEI_LINK_VERSION + 1;
+  }
+}
+
+static void test_failures_and_version(void) {
+  sensei_LpwanRequest rq = sensei_LpwanRequest_init_zero;
+  sensei_LpwanResponse rs;
+
+  reset_sim();
+  rq.which_body = sensei_LpwanRequest_get_status_tag;
+  CHECK(mst.failures == 0);
+  ready_timeouts = 100;
+  CHECK(do_req(&rq, &rs) == -ETIMEDOUT && mst.failures == 1);
+  CHECK(do_req(&rq, &rs) == -ETIMEDOUT && mst.failures == 2);
+  ready_timeouts = 0;
+  CHECK(do_req(&rq, &rs) == 0 && mst.failures == 0);
+
+  fault_hook = hook_wrong_version;
+  CHECK(do_req(&rq, &rs) == -EPROTONOSUPPORT && mst.failures == 1);
+  fault_hook = NULL;
+  CHECK(do_req(&rq, &rs) == 0 && mst.failures == 0);
+}
+
+/* B11: downlinks and time cannot take the slots that state events need. */
+static void test_event_reserve(void) {
+  sensei_LpwanEvent ev = sensei_LpwanEvent_init_zero;
+
+  reset_sim();
+  ev.which_body = sensei_LpwanEvent_network_time_tag;
+  for (int i = 0; i < 6; i++) {
+    (void)link_slave_push_event(&slv, &ev);
+  }
+  CHECK(link_slave_events_pending(&slv) == LINK_SLAVE_EVENT_SLOTS - LINK_SLAVE_EVENT_RESERVED);
+  CHECK(link_slave_dropped_events(&slv) == 6 - (LINK_SLAVE_EVENT_SLOTS - LINK_SLAVE_EVENT_RESERVED));
+  push_tx_done(1);
+  push_tx_done(2); /* both fit in the reserved slots */
+  CHECK(link_slave_events_pending(&slv) == LINK_SLAVE_EVENT_SLOTS);
+  ev.which_body = sensei_LpwanEvent_error_tag;
+  CHECK(link_slave_push_event(&slv, &ev) == -ENOMEM); /* really full */
+}
+
+/* ---- state machine: events of the wrong radio, stale tx_done, undo (B10, A3, A7, B19) ---- */
+
+static void test_sm_events(void) {
+  lpwan_sm_t sm, before, admitted;
+  sensei_LpwanRequest rq = sensei_LpwanRequest_init_zero;
+  sensei_LpwanEvent ev = sensei_LpwanEvent_init_zero;
+
+  /* A late LoRa join does not complete an LTE connect. */
+  lpwan_sm_init(&sm);
+  rq.which_body = sensei_LpwanRequest_lte_connect_tag;
+  CHECK(lpwan_sm_admit(&sm, &rq) == sensei_LpwanResult_LPWAN_OK);
+  ev.which_body = sensei_LpwanEvent_joined_tag;
+  ev.joined.radio = sensei_Radio_RADIO_LORA;
+  CHECK(!lpwan_sm_event(&sm, &ev));
+  CHECK(sm.state == LPWAN_ST_CONNECTING && sm.tech == LPWAN_TECH_LTE);
+  ev.which_body = sensei_LpwanEvent_connected_tag; /* "connected" is LTE: a LoRa radio id is wrong */
+  CHECK(!lpwan_sm_event(&sm, &ev));
+  ev.connected.radio = sensei_Radio_RADIO_NBIOT;
+  CHECK(lpwan_sm_event(&sm, &ev) && sm.state == LPWAN_ST_CONNECTED && sm.tech == LPWAN_TECH_LTE);
+  /* connected twice: the second one changes nothing */
+  CHECK(!lpwan_sm_event(&sm, &ev));
+
+  /* A LoRa "disconnected" does not end a BLE claim or an LTE link. */
+  CHECK(lpwan_sm_claim_ble(&sm, 1) == sensei_LpwanResult_LPWAN_BUSY);
+  ev.which_body = sensei_LpwanEvent_disconnected_tag;
+  ev.disconnected.radio = sensei_Radio_RADIO_LORA;
+  CHECK(!lpwan_sm_event(&sm, &ev) && sm.tech == LPWAN_TECH_LTE && sm.state == LPWAN_ST_CONNECTED);
+  ev.disconnected.radio = sensei_Radio_RADIO_LTEM;
+  CHECK(lpwan_sm_event(&sm, &ev) && sm.state == LPWAN_ST_IDLE && sm.tech == LPWAN_TECH_NONE);
+  CHECK(lpwan_sm_claim_ble(&sm, 1) == sensei_LpwanResult_LPWAN_OK);
+  ev.disconnected.radio = sensei_Radio_RADIO_LORA;
+  CHECK(!lpwan_sm_event(&sm, &ev) && sm.tech == LPWAN_TECH_BLE);
+
+  /* A3: a send that timed out is given up; the next send is admitted, the late tx_done of the first is
+   * ignored, the one of the second ends it (A7). */
+  lpwan_sm_init(&sm);
+  sm.state = LPWAN_ST_CONNECTED;
+  sm.tech = LPWAN_TECH_LTE;
+  memset(&rq, 0, sizeof(rq));
+  rq.which_body = sensei_LpwanRequest_send_tag;
+  rq.send.radio = sensei_Radio_RADIO_LTEM;
+  rq.seq = 7;
+  CHECK(lpwan_sm_admit(&sm, &rq) == sensei_LpwanResult_LPWAN_OK && sm.state == LPWAN_ST_SENDING);
+  CHECK(lpwan_sm_admit(&sm, &rq) == sensei_LpwanResult_LPWAN_BUSY); /* the bug: stays so for ever */
+  lpwan_sm_abort_send(&sm);
+  CHECK(sm.state == LPWAN_ST_CONNECTED);
+  lpwan_sm_abort_send(&sm); /* not sending: no change */
+  CHECK(sm.state == LPWAN_ST_CONNECTED);
+  rq.seq = 8;
+  CHECK(lpwan_sm_admit(&sm, &rq) == sensei_LpwanResult_LPWAN_OK && sm.send_seq == 8);
+  memset(&ev, 0, sizeof(ev));
+  ev.which_body = sensei_LpwanEvent_tx_done_tag;
+  ev.tx_done.seq = 7;
+  CHECK(!lpwan_sm_event(&sm, &ev) && sm.state == LPWAN_ST_SENDING);
+  ev.tx_done.seq = 8;
+  CHECK(lpwan_sm_event(&sm, &ev) && sm.state == LPWAN_ST_CONNECTED);
+
+  /* B19: undo the admission only if nothing moved the machine meanwhile. */
+  lpwan_sm_init(&before);
+  rq.which_body = sensei_LpwanRequest_lte_connect_tag;
+  sm = before;
+  CHECK(lpwan_sm_admit(&sm, &rq) == sensei_LpwanResult_LPWAN_OK);
+  admitted = sm;
+  lpwan_sm_revert(&sm, &before, &admitted); /* the request failed, no event: back to idle */
+  CHECK(sm.state == LPWAN_ST_IDLE && sm.tech == LPWAN_TECH_NONE);
+  sm = admitted;
+  memset(&ev, 0, sizeof(ev));
+  ev.which_body = sensei_LpwanEvent_connected_tag; /* connected arrived during the request */
+  ev.connected.radio = sensei_Radio_RADIO_LTEM;
+  CHECK(lpwan_sm_event(&sm, &ev));
+  lpwan_sm_revert(&sm, &before, &admitted); /* the request then failed: keep what the event did */
+  CHECK(sm.state == LPWAN_ST_CONNECTED && sm.tech == LPWAN_TECH_LTE);
+
+  /* which events move the machine */
+  memset(&ev, 0, sizeof(ev));
+  ev.which_body = sensei_LpwanEvent_downlink_rx_tag;
+  CHECK(!lpwan_event_is_state(&ev));
+  ev.which_body = sensei_LpwanEvent_network_time_tag;
+  CHECK(!lpwan_event_is_state(&ev));
+  ev.which_body = sensei_LpwanEvent_tx_done_tag;
+  CHECK(lpwan_event_is_state(&ev));
+}
+
 int main(void) {
   test_roundtrip();
   test_state_rules();
@@ -453,6 +819,14 @@ int main(void) {
   test_faults();
   test_event_faults();
   test_sm_table();
+  test_ack_names_message();
+  test_stale_ack();
+  test_random_faults();
+  test_shield_restart();
+  test_ack_after_response();
+  test_failures_and_version();
+  test_event_reserve();
+  test_sm_events();
   printf("%s\n", check_failures ? "FAILED" : "ok");
   return check_failures ? 1 : 0;
 }

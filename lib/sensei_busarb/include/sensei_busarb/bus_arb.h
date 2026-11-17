@@ -57,6 +57,14 @@ bool bus_claim(enum bus_user u, uint32_t max_hold_ms);
 void bus_release(enum bus_user u);
 bool bus_is_held(enum bus_user u);
 
+/**
+ * One listener (or NULL) is told when BUS_GAP9 is claimed or released: held is true on a claim that was
+ * not held before. It runs on the thread that claims or releases, outside the lock, and must not block
+ * (the LPWAN client only wakes its thread, which then switches the level shifter of the shield).
+ */
+typedef void (*bus_listener_fn)(enum bus_user u, bool held, void *ctx);
+void bus_set_listener(bus_listener_fn fn, void *ctx);
+
 /** Claim, retrying every 20 ms for up to wait_ms. Blocks: not for the app work queue. */
 bool bus_claim_wait(enum bus_user u, uint32_t max_hold_ms, uint32_t wait_ms);
 

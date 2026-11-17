@@ -51,7 +51,7 @@ LOG_MODULE_REGISTER(lora, CONFIG_LPWAN_SHIELD_LOG_LEVEL);
 #define GPS_TO_UNIX_S 315964800u
 #define GPS_UTC_LEAP_S 18u
 
-enum cmd { CMD_EVENT, CMD_JOIN, CMD_SEND, CMD_TIME };
+enum cmd { CMD_EVENT, CMD_JOIN, CMD_SEND, CMD_TIME, CMD_LEAVE };
 
 struct msg {
   enum cmd cmd;
@@ -76,6 +76,7 @@ static sensei_LoraConfigure cfg = {
 };
 static sensei_LoraProvision keys;
 static bool keys_dirty;
+static volatile bool join_pending; /* a CMD_JOIN is queued and has not started yet */
 static volatile enum lstate state = L_OFF;
 static bool started;
 static unsigned join_failures;
@@ -151,7 +152,7 @@ static lr1121_modem_response_code_t configure_radio(void) {
   return lr1121_modem_set_tx_power_offset(ctx, CONFIG_LPWAN_SHIELD_LORA_TX_OFFSET_DB);
 }
 
-static void drain_events(void);
+static bool drain_events(void);
 
 static int ensure_started(void) {
   lr1121_modem_version_t v;
@@ -181,19 +182,26 @@ static int ensure_started(void) {
   return 0;
 }
 
+static void wipe_keys(void) {
+  memset(&keys, 0, sizeof(keys));
+  keys_dirty = false;
+}
+
+/* Write the keys to the LR1121. They are wiped from RAM either way: after a failure the master has to
+ * provision again (it dropped its copy when we accepted the request). */
 static int program_keys(void) {
   lr1121_modem_dev_eui_t eui = {0};
+  int ret = 0;
 
   if (lr1121_modem_set_dev_eui(ctx, keys.dev_eui) != RC_OK || lr1121_modem_set_join_eui(ctx, keys.join_eui) != RC_OK ||
       lr1121_modem_set_nwk_key(ctx, keys.app_key) != RC_OK) {
-    return -EIO;
-  }
-  if (lr1121_modem_get_dev_eui(ctx, eui) != RC_OK || memcmp(eui, keys.dev_eui, 8) != 0) {
+    ret = -EIO;
+  } else if (lr1121_modem_get_dev_eui(ctx, eui) != RC_OK || memcmp(eui, keys.dev_eui, 8) != 0) {
     LOG_ERR("DevEUI verification failed");
-    return -EIO;
+    ret = -EIO;
   }
-  keys_dirty = false;
-  return 0;
+  wipe_keys();
+  return ret;
 }
 
 static int apply_adr(void) {
@@ -234,7 +242,9 @@ static void become_ready(void) {
 static void do_join(void) {
   lr1121_modem_lorawan_status_bitmask_t st = 0;
 
+  join_pending = false;
   if (ensure_started()) {
+    wipe_keys(); /* the master dropped its copy: provision again when the LR1121 is there */
     svc_emit_error(sensei_LpwanResult_LPWAN_FAILED, "LR1121 not available");
     return;
   }
@@ -274,7 +284,16 @@ static void do_join(void) {
 static void do_send(const struct msg *m) {
   lr1121_modem_response_code_t rc;
 
+  uint8_t max = 0;
+
   if (state != L_READY) {
+    svc_emit_tx_done(m->seq, false, 0);
+    return;
+  }
+  /* The data rate and pending MAC commands decide what fits in the next uplink (the master chunks by
+   * the configured data rate; with ADR the network may have lowered it). */
+  if (lr1121_modem_get_next_tx_max_payload(ctx, &max) == RC_OK && m->len > max) {
+    LOG_WRN("payload %u B does not fit the next uplink (%u B)", (unsigned)m->len, (unsigned)max);
     svc_emit_tx_done(m->seq, false, 0);
     return;
   }
@@ -288,6 +307,18 @@ static void do_send(const struct msg *m) {
     return;
   }
   state = L_SENDING;
+}
+
+/* The master let go while a join was queued or running: stop it, so a late "joined" does not connect a
+ * radio nobody wants. In order with the join, on this thread (the LR1121 is only used here). */
+static void do_leave(void) {
+  if (started && state == L_JOINING) {
+    (void)lr1121_modem_leave_network(ctx);
+  }
+  if (state == L_JOINING || state == L_JOINED || state == L_READY) {
+    state = L_IDLE;
+  }
+  svc_emit_radio(sensei_LpwanEvent_disconnected_tag, sensei_Radio_RADIO_LORA);
 }
 
 static void do_time(void) {
@@ -328,15 +359,27 @@ static void handle_event(const lr1121_modem_event_fields_t *e) {
   switch (e->event_type) {
   case LR1121_MODEM_LORAWAN_EVENT_RESET:
     if (state != L_OFF && started) {
+      enum lstate was = state;
+
       LOG_WRN("LR1121 reset by itself");
+      /* The radio setup is gone: ensure_started() runs it again at the next join. Tell the master. */
+      started = false;
       state = L_IDLE;
+      if (was == L_SENDING) {
+        svc_emit_tx_done(cur_seq, false, 0);
+      }
+      if (was != L_IDLE) {
+        svc_emit_radio(sensei_LpwanEvent_disconnected_tag, sensei_Radio_RADIO_LORA);
+      }
     }
     break;
   case LR1121_MODEM_LORAWAN_EVENT_JOINED:
-    become_ready();
+    if (state == L_JOINING) { /* not after a leave: the master gave up this join */
+      become_ready();
+    }
     break;
   case LR1121_MODEM_LORAWAN_EVENT_JOIN_FAIL:
-    if (++join_failures >= CONFIG_LPWAN_SHIELD_LORA_JOIN_ATTEMPTS) {
+    if (state == L_JOINING && ++join_failures >= CONFIG_LPWAN_SHIELD_LORA_JOIN_ATTEMPTS) {
       (void)lr1121_modem_leave_network(ctx);
       state = L_IDLE;
       svc_emit_error(sensei_LpwanResult_LPWAN_NOT_JOINED, "join failed");
@@ -372,17 +415,28 @@ static void handle_event(const lr1121_modem_event_fields_t *e) {
   }
 }
 
-static void drain_events(void) {
+/* Read events until the LR1121 has none (or 16 in one go). Returns true if it stopped at 16: there may be more. */
+static bool drain_events(void) {
   for (int i = 0; i < 16; i++) {
     lr1121_modem_event_fields_t e = {0};
     lr1121_modem_response_code_t rc = lr1121_modem_get_event(ctx, &e);
 
+    if (rc == LR1121_MODEM_RESPONSE_CODE_NO_EVENT) {
+      return false;
+    }
     if (rc != RC_OK) {
-      break; /* NO_EVENT or an error */
+      LOG_WRN("get_event failed (rc %d)", (int)rc);
+      return false;
     }
     handle_event(&e);
   }
+  return true;
 }
+
+/* The event line (DIO9) is edge-triggered here: an edge that arrives while the queue is full, or events left
+ * after a drain, would be missed for good. So the ISR also sets a flag, and the worker reads again
+ * after every command until the event line is low. */
+static atomic_t ev_missed;
 
 static void event_isr(const struct device *port, struct gpio_callback *cb, uint32_t pins) {
   static const struct msg m = {.cmd = CMD_EVENT};
@@ -390,7 +444,19 @@ static void event_isr(const struct device *port, struct gpio_callback *cb, uint3
   ARG_UNUSED(port);
   ARG_UNUSED(cb);
   ARG_UNUSED(pins);
+  atomic_set(&ev_missed, 1);
   (void)k_msgq_put(&lora_q, &m, K_NO_WAIT);
+}
+
+static void service_events(void) {
+  const struct gpio_dt_spec *ev = &lr1121_ctx.spi_gpio.event;
+
+  while (started && (atomic_cas(&ev_missed, 1, 0) || gpio_pin_get_dt(ev) > 0)) {
+    if (!drain_events() && gpio_pin_get_dt(ev) > 0) {
+      /* The line is still high but there is nothing to read: do not spin. */
+      break;
+    }
+  }
 }
 
 static void lora_main(void *a, void *b, void *c) {
@@ -403,10 +469,7 @@ static void lora_main(void *a, void *b, void *c) {
     k_msgq_get(&lora_q, &m, K_FOREVER);
     switch (m.cmd) {
     case CMD_EVENT:
-      if (started) {
-        drain_events();
-      }
-      break;
+      break; /* service_events() below */
     case CMD_JOIN:
       do_join();
       break;
@@ -416,7 +479,11 @@ static void lora_main(void *a, void *b, void *c) {
     case CMD_TIME:
       do_time();
       break;
+    case CMD_LEAVE:
+      do_leave();
+      break;
     }
+    service_events();
   }
 }
 
@@ -467,8 +534,14 @@ sensei_LpwanResult lora_provision(const sensei_LoraProvision *k) {
 
 sensei_LpwanResult lora_join(void) {
   const struct msg m = {.cmd = CMD_JOIN};
+  sensei_LpwanResult r;
 
-  return post(&m);
+  join_pending = true;
+  r = post(&m);
+  if (r != sensei_LpwanResult_LPWAN_OK) {
+    join_pending = false;
+  }
+  return r;
 }
 
 sensei_LpwanResult lora_send(uint32_t seq, uint32_t port, bool confirmed, const uint8_t *data, size_t len) {
@@ -490,6 +563,12 @@ sensei_LpwanResult lora_request_time(void) {
 }
 
 sensei_LpwanResult lora_leave(void) {
+  const struct msg m = {.cmd = CMD_LEAVE};
+
+  /* A join is queued or running: the worker stops it and reports `disconnected` after it. */
+  if (state == L_JOINING || join_pending) {
+    return post(&m);
+  }
   /* Park: the session stays in the LR1121, the next join restores it. */
   if (state == L_READY || state == L_JOINED) {
     state = L_IDLE;

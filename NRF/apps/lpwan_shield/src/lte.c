@@ -76,7 +76,9 @@ static sensei_Radio radio_id(void) {
 
 static void lte_handler(const struct lte_lc_evt *const evt) {
   switch (evt->type) {
-  case LTE_LC_EVT_NW_REG_STATUS:
+  case LTE_LC_EVT_NW_REG_STATUS: {
+    bool was_registered = registered;
+
     registered =
         evt->nw_reg_status == LTE_LC_NW_REG_REGISTERED_HOME || evt->nw_reg_status == LTE_LC_NW_REG_REGISTERED_ROAMING;
     LOG_INF("registration status %d", (int)evt->nw_reg_status);
@@ -84,8 +86,13 @@ static void lte_handler(const struct lte_lc_evt *const evt) {
       k_sem_give(&registered_sem);
     } else if (evt->nw_reg_status == LTE_LC_NW_REG_REGISTRATION_DENIED) {
       svc_emit_error(sensei_LpwanResult_LPWAN_NO_NETWORK, "registration denied");
+    } else if (was_registered && want_connected && sock >= 0) {
+      /* Coverage lost while connected: the modem searches again by itself. Tell the master, which sees
+       * failed sends meanwhile (worker_send fails them while not registered). */
+      svc_emit_error(sensei_LpwanResult_LPWAN_NO_NETWORK, "registration lost");
     }
     break;
+  }
   case LTE_LC_EVT_PSM_UPDATE:
     LOG_INF("PSM: TAU %d s, active %d s", evt->psm_cfg.tau, evt->psm_cfg.active_time);
     break;
@@ -259,6 +266,10 @@ static void worker_send(const struct msg *m) {
   ssize_t n = -1;
   uint32_t attempts = 0;
 
+  if (!registered) {
+    svc_emit_tx_done(m->seq, false, 0); /* coverage lost: fail at once, the master retries later */
+    return;
+  }
   for (int i = 0; i < 2 && n != m->len; i++) {
     attempts++;
     if (sock < 0 && open_socket() != 0) {
@@ -376,7 +387,13 @@ sensei_LpwanResult lte_connect(void) {
   return post(CMD_CONNECT, 0, NULL, 0);
 }
 
-sensei_LpwanResult lte_disconnect(void) { return post(CMD_DISCONNECT, 0, NULL, 0); }
+sensei_LpwanResult lte_disconnect(void) {
+  /* Now, not when the worker gets to it: the worker may sit in the registration wait for minutes. The
+   * semaphore ends that wait; worker_connect() sees want_connected false and opens no socket. */
+  want_connected = false;
+  k_sem_give(&registered_sem);
+  return post(CMD_DISCONNECT, 0, NULL, 0);
+}
 
 sensei_LpwanResult lte_send(uint32_t seq, uint32_t port, const uint8_t *data, size_t len) {
   ARG_UNUSED(port); /* UDP/TCP: the destination port is part of the configuration */

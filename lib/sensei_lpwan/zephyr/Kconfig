@@ -70,6 +70,15 @@ config SENSEI_LPWAN_TX_TIMEOUT_S
 	int "Time to wait for a transmit result, s"
 	default 60
 
+config SENSEI_LPWAN_LINK_FAILURES
+	int "Failed requests (or sends without result) in a row before the shield is power-cycled"
+	default 3
+	range 1 20
+	help
+	  The nRF9151 may hang or reset. A request that gets no answer counts as one failure; after this
+	  many in a row the client cuts the shield power and starts it again at the next use. A LoRaWAN
+	  session survives in the LR1121, LTE registers again.
+
 config SENSEI_LPWAN_SPI_HZ
 	int "SPI clock, Hz"
 	default 4000000

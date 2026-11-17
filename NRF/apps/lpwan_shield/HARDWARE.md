@@ -111,6 +111,12 @@ sensor shield's MSP430 interface. **verify** that nothing else on the stack driv
   expander P7. The TXB0108 is auto-direction with weak drivers: the firmware runs SPI at 4 MHz.
 - I2C_A is 1.8 V at the expander (VCC_I from the 1V8 rail).
 - With OE low the EVENT line floats: the nRF5340 pin has a pull-down while the shield is off.
+- **OE is low while GAP9 owns SPI_A.** GAP9's chip select (P0.11) and clock reach the nRF9151 SPIS through U12, and an
+  armed SPIS drives MISO against SPIS3. So the client drives OE low when `BUS_GAP9` is claimed and high again when it is
+  released or an exchange starts (`level_update()` in `lpwan_client.c`). While OE is low the EVENT line is not seen: the
+  client reads it again when OE goes high. **verify** with a scope: OE (expander P7), P0.11, P0.10 during a GAP9 job with
+  the shield on (LTE mode); and that the nRF9151 CSN does not float into spurious transfers while OE is low (the log
+  shows no `bad frame` bursts). If it does, add a pull-up on CSN or disarm the SPIS through the ACK line.
 
 ## Power (sheet 02-power)
 
@@ -173,16 +179,14 @@ it uses **SPIM4** (SPIM4 is only available on exactly P0.08 to P0.11).
 
 Switching, as implemented:
 
-1. `lpwan_spi_acquire(timeout_ms)`: waits for the bus mutex, refuses while `gap9_busy()` (GAP9 powered
-   or with jobs), drives SPI_GAP_SEL low (GAP9 isolated), applies the SPIM4 default pin state,
-   configures the chip select pin.
+1. `spi_acquire(timeout_ms)` (private to the client): waits for the bus mutex and for `sensei_busarb` (refuses while GAP9
+   holds `BUS_GAP9`), makes sure the level shifter is on, drives SPI_GAP_SEL low (GAP9 isolated), applies the SPIM4
+   default pin state, configures the chip select pin.
 2. SPI transfer.
-3. `lpwan_spi_release()`: chip select to high impedance, SPIM4 pins to the low-power state,
-   mutex released. The GAP9 module drives SPI_GAP_SEL high again when it powers GAP9 and applies its
-   own SPIS3 pin state (`gap9_spis_pins`).
+3. `spi_release()`: chip select to high impedance, SPIM4 pins to the low-power state, mutex and claim released. The
+   GAP9 module drives SPI_GAP_SEL high again when it powers GAP9 and applies its own SPIS3 pin state.
 
-A GAP9 job and an LPWAN exchange cannot overlap. The GAP9 module should wait while
-`lpwan_spi_in_use()` is true. The polarity of SPI_GAP_SEL (high = GAP9 connected) is taken from the
+A GAP9 job and an LPWAN exchange cannot overlap: `sensei_busarb` lets only one of them hold the bus. The polarity of SPI_GAP_SEL (high = GAP9 connected) is taken from the
 GAP9 module; **verify** it with a scope. The nRF9151 pins on its side are not affected by the switch.
 
 ## Other findings

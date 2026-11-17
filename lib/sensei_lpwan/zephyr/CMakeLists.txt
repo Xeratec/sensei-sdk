@@ -11,7 +11,8 @@ zephyr_library_named(sensei_lpwan)
 zephyr_library_sources(
   ${SENSEI_LPWAN_DIR}/src/lpwan_sm.c
   ${SENSEI_LPWAN_DIR}/src/link_slave.c
-  ${SENSEI_LPWAN_DIR}/src/lpwan_timers.c)
+  ${SENSEI_LPWAN_DIR}/src/lpwan_timers.c
+  ${SENSEI_LPWAN_DIR}/src/lpwan_lora.c)
 zephyr_library_sources_ifdef(CONFIG_SENSEI_LPWAN
   ${SENSEI_LPWAN_DIR}/src/lpwan_master.c
   ${SENSEI_LPWAN_DIR}/zephyr/lpwan_client.c)

@@ -14,6 +14,7 @@
 #ifndef SENSEI_LPWAN_PRIV_H_
 #define SENSEI_LPWAN_PRIV_H_
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -32,6 +33,9 @@ struct lpwan_info {
   char fw[24];
   char modem[24];
   bool provisioned_pending;
+  bool proto_mismatch; /* the shield speaks another protocol version */
+  uint32_t recoveries; /* shield power cycles after a lost link */
+  uint32_t failures;   /* requests that failed in a row */
 };
 
 void sensei_lpwan_get_info(struct lpwan_info *info);
@@ -40,5 +44,8 @@ void sensei_lpwan_get_info(struct lpwan_info *info);
 int sensei_lpwan_cmd_connect(sensei_Radio radio);
 int sensei_lpwan_cmd_disconnect(void);
 int sensei_lpwan_cmd_power(bool on);
+
+/** True while an exchange holds the shared SPI_A bus. */
+bool sensei_lpwan_spi_in_use(void);
 
 #endif /* SENSEI_LPWAN_PRIV_H_ */

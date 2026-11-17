@@ -35,8 +35,8 @@ The SENSEI IEQ node builds it with `make nrf9151` and `make nrf9151-release` (`f
 
 | Build | Flash (non-secure image) | RAM |
 |---|---|---|
-| Release | 87 kB | 51 kB |
-| Debug (RTT log) | 136 kB | 57 kB |
+| Release | 90 kB | 51 kB |
+| Debug (RTT log) | 140 kB | 59 kB |
 
 The non-secure slot is 212 kB. Kconfig: `LPWAN_SHIELD_LTE`, `LPWAN_SHIELD_LORA` (both default y).
 Turn one off to save flash.
@@ -66,10 +66,15 @@ nRF5340 (master)                           nRF9151 (slave)
 - **Events:** the slave raises EVENT while it holds events (`LpwanEvent`, 0x22): joined, connected,
   disconnected, tx done, downlink, network time, error. The master fetches them with idle
   transfers until EVENT is low.
-- **Reliability:** frames carry a CRC-16 and a protocol version. The slave keeps every message armed
-  until the master confirms it (ACK flag), the master drops repeats (toggle flag), and a repeated
-  request with the same `seq` is not executed twice. Both sides have timeouts (BUSY wait, response
-  wait, transmit result, connect).
+- **Reliability:** frames carry a CRC-16 over header and message, and a frame version. The slave keeps every message
+  armed until the master confirms it (ACK flag plus the toggle bit of that message), the master drops repeats (toggle
+  flag), and a repeated request with the same `seq` is not executed twice. Both sides have timeouts (BUSY wait,
+  response wait, transmit result, connect). `LpwanVersion.protocol` is checked by the client at power-on.
+- **Self-protection:** the link thread feeds a task watchdog (hardware watchdog behind it, 15 s); a modem fault resets
+  the chip (`nrf_modem_fault_handler` in `main.c`); a send without result ends with `tx_done(failed)` after
+  `LPWAN_SHIELD_SEND_TIMEOUT_S` (45 s), so the state machine never stays in SENDING. The nRF5340 sees a reset as a lost
+  link and power-cycles the shield if it does not come back. The LTE worker can wait up to 600 s for a registration
+  (legitimate), so the task watchdog does not cover it.
 - **State machine** (`lib/sensei_lpwan/src/lpwan_sm.c`, on both MCUs): idle, connecting, connected, sending,
   disconnecting, error. One technology at a time: none, LTE, LoRa or BLE. A request that does not fit
   the state gets a result code (`LPWAN_BUSY`, `LPWAN_NOT_JOINED`, `LPWAN_NOT_CONNECTED`, ...). The
@@ -106,7 +111,9 @@ the power saving, registers, resolves the server and opens the socket, then repo
 network time (from the modem through `date_time`). Three paths run in their own threads: connect and
 send (worker), receive (own thread, blocks in `poll`), and the `lte_lc` callbacks. Downlinks (UDP
 datagrams) become `DownlinkRx` events. PSM and eDRX values are encoded in `lib/sensei_lpwan/src/lpwan_timers.c`
-(3GPP timer coding, host tested).
+(3GPP timer coding, host tested; the eDRX code is the 3GPP value, NB-IoT has ten of the sixteen).
+`lte_disconnect` ends a registration wait at once. Coverage lost while connected gives an error event (`registration
+lost`); sends fail at once until the modem registers again.
 
 Low power: the modem stays off until the first connect. After the uplink, the nRF5340 sends
 `sleep(0)`: the nRF9151 stays registered and the modem sleeps in PSM; the CPU idles with the SPIS
@@ -120,6 +127,12 @@ the vendored host driver (`third_party/lr1121_modem/`) over SPI1 with a devicetr
 as in the commissioning project: idle, joining, joined, ready, sending; the class and ADR are set
 after the join, uplink waits for `ready`. `tx done` events carry the uplink `seq`. Downlinks are
 events. Network time uses `DeviceTimeReq` (an empty uplink) and the LoRaWAN MAC time event.
+
+Before an uplink the shield asks the LR1121 how much fits (`get_next_tx_max_payload`: data rate and pending MAC commands)
+and fails a chunk that is too long. `lte_disconnect` during a join queues a `leave_network` after the join, so a late
+`joined` does not connect a radio the master gave up. A self-reset of the LR1121 gives `tx_done(failed)` and
+`disconnected`, and the radio setup runs again at the next join. The event line (DIO9) is read again after every command
+until it is low, so an edge that was missed does not leave the backend deaf.
 
 The LR1121 stays in reset until LoRa is first used. After that the Modem-E firmware sleeps by
 itself. It keeps the LoRaWAN session (keys and counters) in its own flash. After the nRF5340 powers the
@@ -141,8 +154,9 @@ sensei lpwan provision <DevEUI 16 hex> <JoinEUI 16 hex> <AppKey 32 hex>
 ```
 
 or `lpwan_lora_provision()` from the host link. The nRF5340 powers the shield, sends `LoraProvision`,
-joins, and clears the keys from its RAM. The nRF9151 writes them to the LR1121 at the join and keeps
-none. The LR1121 stores them. If the keys are missing in the LR1121 at a join, the service reports
+joins, and clears the keys from its RAM. The nRF9151 writes them to the LR1121 at the join and wipes its copy at once
+(also if writing fails: provision again). The frame buffers that held the request are cleared too. The shell command
+leaves the keys in the shell history and in the log of the transport: bench use only. The LR1121 stores them. If the keys are missing in the LR1121 at a join, the service reports
 `LPWAN_NOT_CONFIGURED`.
 
 ## Configuration the client sends

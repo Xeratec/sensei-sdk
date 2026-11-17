@@ -62,6 +62,13 @@ config LPWAN_SHIELD_LORA_TX_OFFSET_DB
 
 endif # LPWAN_SHIELD_LORA
 
+config LPWAN_SHIELD_SEND_TIMEOUT_S
+	int "Time for a send to report its result before it is failed, s"
+	default 45
+	help
+	  Without a tx_done the state machine would stay in SENDING and every later send would be refused.
+	  Keep it below the client's SENSEI_LPWAN_TX_TIMEOUT_S, so this side answers first.
+
 config LPWAN_SHIELD_LINK_STACK
 	int "SPI link thread stack size"
 	default 2048
@@ -89,5 +96,10 @@ config LPWAN_SHIELD_VERSION_PATCH
 config LPWAN_SHIELD_LOG_LEVEL
 	int "Log level of the service modules (0 off ... 4 debug)"
 	default 3
+
+# A modem fault resets the chip (main.c). The choice is only there with the modem library.
+choice NRF_MODEM_LIB_ON_FAULT
+	default NRF_MODEM_LIB_ON_FAULT_APPLICATION_SPECIFIC
+endchoice
 
 source "Kconfig.zephyr"

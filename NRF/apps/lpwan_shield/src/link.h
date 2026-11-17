@@ -25,6 +25,9 @@ int link_respond(const sensei_LpwanResponse *rsp);
 /** Queue an event for the master. Safe from any thread. */
 int link_push_event(const sensei_LpwanEvent *evt);
 
+/** Events dropped since start because the queue was full. */
+uint32_t link_dropped_events(void);
+
 /** Level of the ACK line (the master holds it high while the link is open). */
 bool link_master_present(void);
 

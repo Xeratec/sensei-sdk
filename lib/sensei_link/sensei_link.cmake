@@ -9,6 +9,7 @@
 #   include($ENV{SENSEI_SDK_ROOT}/lib/sensei_link/sensei_link.cmake)
 #   target_sources(app PRIVATE ${SENSEI_LINK_SOURCES})
 #   target_include_directories(app PRIVATE ${SENSEI_LINK_INCLUDE_DIRS})
+#   target_compile_definitions(app PRIVATE ${SENSEI_LINK_DEFINITIONS})
 #
 # The nanopb runtime comes from the submodule third_party/nanopb (the commit that NCS ships); set
 # SENSEI_NANOPB_DIR to use another copy of the same version. The generated sources need C11 (anonymous
@@ -20,6 +21,13 @@ if(NOT SENSEI_NANOPB_DIR)
 endif()
 if(NOT EXISTS "${SENSEI_NANOPB_DIR}/pb_encode.c")
   message(FATAL_ERROR "nanopb not found at ${SENSEI_NANOPB_DIR}: run 'git submodule update --init' in the SENSEI SDK")
+endif()
+
+# Largest SPI payload (default 8192 B). Set -DSENSEI_SPI_MAX_PAYLOAD=<n> for the whole build; the targets below and
+# SENSEI_LINK_DEFINITIONS (for builds that take the source lists) carry it as a compile definition.
+set(SENSEI_LINK_DEFINITIONS "")
+if(SENSEI_SPI_MAX_PAYLOAD)
+  list(APPEND SENSEI_LINK_DEFINITIONS SENSEI_SPI_MAX_PAYLOAD=${SENSEI_SPI_MAX_PAYLOAD}u)
 endif()
 
 # Framing only (plain C99, no nanopb).

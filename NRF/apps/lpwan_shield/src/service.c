@@ -30,15 +30,32 @@ LOG_MODULE_REGISTER(service, CONFIG_LPWAN_SHIELD_LOG_LEVEL);
 static lpwan_sm_t sm;
 static K_MUTEX_DEFINE(sm_lock);
 
+/* A send that gets no tx_done is ended after CONFIG_LPWAN_SHIELD_SEND_TIMEOUT_S with tx_done(failed), so the
+ * state machine leaves SENDING (the backend or the modem may hang). The master waits longer. */
+static struct k_work_delayable send_wd;
+static uint32_t send_wd_seq;
+
+static void send_wd_fn(struct k_work *w) {
+  ARG_UNUSED(w);
+  LOG_WRN("send %u: no result from the backend", (unsigned)send_wd_seq);
+  svc_emit_tx_done(send_wd_seq, false, 0);
+}
+
 /* ---- events ---- */
 
+/* The state machine moves only if the event was queued: a state change the master never hears of would
+ * leave the two machines apart. State events have reserved queue slots (link_slave.h), so this is rare. */
 void svc_emit(const sensei_LpwanEvent *evt) {
   k_mutex_lock(&sm_lock, K_FOREVER);
-  lpwan_sm_event(&sm, evt);
-  k_mutex_unlock(&sm_lock);
-  if (link_push_event(evt) != 0) {
+  if (link_push_event(evt) == 0) {
+    lpwan_sm_event(&sm, evt);
+    if (evt->which_body == sensei_LpwanEvent_tx_done_tag && evt->tx_done.seq == send_wd_seq) {
+      (void)k_work_cancel_delayable(&send_wd);
+    }
+  } else {
     LOG_WRN("event %u dropped (queue full)", (unsigned)evt->which_body);
   }
+  k_mutex_unlock(&sm_lock);
 }
 
 void svc_emit_radio(pb_size_t tag, sensei_Radio radio) {
@@ -106,6 +123,7 @@ static void fill_version(sensei_LpwanResponse *r) {
   r->version.firmware.major = CONFIG_LPWAN_SHIELD_VERSION_MAJOR;
   r->version.firmware.minor = CONFIG_LPWAN_SHIELD_VERSION_MINOR;
   r->version.firmware.patch = CONFIG_LPWAN_SHIELD_VERSION_PATCH;
+  r->version.protocol = LPWAN_PROTOCOL_VERSION;
   r->version.modem[0] = '\0';
 #ifdef CONFIG_LPWAN_SHIELD_LORA
   lora_modem_string(r->version.modem, sizeof(r->version.modem));
@@ -121,6 +139,7 @@ static void fill_version(sensei_LpwanResponse *r) {
 static void fill_status(sensei_LpwanResponse *r) {
   r->which_payload = sensei_LpwanResponse_status_tag;
   memset(&r->status, 0, sizeof(r->status));
+  r->status.dropped_events = link_dropped_events();
 #ifdef CONFIG_LPWAN_SHIELD_LTE
   lte_fill_status(&r->status);
 #endif
@@ -227,10 +246,11 @@ static void on_request(struct link_slave *s, const sensei_LpwanRequest *req, voi
   rsp.seq = req->seq;
 
   k_mutex_lock(&sm_lock, K_FOREVER);
-  lpwan_state_t before_state = sm.state;
-  lpwan_tech_t before_tech = sm.tech;
+  lpwan_sm_t before = sm;
+  lpwan_sm_t admitted;
 
   res = lpwan_sm_admit(&sm, req);
+  admitted = sm;
   if (res == sensei_LpwanResult_LPWAN_OK) {
     k_mutex_unlock(&sm_lock);
     if (req->which_body == sensei_LpwanRequest_get_version_tag) {
@@ -238,13 +258,21 @@ static void on_request(struct link_slave *s, const sensei_LpwanRequest *req, voi
     } else if (req->which_body == sensei_LpwanRequest_get_status_tag) {
       fill_status(&rsp);
     } else {
+      bool is_send = req->which_body == sensei_LpwanRequest_send_tag;
+
+      if (is_send) {
+        send_wd_seq = req->seq; /* the backend may answer at once */
+        (void)k_work_reschedule(&send_wd, K_SECONDS(CONFIG_LPWAN_SHIELD_SEND_TIMEOUT_S));
+      }
       res = run(req);
       if (res != sensei_LpwanResult_LPWAN_OK) {
-        /* The backend refused: undo what the admission started. */
+        /* The backend refused: undo what the admission started, unless events moved it on. */
         k_mutex_lock(&sm_lock, K_FOREVER);
-        sm.state = before_state;
-        sm.tech = before_tech;
+        lpwan_sm_revert(&sm, &before, &admitted);
         k_mutex_unlock(&sm_lock);
+        if (is_send) {
+          (void)k_work_cancel_delayable(&send_wd);
+        }
       }
     }
   } else {
@@ -258,5 +286,6 @@ static void on_request(struct link_slave *s, const sensei_LpwanRequest *req, voi
 
 int service_start(void) {
   lpwan_sm_init(&sm);
+  k_work_init_delayable(&send_wd, send_wd_fn);
   return link_start(on_request, NULL);
 }

@@ -33,6 +33,9 @@ extern "C" {
 #endif
 
 #define LINK_SLAVE_EVENT_SLOTS 4u
+/** Slots that only state events may fill (joined, connected, disconnected, tx_done, error): a burst
+ *  of downlinks or time events cannot push a state change out of the queue. */
+#define LINK_SLAVE_EVENT_RESERVED 2u
 
 struct link_slave;
 
@@ -54,9 +57,11 @@ struct link_slave_ops {
  */
 typedef void (*link_slave_request_fn)(struct link_slave *s, const sensei_LpwanRequest *req, void *user);
 
+/* A stored message. The SPI header (flags, CRC) is built when the frame is armed. */
 struct link_slave_frame {
-  uint16_t len; /* frame length with header, 0 = empty */
-  uint8_t data[LPWAN_XFER_LEN];
+  uint16_t len; /* payload length */
+  uint8_t type; /* SPI frame type */
+  uint8_t payload[LPWAN_MAX_PAYLOAD];
 };
 
 struct link_slave {
@@ -95,11 +100,15 @@ int link_slave_done(struct link_slave *s, int err);
 /** Answer the request being handled (call inside on_request). */
 int link_slave_respond(struct link_slave *s, const sensei_LpwanResponse *rsp);
 
-/** Queue an event from any thread. Returns -ENOMEM and counts it if the queue is full. */
+/** Queue an event from any thread. Returns -ENOMEM and counts it if the queue is full (for events
+ *  that carry data only: if the reserved slots are all that is left). */
 int link_slave_push_event(struct link_slave *s, const sensei_LpwanEvent *evt);
 
 /** Number of events waiting. */
 unsigned link_slave_events_pending(const struct link_slave *s);
+
+/** Events dropped since start because the queue was full (reported in LpwanStatus). */
+uint32_t link_slave_dropped_events(const struct link_slave *s);
 
 #ifdef __cplusplus
 }

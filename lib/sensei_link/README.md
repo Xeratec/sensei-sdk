@@ -6,7 +6,7 @@ the nanopb glue and the messages of the SDK libraries. C99, no allocation, no OS
 | Part | Files | What |
 |---|---|---|
 | Stream framing | `cobs.h`, `crc.h`, `stream.h` | `COBS(channel \| message \| CRC-16) 0x00`, a byte-wise receiver |
-| SPI frame | `spi.h` | 8 byte header `0x5E, version, type, flags, len, crc16`, then the message |
+| SPI frame | `spi.h` | 8 byte header `0x5E, version, type, flags, len, crc16`, then the message. The CRC covers header bytes 0 to 5 and the message |
 | Fragments | `frag.h` | message split into radio chunks `msg_id, index, count, data`, with a reassembler |
 | nanopb glue | `pb.h` | `sensei_encode_<Name>()` and `sensei_decode_<Name>()`, `SENSEI_PB_DECLARE()` for app messages |
 | Messages | `proto/sensei/*.proto` | `types.proto` (Empty, Version, Radio), `lpwan.proto` (nRF5340 to nRF9151 requests, responses, events) |
@@ -46,8 +46,11 @@ with `-I <sdk>/lib/sensei_link/proto` (the node: `firmware/proto/generate.sh`, w
 
 - Keep field numbers; add new fields at the end; never change a type; use `reserved` for removed fields.
 - Every `repeated`, `bytes` and `string` field needs a size in the `.options` file.
-- The framing version is `SENSEI_LINK_VERSION`. `SENSEI_SPI_MAX_PAYLOAD` (8192) can be set by an app before the first
-  include, the same value on both ends of a link.
+- The framing version is `SENSEI_LINK_VERSION` (2: the SPI CRC covers the header, so a flipped type or flag is caught;
+  version 1 covered the payload only). A peer with another version is refused (`SENSEI_SPI_ERR_VERSION`).
+- `SENSEI_SPI_MAX_PAYLOAD` (default 8192) is a build option, never a `#define` in one file: Zephyr
+  `CONFIG_SENSEI_SPI_MAX_PAYLOAD`, CMake `-DSENSEI_SPI_MAX_PAYLOAD=<n>` (the targets carry it; builds that take the source
+  lists add `SENSEI_LINK_DEFINITIONS`). Frames above it are refused. Use the same value for all programs of a link.
 
 ## Credits
 

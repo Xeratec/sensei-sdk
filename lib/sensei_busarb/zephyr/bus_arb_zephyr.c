@@ -16,24 +16,52 @@ static struct bus_arb arb;
 static struct k_spinlock lock;
 static bool inited;
 
+static bus_listener_fn listener;
+static void *listener_ctx;
+
+void bus_set_listener(bus_listener_fn fn, void *ctx) {
+  k_spinlock_key_t k = k_spin_lock(&lock);
+
+  listener = fn;
+  listener_ctx = ctx;
+  k_spin_unlock(&lock, k);
+}
+
+/* Tell the listener about a change of BUS_GAP9 (outside the lock). */
+static void notify(enum bus_user u, bool held) {
+  bus_listener_fn fn = listener;
+
+  if (u == BUS_GAP9 && fn != NULL) {
+    fn(u, held, listener_ctx);
+  }
+}
+
 bool bus_claim(enum bus_user u, uint32_t max_hold_ms) {
   k_spinlock_key_t k = k_spin_lock(&lock);
-  bool ok;
+  bool ok, was;
 
   if (!inited) {
     bus_arb_init(&arb);
     inited = true;
   }
+  was = arb.held[u];
   ok = bus_arb_try(&arb, u, k_uptime_get(), max_hold_ms);
   k_spin_unlock(&lock, k);
+  if (ok && !was) {
+    notify(u, true);
+  }
   return ok;
 }
 
 void bus_release(enum bus_user u) {
   k_spinlock_key_t k = k_spin_lock(&lock);
+  bool was = arb.held[u];
 
   bus_arb_release(&arb, u);
   k_spin_unlock(&lock, k);
+  if (was) {
+    notify(u, false);
+  }
 }
 
 bool bus_is_held(enum bus_user u) {

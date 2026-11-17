@@ -26,16 +26,21 @@
  *   LpwanEvent frames (0x22) later.
  * - The slave raises EVENT while it holds events. The master then runs transfers with idle frames
  *   until EVENT is low again.
- * - A frame that arrives with a bad magic, length or CRC is dropped. The slave keeps every message
- *   (response or event) armed until the master confirms it with LPWAN_FLAG_ACK in one of its
- *   frames, so a lost or damaged message is simply sent again. The master drops repeats with the
- *   toggle bit. A request that is repeated with the same seq is not executed twice: the slave
- *   returns the stored response.
+ * - A frame that arrives with a bad magic, length or CRC (the CRC covers the header too) is dropped.
+ *   The slave keeps every message (response or event) armed until the master confirms it: the
+ *   master sets LPWAN_FLAG_ACK and copies the toggle bit of that message into LPWAN_FLAG_ACK_TOGGLE.
+ *   The slave releases its armed message only if the toggle bit matches, so a late or repeated
+ *   ACK never releases the next message. A lost or damaged message is sent again. The master drops
+ *   repeats with the toggle bit (the first message after a start is always taken). A request that
+ *   is repeated with the same seq is not executed twice: the slave returns the stored response.
+ * - When the shield restarts the master calls lpwan_master_reset(). When the master gives up (the
+ *   link fails several times in a row) it power-cycles the shield.
  */
 
 #ifndef SENSEI_LPWAN_LINK_H_
 #define SENSEI_LPWAN_LINK_H_
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -47,6 +52,11 @@
 extern "C" {
 #endif
 
+/** Version of the LPWAN protocol (messages and their meaning), reported in LpwanVersion.protocol.
+ *  The client refuses a shield with another value (-EPROTONOSUPPORT). Bump it with a change of
+ *  lpwan.proto or of the transfer rules that an older peer would misread. */
+#define LPWAN_PROTOCOL_VERSION 1u
+
 /** Bytes per transfer: header and the largest message (LpwanRequest 1046 B), rounded up. */
 #define LPWAN_XFER_LEN 1056u
 #define LPWAN_MAX_PAYLOAD (LPWAN_XFER_LEN - SENSEI_SPI_HEADER_SIZE)
@@ -56,12 +66,14 @@ extern "C" {
 
 /*
  * Link flags in the SPI frame header (in addition to SENSEI_SPI_FLAG_ERROR 0x01 and _MORE 0x02):
- * - LPWAN_FLAG_ACK: the sender received the last message of the other side.
+ * - LPWAN_FLAG_ACK: the master took a message of the slave. LPWAN_FLAG_ACK_TOGGLE is the toggle
+ *   bit of that message.
  * - LPWAN_FLAG_TOGGLE: set by the slave on its messages, flipped for every new message (alternating
  *   bit). The master drops a message whose bit equals that of the last one it took (a repeat).
  */
 #define LPWAN_FLAG_ACK 0x04u
 #define LPWAN_FLAG_TOGGLE 0x08u
+#define LPWAN_FLAG_ACK_TOGGLE 0x10u
 
 /* ---- Global state machine (both MCUs) ---- */
 
@@ -85,6 +97,7 @@ typedef enum {
 typedef struct {
   lpwan_state_t state;
   lpwan_tech_t tech;
+  uint32_t send_seq; /* seq of the send in flight: only its tx_done ends SENDING */
 } lpwan_sm_t;
 
 void lpwan_sm_init(lpwan_sm_t *sm);
@@ -92,6 +105,8 @@ void lpwan_sm_init(lpwan_sm_t *sm);
 /**
  * Check a request against the state and apply the transition it starts.
  * Returns LPWAN_OK or the result code to send back. A rejected request changes nothing.
+ * `send` records req->seq as the send in flight (the master assigns the seq later: it sets
+ * sm->send_seq itself once the request went out).
  *
  *   get_version, get_status             any state
  *   lte_configure, lora_configure,
@@ -105,8 +120,26 @@ void lpwan_sm_init(lpwan_sm_t *sm);
  */
 sensei_LpwanResult lpwan_sm_admit(lpwan_sm_t *sm, const sensei_LpwanRequest *req);
 
-/** Apply an event: connected/joined, disconnected, tx_done, error. */
-void lpwan_sm_event(lpwan_sm_t *sm, const sensei_LpwanEvent *evt);
+/**
+ * Apply an event: connected/joined, disconnected, tx_done, error. Returns false if the event does
+ * not fit the machine and was ignored: the radio is not the active technology (a late LoRa join
+ * during an LTE connect), the machine is not waiting for it, or a tx_done of another send.
+ * Events that carry data only (downlink, time) return true and change nothing.
+ */
+bool lpwan_sm_event(lpwan_sm_t *sm, const sensei_LpwanEvent *evt);
+
+/** True for events that move the state machine (joined, connected, disconnected, tx_done, error).
+ *  The others (downlink, network time) may be dropped when the event queue is nearly full. */
+bool lpwan_event_is_state(const sensei_LpwanEvent *evt);
+
+/** The master gives up the send in flight (timeout): SENDING becomes CONNECTED. */
+void lpwan_sm_abort_send(lpwan_sm_t *sm);
+
+/**
+ * A request failed after lpwan_sm_admit() had moved the machine from `before` to `admitted`: go
+ * back to `before`, unless events that arrived meanwhile have moved it on.
+ */
+void lpwan_sm_revert(lpwan_sm_t *sm, const lpwan_sm_t *before, const lpwan_sm_t *admitted);
 
 /** Technology of a radio id; LPWAN_TECH_NONE for BLE-less ids that are not an LPWAN radio. */
 lpwan_tech_t lpwan_tech_of_radio(sensei_Radio r);

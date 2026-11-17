@@ -8,10 +8,10 @@
  * SPI link frame (GAP9 and nRF9151), all fields little endian:
  *
  *   0       1        2     3      4..5   6..7
- *   magic   version  type  flags  len    crc16 of the payload
- *   0x5E    1
+ *   magic   version  type  flags  len    crc16 of header bytes 0 to 5 and the payload
+ *   0x5E    2
  *
- * The header is followed by `len` payload bytes (a protobuf message).
+ * The header is followed by `len` payload bytes (a protobuf message). The CRC covers type and flags too.
  */
 #ifndef SENSEI_LINK_SPI_H
 #define SENSEI_LINK_SPI_H
@@ -56,14 +56,14 @@ void sensei_spi_header_pack(uint8_t out[SENSEI_SPI_HEADER_SIZE], uint8_t type, u
 /* Parse and check magic, version and length (not the CRC). */
 sensei_spi_status_t sensei_spi_header_parse(const uint8_t in[SENSEI_SPI_HEADER_SIZE], sensei_spi_header_t *hdr);
 
-/* Check the payload CRC against a parsed header. */
+/* Check the frame CRC (header bytes 0 to 5 and the payload) against a parsed header. */
 sensei_spi_status_t sensei_spi_check_payload(const sensei_spi_header_t *hdr, const uint8_t *payload);
 
 /* Header and payload in one buffer. Returns the frame length or 0 if `cap` is too small. */
 size_t sensei_spi_frame_encode(uint8_t type, uint8_t flags, const uint8_t *payload, size_t len, uint8_t *out,
                                size_t cap);
 
-/* Parse a whole frame; `*payload` points into `buf`. Extra bytes after the frame are ignored. */
+/* Parse a whole frame and check its CRC; `*payload` points into `buf`. Extra bytes after the frame are ignored. */
 sensei_spi_status_t sensei_spi_frame_decode(const uint8_t *buf, size_t len, sensei_spi_header_t *hdr,
                                             const uint8_t **payload);
 

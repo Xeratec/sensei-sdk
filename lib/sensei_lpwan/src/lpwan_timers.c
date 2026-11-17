@@ -23,7 +23,7 @@ static void bits(char *out, unsigned value, unsigned n) {
 /* Pick the smallest unit in which `seconds` fits in the 5-bit value, rounding up. */
 static int encode_timer(uint32_t seconds, const uint32_t *unit_s, const uint8_t *unit_code, size_t n, char out[9]) {
   for (size_t i = 0; i < n; i++) {
-    uint32_t v = (seconds + unit_s[i] - 1u) / unit_s[i];
+    uint32_t v = seconds / unit_s[i] + (seconds % unit_s[i] != 0u ? 1u : 0u); /* no overflow near UINT32_MAX */
 
     if (v <= 31u) {
       bits(out, (unsigned)unit_code[i] << 5 | v, 8);
@@ -51,26 +51,32 @@ int lpwan_encode_active(uint32_t seconds, char out[9]) {
 }
 
 int lpwan_encode_edrx(uint32_t ms, bool nb_iot, char out[5]) {
-  /* LTE-M: 5.12 s, 10.24 s, 20.48 s, 40.96 s, 61.44 s, 81.92 s, 102.4 s, 122.88 s, 143.36 s,
-   * 163.84 s, 327.68 s, 655.36 s, 1310.72 s, 2621.44 s, 5242.88 s, 10485.76 s.
-   * NB-IoT: 20.48 s doubling up to 10485.76 s (ten values). */
-  static const uint32_t ltem[] = {5120,   10240,  20480,  40960,  61440,   81920,   102400,  122880,
-                                  143360, 163840, 327680, 655360, 1310720, 2621440, 5242880, 10485760};
-  static const uint32_t nb[] = {20480, 40960, 81920, 163840, 327680, 655360, 1310720, 2621440, 5242880, 10485760};
-  const uint32_t *t = nb_iot ? nb : ltem;
+  /* 3GPP TS 24.008 table 10.5.5.32: the code is the value of the 4 bits, not the position in the list.
+   * LTE-M (WB-S1): all 16 values. NB-IoT (NB-S1): ten of them, the codes are the same as for LTE-M
+   * (81.92 s is 0101 in both). */
+  struct edrx {
+    uint32_t ms;
+    uint8_t code;
+  };
+  static const struct edrx ltem[] = {{5120, 0},     {10240, 1},    {20480, 2},    {40960, 3},
+                                     {61440, 4},    {81920, 5},    {102400, 6},   {122880, 7},
+                                     {143360, 8},   {163840, 9},   {327680, 10},  {655360, 11},
+                                     {1310720, 12}, {2621440, 13}, {5242880, 14}, {10485760, 15}};
+  static const struct edrx nb[] = {{20480, 2},   {40960, 3},    {81920, 5},    {163840, 9},   {327680, 10},
+                                   {655360, 11}, {1310720, 12}, {2621440, 13}, {5242880, 14}, {10485760, 15}};
+  const struct edrx *t = nb_iot ? nb : ltem;
   size_t n = nb_iot ? sizeof(nb) / sizeof(nb[0]) : sizeof(ltem) / sizeof(ltem[0]);
-
-  if (ms < t[0]) {
-    return -1;
-  }
   size_t best = 0;
 
+  if (ms < t[0].ms) {
+    return -1;
+  }
   for (size_t i = 0; i < n; i++) {
-    if (t[i] <= ms) {
+    if (t[i].ms <= ms) {
       best = i;
     }
   }
-  bits(out, (unsigned)best, 4);
+  bits(out, t[best].code, 4);
   return 0;
 }
 

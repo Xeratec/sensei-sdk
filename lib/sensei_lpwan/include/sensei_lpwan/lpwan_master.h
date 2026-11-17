@@ -45,22 +45,38 @@ struct lpwan_master {
   uint32_t seq;
   uint32_t ready_timeout_ms;
   uint8_t retries;
-  bool rx_error;    /* the last received frame was bad: flag it in the next frame */
-  bool peer_error;  /* the slave flagged our last frame as unreadable */
-  bool ack_pending; /* confirm the last message in the next frame */
-  bool last_tog;    /* toggle bit of the last message taken */
+  bool rx_error;        /* the last received frame was bad: flag it in the next frame */
+  bool peer_error;      /* the slave flagged our last frame as unreadable */
+  bool ack_pending;     /* confirm the last message taken, in the next frame sent */
+  bool ack_tog;         /* toggle bit of the message to confirm */
+  bool tx_ack;          /* the frame in tx carries an ACK: pending until it has gone out */
+  bool have_tog;        /* last_tog is valid (false after init and reset: the next message is taken) */
+  bool last_tog;        /* toggle bit of the last message taken */
+  uint8_t version_errs; /* frames in a row with another SPI frame version */
   uint8_t tx[LPWAN_XFER_LEN];
   uint8_t rx[LPWAN_XFER_LEN];
 
+  /** Requests that failed in a row (no answer, SPI error, protocol mismatch). 0 after a success. */
+  uint32_t failures;
   uint32_t n_transfers, n_bad_frames, n_retries, n_events;
 };
 
 void lpwan_master_init(struct lpwan_master *m, const struct lpwan_master_ops *ops, void *ctx);
 
 /**
+ * The slave restarted (shield power cycle, nRF9151 reset): forget the toggle and ACK state, so the
+ * first message of the new session is taken. Keeps seq and the counters.
+ */
+void lpwan_master_reset(struct lpwan_master *m);
+
+/** Clear the transmit buffer (it holds the last request, for example LoRaWAN keys). */
+void lpwan_master_wipe(struct lpwan_master *m);
+
+/**
  * Send a request (seq is assigned here) and wait up to timeout_ms for its response. Events that
  * arrive meanwhile go to on_event. Returns 0 (rsp filled, rsp->result holds the slave's verdict),
- * -ETIMEDOUT or another negative errno.
+ * -ETIMEDOUT, -EPROTONOSUPPORT (the slave speaks another SPI frame version) or another negative
+ * errno. `failures` counts the requests that failed in a row.
  */
 int lpwan_master_request(struct lpwan_master *m, sensei_LpwanRequest *req, sensei_LpwanResponse *rsp,
                          uint32_t timeout_ms);

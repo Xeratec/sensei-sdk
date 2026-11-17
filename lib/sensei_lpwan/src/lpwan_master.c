@@ -26,10 +26,23 @@ void lpwan_master_init(struct lpwan_master *m, const struct lpwan_master_ops *op
   m->retries = 2;
 }
 
+void lpwan_master_reset(struct lpwan_master *m) {
+  m->rx_error = false;
+  m->peer_error = false;
+  m->ack_pending = false;
+  m->tx_ack = false;
+  m->have_tog = false;
+  m->last_tog = false;
+  m->version_errs = 0;
+}
+
+void lpwan_master_wipe(struct lpwan_master *m) { memset(m->tx, 0, sizeof(m->tx)); }
+
 /* Send m->tx (already a frame), parse what came back. */
 static enum rx_kind exchange(struct lpwan_master *m, sensei_LpwanResponse *rsp, int *err) {
   sensei_spi_header_t h;
   const uint8_t *payload;
+  sensei_spi_status_t st;
 
   *err = m->ops->wait_ready(m->ctx, m->ready_timeout_ms);
   if (*err) {
@@ -40,8 +53,19 @@ static enum rx_kind exchange(struct lpwan_master *m, sensei_LpwanResponse *rsp, 
   if (*err) {
     return RX_NONE;
   }
-  if (sensei_spi_frame_decode(m->rx, LPWAN_XFER_LEN, &h, &payload) != SENSEI_SPI_OK ||
-      sensei_spi_check_payload(&h, payload) != SENSEI_SPI_OK) {
+  if (m->tx_ack) {
+    m->ack_pending = false; /* the ACK went out with this transfer */
+    m->tx_ack = false;
+  }
+  st = sensei_spi_frame_decode(m->rx, LPWAN_XFER_LEN, &h, &payload); /* checks the CRC */
+  if (st == SENSEI_SPI_ERR_VERSION && ++m->version_errs >= 2) {
+    *err = -EPROTONOSUPPORT; /* two frames in a row with another version: not a bit error */
+    return RX_NONE;
+  }
+  if (st != SENSEI_SPI_ERR_VERSION) {
+    m->version_errs = 0;
+  }
+  if (st != SENSEI_SPI_OK) {
     m->n_bad_frames++;
     m->rx_error = true;
     return RX_BAD;
@@ -52,42 +76,40 @@ static enum rx_kind exchange(struct lpwan_master *m, sensei_LpwanResponse *rsp, 
   }
   if (h.type == SENSEI_SPI_LPWAN_RESPONSE || h.type == SENSEI_SPI_LPWAN_EVENT) {
     bool tog = (h.flags & LPWAN_FLAG_TOGGLE) != 0;
-
-    m->ack_pending = true; /* confirm it, also if it is a repeat */
-    if (tog == m->last_tog) {
-      return RX_IDLE; /* a repeat of a message we already took */
-    }
-    m->last_tog = tog;
-  }
-  switch (h.type) {
-  case SENSEI_SPI_LPWAN_RESPONSE:
-    if (rsp && sensei_decode_LpwanResponse(payload, h.len, rsp)) {
-      return RX_RESPONSE;
-    }
-    m->rx_error = true;
-    return RX_BAD;
-  case SENSEI_SPI_LPWAN_EVENT: {
+    sensei_LpwanResponse scratch; /* a response nobody waits for (late, after a timeout) */
     sensei_LpwanEvent evt;
 
-    if (!sensei_decode_LpwanEvent(payload, h.len, &evt)) {
-      m->rx_error = true;
+    if (m->have_tog && tog == m->last_tog) {
+      m->ack_pending = true; /* a repeat of a message already taken: confirm it again */
+      m->ack_tog = tog;
+      return RX_IDLE;
+    }
+    if (h.type == SENSEI_SPI_LPWAN_RESPONSE ? !sensei_decode_LpwanResponse(payload, h.len, rsp ? rsp : &scratch)
+                                            : !sensei_decode_LpwanEvent(payload, h.len, &evt)) {
+      m->rx_error = true; /* not confirmed: the slave sends it again */
       return RX_BAD;
+    }
+    m->last_tog = tog;
+    m->have_tog = true;
+    m->ack_pending = true;
+    m->ack_tog = tog;
+    if (h.type == SENSEI_SPI_LPWAN_RESPONSE) {
+      return rsp ? RX_RESPONSE : RX_IDLE;
     }
     m->n_events++;
     m->ops->on_event(m->ctx, &evt);
     return RX_EVENT;
   }
-  default:
-    return RX_IDLE;
-  }
+  return RX_IDLE;
 }
 
+/* ACK stays pending until a frame that carries it has been sent (exchange() clears it). */
 static uint8_t tx_flags(struct lpwan_master *m) {
   uint8_t flags = m->rx_error ? SENSEI_SPI_FLAG_ERROR : 0;
 
+  m->tx_ack = m->ack_pending;
   if (m->ack_pending) {
-    flags |= LPWAN_FLAG_ACK;
-    m->ack_pending = false; /* sent with this frame */
+    flags |= LPWAN_FLAG_ACK | (m->ack_tog ? LPWAN_FLAG_ACK_TOGGLE : 0);
   }
   return flags;
 }
@@ -111,8 +133,7 @@ static int build_request(struct lpwan_master *m, const sensei_LpwanRequest *req)
   return 0;
 }
 
-int lpwan_master_request(struct lpwan_master *m, sensei_LpwanRequest *req, sensei_LpwanResponse *rsp,
-                         uint32_t timeout_ms) {
+static int request(struct lpwan_master *m, sensei_LpwanRequest *req, sensei_LpwanResponse *rsp, uint32_t timeout_ms) {
   int err;
 
   m->seq++;
@@ -165,6 +186,18 @@ int lpwan_master_request(struct lpwan_master *m, sensei_LpwanRequest *req, sense
     }
   }
   return -ETIMEDOUT;
+}
+
+int lpwan_master_request(struct lpwan_master *m, sensei_LpwanRequest *req, sensei_LpwanResponse *rsp,
+                         uint32_t timeout_ms) {
+  int err = request(m, req, rsp, timeout_ms);
+
+  if (err == 0) {
+    m->failures = 0;
+  } else if (err != -EMSGSIZE) {
+    m->failures++;
+  }
+  return err;
 }
 
 int lpwan_master_fetch_events(struct lpwan_master *m, unsigned max_frames) {

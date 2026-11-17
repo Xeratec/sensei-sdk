@@ -39,6 +39,7 @@
 #include "lpwan_priv.h"
 #include "sensei_busarb/bus_arb.h"
 #include "sensei_lpwan/lpwan.h"
+#include "sensei_lpwan/lpwan_lora.h"
 #include "sensei_lpwan/lpwan_master.h"
 
 LOG_MODULE_REGISTER(sensei_lpwan, CONFIG_SENSEI_LPWAN_LOG_LEVEL);
@@ -101,10 +102,29 @@ PINCTRL_DT_DEFINE(SPI_BUS); /* own copy of the pin states: the driver's is stati
 
 /* ---- shared SPI_A bus ---- */
 
+/*
+ * The pins of the nRF9151 link (SPIM4) are the same as those of GAP9 (SPIS3), switched by SPI_GAP_SEL
+ * (P0.20). One side owns the bus at a time. The client takes it for each exchange with the shield and
+ * gives it back at once. bus_take() waits up to timeout_ms for the bus (GAP9 off), isolates GAP9
+ * (SPI_GAP_SEL low) and connects the SPIM4 pins; bus_give() parks the pins and the chip select (high
+ * impedance), so GAP9 can take the bus. Arbitration is in lib/sensei_busarb. Private: the mutex belongs
+ * to the thread that took it.
+ *
+ * While GAP9 holds the bus the shield's level shifter is switched off (level_update()), so that the
+ * GAP9 chip select and clock do not reach the nRF9151 SPIS and its MISO does not drive against SPIS3.
+ */
+
+static K_SEM_DEFINE(event_sem, 0, 1);
 static struct k_mutex bus_lock;
 static atomic_t bus_taken;
+static bool level_on;             /* level shifter enabled (thread owned) */
+static atomic_t gap9_bus_changed; /* BUS_GAP9 was claimed or released: the thread updates the shifter */
 
-int sensei_lpwan_spi_acquire(int32_t timeout_ms) {
+static bool shield_on; /* 3.3 V of the shield on (thread owned) */
+
+static void level_update(void);
+
+static int bus_take(int32_t timeout_ms) {
   struct spi_config cfg = spi_nrf91.config;
   const struct gpio_dt_spec *cs = &cfg.cs.gpio;
   int64_t end = k_uptime_get() + timeout_ms;
@@ -117,6 +137,7 @@ int sensei_lpwan_spi_acquire(int32_t timeout_ms) {
     k_mutex_unlock(&bus_lock);
     return -EBUSY; /* GAP9 owns the bus */
   }
+  level_update();                   /* GAP9 does not hold the bus: the nRF9151 may listen */
   gpio_pin_set_dt(&pin_gap_sel, 0); /* GAP9 isolated from SPI_A */
   pinctrl_apply_state(PINCTRL_DT_DEV_CONFIG_GET(SPI_BUS), PINCTRL_STATE_DEFAULT);
   err = gpio_pin_configure_dt(cs, GPIO_OUTPUT_INACTIVE);
@@ -129,7 +150,7 @@ int sensei_lpwan_spi_acquire(int32_t timeout_ms) {
   return 0;
 }
 
-void sensei_lpwan_spi_release(void) {
+static void bus_give(void) {
   const struct gpio_dt_spec *cs = &spi_nrf91.config.cs.gpio;
 
   if (!atomic_get(&bus_taken)) {
@@ -144,6 +165,27 @@ void sensei_lpwan_spi_release(void) {
 
 bool sensei_lpwan_spi_in_use(void) { return atomic_get(&bus_taken) != 0; }
 
+/* The level shifter (expander P7) is on while the shield is on and GAP9 does not hold the bus. */
+static void level_update(void) {
+  bool want = shield_on && !bus_is_held(BUS_GAP9);
+
+  if (want != level_on) {
+    (void)gpio_pin_configure_dt(&pin_level, want ? GPIO_OUTPUT_ACTIVE : GPIO_OUTPUT_INACTIVE);
+    level_on = want;
+    LOG_DBG("level shifter %s", want ? "on" : "off (GAP9 owns the bus)");
+  }
+}
+
+/* Called by the bus arbiter, on the thread of the claimer: only wake the client thread. */
+static void gap9_listener(enum bus_user u, bool held, void *ctx) {
+  ARG_UNUSED(held);
+  ARG_UNUSED(ctx);
+  if (u == BUS_GAP9) {
+    atomic_set(&gap9_bus_changed, 1);
+    k_sem_give(&event_sem);
+  }
+}
+
 /* ---- state ---- */
 
 enum cmd_type { CMD_CONNECT, CMD_DISCONNECT, CMD_POWER, CMD_SEND, CMD_SETTINGS, CMD_PROVISION, CMD_VERSION };
@@ -155,20 +197,33 @@ struct cmd {
 };
 
 K_MSGQ_DEFINE(cmd_q, sizeof(struct cmd), 8, 4);
-static K_SEM_DEFINE(event_sem, 0, 1);
 static K_SEM_DEFINE(version_sem, 0, 1);
 static struct gpio_callback event_cb;
 
 static struct lpwan_master master;
 static lpwan_sm_t sm;
-static bool shield_on;
 static bool link_up;
+static bool proto_bad;          /* the shield speaks another protocol version: latched until reboot */
+static int64_t shield_off_at;   /* uptime of the last power-off */
+static int64_t shield_retry_at; /* no bring-up before this uptime after a failed one */
+static uint32_t recoveries;     /* shield power cycles caused by a lost link */
+static bool booting;            /* shield_up() waits for the nRF9151: failures do not count */
+static unsigned tx_timeouts;    /* sends in a row that got no tx_done */
 static bool lte_nb;
 static int last_result;
 static char fw_str[24], modem_str[24];
 
+/* LoRaWAN keys: in RAM from the provision call until the shield has them (or KEYS_TRIES failed sends). */
+#define KEYS_TRIES 3
 static sensei_LoraProvision keys;
 static atomic_t keys_pending;
+static int keys_tries;
+
+static void wipe_keys(void) {
+  memset(&keys, 0, sizeof(keys));
+  atomic_set(&keys_pending, 0);
+  keys_tries = 0;
+}
 
 static K_THREAD_STACK_DEFINE(stack, CONFIG_SENSEI_LPWAN_STACK_SIZE);
 static struct k_thread thread;
@@ -187,7 +242,6 @@ static sensei_Radio connect_radio;
 static atomic_t sending;
 static void (*send_done)(int err, void *user);
 static void *send_user;
-static uint32_t send_seq;
 static int64_t send_deadline;
 static uint8_t send_buf[LTE_MTU];
 static size_t send_len;
@@ -197,6 +251,7 @@ static uint32_t uplink_ok, uplink_fail;
 
 static sensei_LpwanVersion version_out;
 static atomic_t version_wanted;
+static int version_err;
 
 /* The app work queue gets completions, downlinks and time. */
 struct dl_item {
@@ -218,6 +273,7 @@ static struct k_work flush_work;
 static volatile sensei_Radio up_radio;
 static struct k_work send_done_work;
 static volatile int send_done_err;
+static atomic_t send_finishing; /* finish_send() ran, send_done_fn() has not yet */
 
 static void dl_work(struct k_work *w) {
   struct dl_item *d = CONTAINER_OF(w, struct dl_item, work);
@@ -250,6 +306,7 @@ static void send_done_fn(struct k_work *w) {
 
   ARG_UNUSED(w);
   send_done = NULL;
+  atomic_set(&send_finishing, 0);
   atomic_set(&sending, 0);
   if (cb) {
     cb(err, u);
@@ -258,7 +315,7 @@ static void send_done_fn(struct k_work *w) {
 
 /* Thread: finish the send in flight. */
 static void finish_send(int err) {
-  if (!atomic_get(&sending)) {
+  if (!atomic_get(&sending) || !atomic_cas(&send_finishing, 0, 1)) {
     return;
   }
   bus_release(BUS_LTE_TX);
@@ -269,6 +326,8 @@ static void finish_send(int err) {
     uplink_ok++;
   }
   send_deadline = 0;
+  /* The shield goes to sleep after the idle time, also when this send failed or timed out. */
+  idle_deadline = k_uptime_get() + CONFIG_SENSEI_LPWAN_IDLE_S * 1000LL;
   send_done_err = err;
   submit_work(&send_done_work);
 }
@@ -283,6 +342,7 @@ static int expander_outputs(bool on) {
                       : GPIO_OUTPUT_INACTIVE);
   err |= gpio_pin_configure_dt(&pin_power, on ? GPIO_OUTPUT_ACTIVE : GPIO_OUTPUT_INACTIVE);
   err |= gpio_pin_configure_dt(&pin_level, GPIO_OUTPUT_INACTIVE);
+  level_on = false;
   err |= gpio_pin_configure_dt(&pin_ack, GPIO_OUTPUT_INACTIVE);
   err |= gpio_pin_configure_dt(&pin_spare, GPIO_OUTPUT_INACTIVE);
   err |= gpio_pin_configure_dt(&pin_busy, GPIO_INPUT);
@@ -299,25 +359,27 @@ static int op_xfer(void *c, const uint8_t *tx, uint8_t *rx, size_t len) {
   int err;
 
   ARG_UNUSED(c);
-  err = sensei_lpwan_spi_acquire(LPWAN_BUS_WAIT_MS);
+  err = bus_take(LPWAN_BUS_WAIT_MS);
   if (err) {
     return err;
   }
   err = spi_transceive_dt(&spi_nrf91, &txs, &rxs);
-  sensei_lpwan_spi_release();
+  bus_give();
   return err;
 }
 
 static int op_wait_ready(void *c, uint32_t timeout_ms) {
-  int64_t end = k_uptime_get() + timeout_ms;
+  int64_t start = k_uptime_get();
+  int64_t end = start + timeout_ms;
 
   ARG_UNUSED(c);
   do {
-    /* BUSY is on the expander: one I2C read per poll. */
+    /* BUSY is on the expander: one I2C read per poll. A slave that does not answer within 50 ms is
+     * slow or gone: poll every 10 ms then, not every ms. */
     if (gpio_pin_get_dt(&pin_busy) == 0) {
       return 0;
     }
-    k_msleep(1);
+    k_msleep(k_uptime_get() - start < 50 ? 1 : 10);
   } while (k_uptime_get() < end);
   return -ETIMEDOUT;
 }
@@ -333,24 +395,41 @@ static uint32_t op_now(void *c) {
 }
 
 static void op_on_event(void *c, const sensei_LpwanEvent *evt) {
+  /* False: the event does not fit (the radio is not the active one, a tx_done of another send). */
+  bool applied = lpwan_sm_event(&sm, evt);
+
   ARG_UNUSED(c);
-  lpwan_sm_event(&sm, evt);
   switch (evt->which_body) {
   case sensei_LpwanEvent_joined_tag:
   case sensei_LpwanEvent_connected_tag:
+    if (!applied) {
+      LOG_WRN("%s event ignored (state %s/%s)",
+              evt->which_body == sensei_LpwanEvent_joined_tag ? "joined" : "connected", lpwan_state_name(sm.state),
+              lpwan_tech_name(sm.tech));
+      break;
+    }
     LOG_INF("%s", evt->which_body == sensei_LpwanEvent_joined_tag ? "joined" : "connected");
     connect_end();
     up_radio = evt->which_body == sensei_LpwanEvent_joined_tag ? evt->joined.radio : evt->connected.radio;
     submit_work(&flush_work); /* the uplink queue waits for this */
     break;
   case sensei_LpwanEvent_disconnected_tag:
+    if (!applied) {
+      break;
+    }
     LOG_INF("disconnected");
     connect_end();
     break;
   case sensei_LpwanEvent_tx_done_tag:
+    /* The result of the send in flight, even if an error event moved the machine meanwhile. */
+    if (!(atomic_get(&sending) && evt->tx_done.seq == sm.send_seq)) {
+      /* A late result of a send that was given up, or of an older one. */
+      LOG_WRN("tx done, seq %u ignored (sending seq %u)", (unsigned)evt->tx_done.seq, (unsigned)sm.send_seq);
+      break;
+    }
     LOG_INF("tx done, seq %u, %s", (unsigned)evt->tx_done.seq, evt->tx_done.ok ? "ok" : "failed");
+    tx_timeouts = 0; /* the shield answers */
     finish_send(evt->tx_done.ok ? 0 : -EIO);
-    idle_deadline = k_uptime_get() + CONFIG_SENSEI_LPWAN_IDLE_S * 1000LL;
     break;
   case sensei_LpwanEvent_downlink_rx_tag: {
     struct dl_item *d;
@@ -399,30 +478,59 @@ static const struct lpwan_master_ops mops = {
 
 /* ---- requests ---- */
 
-/* Admit locally (clear errors without SPI traffic), send, and undo the transition on refusal. */
+static void link_recover(const char *why);
+
+/*
+ * Admit locally (clear errors without SPI traffic), send, and undo the admission on failure.
+ * A shield that says "not connected" or "not joined" to a request our state machine allowed has
+ * restarted or lost the connection: start again from idle, so the next use connects again.
+ * Several failed requests in a row power-cycle the shield (link_recover).
+ */
 static int request(sensei_LpwanRequest *req, sensei_LpwanResponse *rsp, uint32_t timeout_ms) {
   lpwan_sm_t before = sm;
-  sensei_LpwanResult res = lpwan_sm_admit(&sm, req);
+  sensei_LpwanResult res;
+  lpwan_sm_t admitted;
   int err;
 
+  if (!shield_on) {
+    last_result = -ENOTCONN;
+    return -ENOTCONN; /* power-cycled or never started: shield_up() first */
+  }
+  res = lpwan_sm_admit(&sm, req);
   if (res != sensei_LpwanResult_LPWAN_OK) {
     last_result = res;
     LOG_WRN("request %u refused locally: %d (%s/%s)", (unsigned)req->which_body, (int)res, lpwan_state_name(sm.state),
             lpwan_tech_name(sm.tech));
     return -EPERM;
   }
+  admitted = sm;
   err = lpwan_master_request(&master, req, rsp, timeout_ms);
   if (err) {
-    sm = before;
+    lpwan_sm_revert(&sm, &before, &admitted);
     last_result = err;
-    LOG_ERR("request %u failed: %d", (unsigned)req->which_body, err);
+    if (err == -EBUSY) {
+      master.failures = 0; /* GAP9 owns the bus: not the shield's fault */
+    }
+    LOG_ERR("request %u failed: %d (%u in a row)", (unsigned)req->which_body, err, (unsigned)master.failures);
+    if (!booting && master.failures >= CONFIG_SENSEI_LPWAN_LINK_FAILURES) {
+      link_recover("no answer");
+    }
     return err;
   }
   last_result = rsp->result;
   if (rsp->result != sensei_LpwanResult_LPWAN_OK) {
-    sm = before;
+    if (rsp->result == sensei_LpwanResult_LPWAN_NOT_CONNECTED || rsp->result == sensei_LpwanResult_LPWAN_NOT_JOINED) {
+      LOG_WRN("nRF9151 is not connected, but we thought so: start again");
+      lpwan_sm_init(&sm);
+      connect_end();
+    } else {
+      lpwan_sm_revert(&sm, &before, &admitted);
+    }
     LOG_WRN("request %u rejected by nRF9151: %d", (unsigned)req->which_body, (int)rsp->result);
     return -EIO;
+  }
+  if (req->which_body == sensei_LpwanRequest_send_tag) {
+    sm.send_seq = req->seq; /* the master assigned it in lpwan_master_request() */
   }
   return 0;
 }
@@ -444,7 +552,16 @@ static int read_version(sensei_LpwanVersion *out) {
 
   rq.which_body = sensei_LpwanRequest_get_version_tag;
   err = request(&rq, &rs, REQ_TO);
+  if (err == -EPROTONOSUPPORT) {
+    proto_bad = true; /* another SPI frame version */
+  }
   if (err == 0 && rs.which_payload == sensei_LpwanResponse_version_tag) {
+    if (rs.version.protocol != LPWAN_PROTOCOL_VERSION) {
+      LOG_ERR("nRF9151 speaks LPWAN protocol %u, this client %u: update the shield firmware",
+              (unsigned)rs.version.protocol, (unsigned)LPWAN_PROTOCOL_VERSION);
+      proto_bad = true;
+      return -EPROTONOSUPPORT;
+    }
     *out = rs.version;
     snprintf(fw_str, sizeof(fw_str), "%u.%u.%u", (unsigned)rs.version.firmware.major,
              (unsigned)rs.version.firmware.minor, (unsigned)rs.version.firmware.patch);
@@ -455,40 +572,80 @@ static int read_version(sensei_LpwanVersion *out) {
 
 /* ---- power ---- */
 
+static void shield_down(void);
+
+/* After a failed bring-up the next one waits, so a dead shield does not keep the thread and the
+ * rail busy. Power-off time: the nRF9151 must lose its supply to reset. */
+#define SHIELD_OFF_MS 300
+#define SHIELD_RETRY_MS 15000
+
 static int shield_up(void) {
   int64_t end;
 
+  if (proto_bad) {
+    return -EPROTONOSUPPORT;
+  }
   if (shield_on && link_up) {
     return 0;
   }
   if (!shield_on) {
-    int err = expander_outputs(true);
+    int err;
 
+    if (k_uptime_get() < shield_retry_at) {
+      return -EAGAIN;
+    }
+    while (k_uptime_get() - shield_off_at < SHIELD_OFF_MS) {
+      k_msleep(10);
+    }
+    err = expander_outputs(true);
     if (err) {
       LOG_ERR("expander setup failed: %d", err);
       return err;
     }
-    /* 3.3 V on, then the level shifter, then SPI. */
+    /* 3.3 V on, then the level shifter (unless GAP9 has the bus), then SPI. */
     k_msleep(5);
-    gpio_pin_set_dt(&pin_level, 1);
-    gpio_pin_set_dt(&pin_ack, 1);
     shield_on = true;
-    lpwan_sm_init(&sm);
+    level_update();
+    gpio_pin_set_dt(&pin_ack, 1);
     LOG_INF("shield on");
   }
+  /* A new session: the slave has no memory of the old one. */
+  lpwan_sm_init(&sm);
+  lpwan_master_reset(&master);
+  master.failures = 0;
+  booting = true;
   end = k_uptime_get() + CONFIG_SENSEI_LPWAN_BOOT_TIMEOUT_MS;
   while (k_uptime_get() < end) {
     sensei_LpwanVersion v;
 
-    if (op_wait_ready(NULL, 100) == 0 && read_version(&v) == 0) {
-      link_up = true;
-      LOG_INF("nRF9151 firmware %s, modem '%s'", fw_str, modem_str);
-      return 0;
+    if (op_wait_ready(NULL, 100) == 0) {
+      int err = read_version(&v);
+
+      if (err == 0) {
+        booting = false;
+        link_up = true;
+        LOG_INF("nRF9151 firmware %s, modem '%s'", fw_str, modem_str);
+        return 0;
+      }
+      if (err == -EPROTONOSUPPORT) {
+        break; /* no use to wait */
+      }
+      if (err == -EBUSY) {
+        end = k_uptime_get() + CONFIG_SENSEI_LPWAN_BOOT_TIMEOUT_MS; /* GAP9 had the bus: not the shield's fault */
+      }
     }
     k_msleep(50);
   }
-  LOG_ERR("nRF9151 does not answer");
-  return -ETIMEDOUT;
+  booting = false;
+  if (proto_bad) {
+    LOG_ERR("nRF9151 protocol mismatch");
+  } else {
+    LOG_ERR("nRF9151 does not answer: power-cycle");
+  }
+  report_error();
+  shield_down(); /* power off now; the next bring-up starts from a reset shield */
+  shield_retry_at = k_uptime_get() + SHIELD_RETRY_MS;
+  return proto_bad ? -EPROTONOSUPPORT : -ETIMEDOUT;
 }
 
 static void shield_down(void) {
@@ -496,14 +653,29 @@ static void shield_down(void) {
     return;
   }
   (void)gpio_pin_configure_dt(&pin_level, GPIO_OUTPUT_INACTIVE);
+  level_on = false;
   (void)gpio_pin_configure_dt(&pin_ack, GPIO_OUTPUT_INACTIVE);
   (void)gpio_pin_configure_dt(&pin_power, GPIO_OUTPUT_INACTIVE); /* 3.3 V off */
   shield_on = false;
+  shield_off_at = k_uptime_get();
   link_up = false;
   connect_end();
   idle_deadline = 0;
   lpwan_sm_init(&sm);
   LOG_INF("shield off");
+}
+
+/* The link is lost (the nRF9151 hangs or resets, requests fail in a row, no tx_done): give up what is in
+ * flight and cut the shield power. The next use starts the shield again. LoRaWAN keeps its session
+ * in the LR1121, LTE registers again. */
+static void link_recover(const char *why) {
+  LOG_ERR("link lost (%s): power-cycling the shield", why);
+  recoveries++;
+  finish_send(-EIO);
+  report_error();
+  shield_down();
+  tx_timeouts = 0;
+  shield_retry_at = k_uptime_get() + 1000; /* give the cycle a moment, the uplink retries */
 }
 
 static bool gating_wanted(void) {
@@ -606,9 +778,14 @@ static void do_connect(sensei_Radio radio) {
       rq.which_body = sensei_LpwanRequest_lora_provision_tag;
       rq.lora_provision = keys;
       if (request(&rq, &rs, REQ_TO) == 0) {
-        atomic_set(&keys_pending, 0);
-        memset(&keys, 0, sizeof(keys)); /* the LR1121 holds them now */
+        wipe_keys(); /* the LR1121 holds them now */
+      } else if (++keys_tries >= KEYS_TRIES) {
+        LOG_ERR("LoRaWAN keys could not be sent %d times: dropped, provision again", KEYS_TRIES);
+        wipe_keys();
+        report_error();
       }
+      memset(&rq, 0, sizeof(rq)); /* the copy on the stack and the frame in the master buffer */
+      lpwan_master_wipe(&master);
     }
     if (simple_request(sensei_LpwanRequest_lora_join_tag)) {
       return;
@@ -643,7 +820,6 @@ static void do_send(void) {
     finish_send(-EIO);
     return;
   }
-  send_seq = rq.seq;
   send_deadline = k_uptime_get() + CONFIG_SENSEI_LPWAN_TX_TIMEOUT_S * 1000LL;
 }
 
@@ -700,12 +876,15 @@ static void handle_cmd(const struct cmd *c) {
   case CMD_VERSION:
     if (atomic_get(&version_wanted)) {
       bool was_on = shield_on;
+      int err = shield_up();
 
-      if (shield_up() == 0 && read_version(&version_out) == 0) {
-        atomic_set(&version_wanted, 0);
-        k_sem_give(&version_sem);
+      if (err == 0) {
+        err = read_version(&version_out);
       }
-      if (!was_on && !connecting) {
+      version_err = err;
+      atomic_set(&version_wanted, 0);
+      k_sem_give(&version_sem);
+      if (!was_on && shield_on && !connecting) {
         idle_deadline = k_uptime_get() + CONFIG_SENSEI_LPWAN_IDLE_S * 1000LL;
       }
     }
@@ -736,7 +915,11 @@ static void check_timers(void) {
   }
   if (atomic_get(&sending) && send_deadline && now > send_deadline) {
     LOG_ERR("no transmit result");
+    lpwan_sm_abort_send(&sm); /* the late tx_done, if it comes, is ignored: its seq is no longer sent */
     finish_send(-ETIMEDOUT);
+    if (++tx_timeouts >= CONFIG_SENSEI_LPWAN_LINK_FAILURES) {
+      link_recover("no transmit result");
+    }
   }
   if (idle_deadline && now > idle_deadline) {
     idle_action();
@@ -770,6 +953,9 @@ static void thread_fn(void *a, void *b, void *c) {
 
     (void)k_poll(ev, 2, to);
 
+    if (atomic_cas(&gap9_bus_changed, 1, 0)) {
+      level_update(); /* GAP9 took or gave back the bus: the level shifter follows */
+    }
     if (shield_on && link_up && (k_sem_take(&event_sem, K_NO_WAIT) == 0)) {
       (void)lpwan_master_fetch_events(&master, 16);
     } else {
@@ -815,8 +1001,14 @@ bool sensei_lpwan_radio_ready(sensei_Radio r) {
   return ok;
 }
 
+uint32_t sensei_lpwan_lora_mtu(void) {
+  const struct sensei_lpwan_config st = cfg_get();
+
+  return lpwan_lora_max_payload(st.lora_dr, st.lora_adr);
+}
+
 int sensei_lpwan_radio_send(sensei_Radio r, const uint8_t *chunk, size_t len, void (*done)(int, void *), void *user) {
-  if (len == 0 || len > sizeof(send_buf)) {
+  if (len == 0 || len > sizeof(send_buf) || (r == sensei_Radio_RADIO_LORA && len > sensei_lpwan_lora_mtu())) {
     return -EINVAL;
   }
   if (!atomic_cas(&sending, 0, 1)) {
@@ -868,12 +1060,14 @@ int sensei_lpwan_init(const struct sensei_lpwan_hooks *h, const struct sensei_lp
   err |= gpio_pin_configure_dt(&pin_gap_sel, GPIO_OUTPUT_INACTIVE);
   err |= gpio_pin_configure_dt(&pin_event, GPIO_INPUT | GPIO_PULL_DOWN);
   err |= expander_outputs(false);
+  shield_off_at = k_uptime_get(); /* the shield may have been on before a reset of the nRF5340 */
   pinctrl_apply_state(PINCTRL_DT_DEV_CONFIG_GET(SPI_BUS), PINCTRL_STATE_SLEEP);
   (void)gpio_pin_configure_dt(&spi_nrf91.config.cs.gpio, GPIO_DISCONNECTED);
   if (err) {
     LOG_ERR("shield pins failed (expander at 0x20 not answering?)");
     return -EIO;
   }
+  bus_set_listener(gap9_listener, NULL);
   gpio_init_callback(&event_cb, event_isr, BIT(pin_event.pin));
   err = gpio_add_callback(pin_event.port, &event_cb);
   err |= gpio_pin_interrupt_configure_dt(&pin_event, GPIO_INT_EDGE_RISING);
@@ -893,6 +1087,7 @@ int sensei_lpwan_lora_provision(const sensei_LoraProvision *k) {
     return -EINVAL;
   }
   keys = *k;
+  keys_tries = 0;
   atomic_set(&keys_pending, 1);
   return post(CMD_PROVISION, sensei_Radio_RADIO_LORA, false);
 }
@@ -913,8 +1108,10 @@ int sensei_lpwan_query_version(sensei_LpwanVersion *out, uint32_t timeout_ms) {
     atomic_set(&version_wanted, 0);
     return -ETIMEDOUT;
   }
-  *out = version_out;
-  return 0;
+  if (version_err == 0) {
+    *out = version_out;
+  }
+  return version_err; /* -EPROTONOSUPPORT: the shield speaks another protocol version */
 }
 
 void sensei_lpwan_get_info(struct lpwan_info *i) {
@@ -932,11 +1129,17 @@ void sensei_lpwan_get_info(struct lpwan_info *i) {
   i->uplink_fail = uplink_fail;
   i->last_result = last_result;
   i->provisioned_pending = atomic_get(&keys_pending) != 0;
+  i->proto_mismatch = proto_bad;
+  i->recoveries = recoveries;
+  i->failures = master.failures;
   strncpy(i->fw, fw_str, sizeof(i->fw) - 1);
   strncpy(i->modem, modem_str, sizeof(i->modem) - 1);
 }
 
 const char *sensei_lpwan_state_str(void) {
+  if (proto_bad) {
+    return "protocol mismatch";
+  }
   if (!shield_on) {
     return "shield off";
   }

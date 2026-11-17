@@ -68,9 +68,10 @@ static int arm_next(struct link_slave *s) {
     f = s->armed == ARMED_RESPONSE ? &s->response : &s->events[s->ev_head];
     bool more = (s->armed == ARMED_RESPONSE ? s->ev_count : s->ev_count - 1u) > 0;
     memset(s->tx, 0, sizeof(s->tx));
-    memcpy(s->tx, f->data, f->len);
-    /* The CRC covers the payload only, so the flag byte can be set here. */
-    s->tx[3] = (uint8_t)(flags | (more ? SENSEI_SPI_FLAG_MORE : 0) | (s->tog ? LPWAN_FLAG_TOGGLE : 0));
+    memcpy(s->tx + SENSEI_SPI_HEADER_SIZE, f->payload, f->len);
+    flags |= (uint8_t)((more ? SENSEI_SPI_FLAG_MORE : 0) | (s->tog ? LPWAN_FLAG_TOGGLE : 0));
+    /* The CRC covers the flags, so the header is built here, not when the message was stored. */
+    sensei_spi_header_pack(s->tx, f->type, flags, s->tx + SENSEI_SPI_HEADER_SIZE, f->len);
   } else {
     load_idle(s);
   }
@@ -95,14 +96,13 @@ int link_slave_start(struct link_slave *s) {
 }
 
 int link_slave_respond(struct link_slave *s, const sensei_LpwanResponse *rsp) {
-  int32_t n = sensei_encode_LpwanResponse(s->response.data + SENSEI_SPI_HEADER_SIZE, LPWAN_MAX_PAYLOAD, rsp);
+  int32_t n = sensei_encode_LpwanResponse(s->response.payload, LPWAN_MAX_PAYLOAD, rsp);
 
   if (n < 0) {
     return -EMSGSIZE;
   }
-  sensei_spi_header_pack(s->response.data, SENSEI_SPI_LPWAN_RESPONSE, 0, s->response.data + SENSEI_SPI_HEADER_SIZE,
-                         (size_t)n);
-  s->response.len = (uint16_t)(SENSEI_SPI_HEADER_SIZE + n);
+  s->response.type = SENSEI_SPI_LPWAN_RESPONSE;
+  s->response.len = (uint16_t)n;
   if (s->armed == ARMED_RESPONSE) {
     s->armed = ARMED_IDLE; /* the master moved on: the old response is obsolete */
   }
@@ -115,21 +115,23 @@ int link_slave_push_event(struct link_slave *s, const sensei_LpwanEvent *evt) {
   int32_t n;
   int ret = 0;
   uint8_t slot;
+  unsigned limit =
+      lpwan_event_is_state(evt) ? LINK_SLAVE_EVENT_SLOTS : LINK_SLAVE_EVENT_SLOTS - LINK_SLAVE_EVENT_RESERVED;
 
   lock(s);
-  if (s->ev_count >= LINK_SLAVE_EVENT_SLOTS) {
+  if (s->ev_count >= limit) {
     s->n_dropped_events++;
     unlock(s);
     return -ENOMEM;
   }
   slot = (uint8_t)((s->ev_head + s->ev_count) % LINK_SLAVE_EVENT_SLOTS);
   f = &s->events[slot];
-  n = sensei_encode_LpwanEvent(f->data + SENSEI_SPI_HEADER_SIZE, LPWAN_MAX_PAYLOAD, evt);
+  n = sensei_encode_LpwanEvent(f->payload, LPWAN_MAX_PAYLOAD, evt);
   if (n < 0) {
     ret = -EMSGSIZE;
   } else {
-    sensei_spi_header_pack(f->data, SENSEI_SPI_LPWAN_EVENT, 0, f->data + SENSEI_SPI_HEADER_SIZE, (size_t)n);
-    f->len = (uint16_t)(SENSEI_SPI_HEADER_SIZE + n);
+    f->type = SENSEI_SPI_LPWAN_EVENT;
+    f->len = (uint16_t)n;
     s->ev_count++;
   }
   unlock(s);
@@ -140,6 +142,8 @@ int link_slave_push_event(struct link_slave *s, const sensei_LpwanEvent *evt) {
 }
 
 unsigned link_slave_events_pending(const struct link_slave *s) { return s->ev_count; }
+
+uint32_t link_slave_dropped_events(const struct link_slave *s) { return s->n_dropped_events; }
 
 /* The master confirmed our armed message: release it. */
 static void release_armed(struct link_slave *s) {
@@ -157,16 +161,11 @@ static void release_armed(struct link_slave *s) {
 int link_slave_done(struct link_slave *s, int err) {
   sensei_spi_header_t h;
   const uint8_t *payload = NULL;
-  bool valid = false;
 
   s->n_transfers++;
-  if (err == 0 && sensei_spi_frame_decode(s->rx, LPWAN_XFER_LEN, &h, &payload) == SENSEI_SPI_OK &&
-      sensei_spi_check_payload(&h, payload) == SENSEI_SPI_OK) {
-    valid = true;
-  }
-
-  if (!valid) {
-    /* Bad or empty frame: the armed message stays, the master is asked to repeat. */
+  if (err != 0 || sensei_spi_frame_decode(s->rx, LPWAN_XFER_LEN, &h, &payload) != SENSEI_SPI_OK) {
+    /* Bad or empty frame (the decode checked the CRC): the armed message stays, the master is asked
+     * to repeat. */
     bool blank = true;
 
     for (size_t i = 0; i < SENSEI_SPI_HEADER_SIZE; i++) {
@@ -186,10 +185,14 @@ int link_slave_done(struct link_slave *s, int err) {
   if (h.flags & SENSEI_SPI_FLAG_ERROR) {
     s->n_repeats++; /* informative: the master could not read our last frame */
   }
-  if ((h.flags & LPWAN_FLAG_ACK) && s->armed != ARMED_IDLE) {
-    release_armed(s);
-  } else if (s->armed != ARMED_IDLE && !(h.flags & LPWAN_FLAG_ACK)) {
-    s->n_repeats++; /* the master has not confirmed it yet: it goes out again */
+  if (s->armed != ARMED_IDLE) {
+    bool ack_tog = (h.flags & LPWAN_FLAG_ACK_TOGGLE) != 0;
+
+    if ((h.flags & LPWAN_FLAG_ACK) && ack_tog == (s->tog != 0)) {
+      release_armed(s); /* confirmed: the ACK names the toggle bit of the armed message */
+    } else {
+      s->n_repeats++; /* not confirmed (or the ACK is for another message): it goes out again */
+    }
   }
 
   if (h.type == SENSEI_SPI_LPWAN_REQUEST) {
@@ -208,6 +211,7 @@ int link_slave_done(struct link_slave *s, int err) {
       s->response_pending = false;
       s->on_request(s, &req, s->user);
     }
+    memset(&req, 0, sizeof(req)); /* it may hold LoRaWAN keys */
   }
   return arm_next(s);
 }

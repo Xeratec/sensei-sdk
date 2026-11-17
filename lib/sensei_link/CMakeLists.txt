@@ -16,7 +16,9 @@ include(${CMAKE_CURRENT_LIST_DIR}/sensei_link.cmake)
 
 add_library(sensei_link STATIC ${SENSEI_LINK_SOURCES})
 target_include_directories(sensei_link PUBLIC ${SENSEI_LINK_INCLUDE_DIRS})
+target_compile_definitions(sensei_link PUBLIC ${SENSEI_LINK_DEFINITIONS})
 
 # The framing sources alone, for users that need no protobuf (plain C99).
 add_library(sensei_link_framing STATIC ${SENSEI_LINK_FRAMING_SOURCES})
 target_include_directories(sensei_link_framing PUBLIC ${SENSEI_LINK_DIR}/include)
+target_compile_definitions(sensei_link_framing PUBLIC ${SENSEI_LINK_DEFINITIONS})

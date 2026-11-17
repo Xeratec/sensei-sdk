@@ -12,9 +12,14 @@
 
 #include "sensei_link/crc.h"
 
+/* CRC over header bytes 0 to 5 (magic ... len) and the payload. */
+static uint16_t frame_crc(const uint8_t head[6], const uint8_t *payload, size_t len) {
+  return sensei_crc16(sensei_crc16(SENSEI_CRC16_INIT, head, 6), payload, len);
+}
+
 void sensei_spi_header_pack(uint8_t out[SENSEI_SPI_HEADER_SIZE], uint8_t type, uint8_t flags, const uint8_t *payload,
                             size_t len) {
-  uint16_t crc = sensei_crc16(SENSEI_CRC16_INIT, payload, len);
+  uint16_t crc;
 
   out[0] = SENSEI_SPI_MAGIC;
   out[1] = SENSEI_LINK_VERSION;
@@ -22,6 +27,7 @@ void sensei_spi_header_pack(uint8_t out[SENSEI_SPI_HEADER_SIZE], uint8_t type, u
   out[3] = flags;
   out[4] = (uint8_t)(len & 0xFF);
   out[5] = (uint8_t)(len >> 8);
+  crc = frame_crc(out, payload, len);
   out[6] = (uint8_t)(crc & 0xFF);
   out[7] = (uint8_t)(crc >> 8);
 }
@@ -45,7 +51,10 @@ sensei_spi_status_t sensei_spi_header_parse(const uint8_t in[SENSEI_SPI_HEADER_S
 }
 
 sensei_spi_status_t sensei_spi_check_payload(const sensei_spi_header_t *hdr, const uint8_t *payload) {
-  if (sensei_crc16(SENSEI_CRC16_INIT, payload, hdr->len) != hdr->crc) {
+  const uint8_t head[6] = {SENSEI_SPI_MAGIC,        hdr->version, hdr->type, hdr->flags, (uint8_t)(hdr->len & 0xFF),
+                           (uint8_t)(hdr->len >> 8)};
+
+  if (frame_crc(head, payload, hdr->len) != hdr->crc) {
     return SENSEI_SPI_ERR_CRC;
   }
   return SENSEI_SPI_OK;

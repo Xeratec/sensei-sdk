@@ -30,6 +30,10 @@ static int cmd_status(const struct shell *sh, size_t argc, char **argv) {
   shell_print(sh, "nRF9151 firmware '%s', modem '%s'", i.fw, i.modem);
   shell_print(sh, "transfers %u, bad frames %u, retries %u, events %u", i.transfers, i.bad_frames, i.retries, i.events);
   shell_print(sh, "uplinks ok %u, failed %u, last result %d", i.uplink_ok, i.uplink_fail, i.last_result);
+  shell_print(sh, "requests failed in a row %u, shield power cycles after a lost link %u", i.failures, i.recoveries);
+  if (i.proto_mismatch) {
+    shell_error(sh, "the nRF9151 speaks another protocol version: update the shield firmware, reboot");
+  }
   if (i.provisioned_pending) {
     shell_print(sh, "LoRaWAN keys waiting to be written to the LR1121");
   }
@@ -67,6 +71,8 @@ static int cmd_connect(const struct shell *sh, size_t argc, char **argv) {
 
 static int cmd_disconnect(const struct shell *sh, size_t argc, char **argv) { return sensei_lpwan_cmd_disconnect(); }
 
+/* The keys are typed on the shell: they stay in the shell history and in what the transport logs. Use it on
+ * the bench, not in the field; the host link (lpwan_lora_provision) does not echo them. */
 static int cmd_provision(const struct shell *sh, size_t argc, char **argv) {
   sensei_LoraProvision k = sensei_LoraProvision_init_zero;
   int err;

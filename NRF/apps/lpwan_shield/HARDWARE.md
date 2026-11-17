@@ -115,8 +115,15 @@ sensor shield's MSP430 interface. **verify** that nothing else on the stack driv
   armed SPIS drives MISO against SPIS3. So the client drives OE low when `BUS_GAP9` is claimed and high again when it is
   released or an exchange starts (`level_update()` in `lpwan_client.c`). While OE is low the EVENT line is not seen: the
   client reads it again when OE goes high. **verify** with a scope: OE (expander P7), P0.11, P0.10 during a GAP9 job with
-  the shield on (LTE mode); and that the nRF9151 CSN does not float into spurious transfers while OE is low (the log
-  shows no `bad frame` bursts). If it does, add a pull-up on CSN or disarm the SPIS through the ACK line.
+  the shield on (LTE mode).
+- **CSN and SCK bias.** With OE low the TXB0108 leaves the nRF9151 SPIS CSN (P0.19) and SCK (P0.18) floating, and so does
+  the nRF5340 when it parks P0.11 between exchanges. The board pinctrl (`sensei_lpwan_nrf9151_nrf9151_common-pinctrl.dtsi`)
+  sets a pull-up on CSN (not selected) and a pull-down on SCK (mode 0 idle). **verify** on the board: (1) with the shield
+  on, OE low and nothing on SPI_A, CSN reads high and SCK low at the nRF9151 pins, and the log shows no `bad frame`
+  bursts or spurious transfers; (2) at 4 MHz the CSN and SCK edges are clean with the pulls on. The nRF9151 pulls are
+  about 13 k; the TXB0108 data sheet advises against pulls below about 50 k on its pins (check the current data sheet): if the edges are slow or the
+  direction detection fails, remove the bias and pull CSN high on the board (about 100 k) or disarm the SPIS through the
+  ACK line.
 
 ## Power (sheet 02-power)
 

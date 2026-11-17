@@ -23,7 +23,9 @@
 void svc_emit(const sensei_LpwanEvent *evt);
 
 void svc_emit_radio(pb_size_t tag, sensei_Radio radio); /* joined, connected, disconnected */
-void svc_emit_tx_done(uint32_t seq, bool ok, uint32_t attempts);
+/** The result of a send. Each seq gets one: a second tx_done for it (after the watchdog) is dropped.
+ *  next_max_payload: LoRa, bytes the next uplink takes, 0: not known. */
+void svc_emit_tx_done(uint32_t seq, bool ok, uint32_t attempts, uint32_t next_max_payload);
 void svc_emit_downlink(sensei_Radio radio, uint32_t port, const uint8_t *data, size_t len);
 void svc_emit_time(sensei_Radio radio, uint32_t unix_s);
 void svc_emit_error(sensei_LpwanResult code, const char *msg);

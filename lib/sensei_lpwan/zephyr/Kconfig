@@ -67,8 +67,11 @@ config SENSEI_LPWAN_LTE_CONNECT_TIMEOUT_S
 	default 600
 
 config SENSEI_LPWAN_TX_TIMEOUT_S
-	int "Time to wait for a transmit result, s"
+	int "Time to wait for a transmit result without an estimate from the nRF9151, s"
 	default 60
+	help
+	  A LoRa send gets the time the nRF9151 expects (duty-cycle wait, airtime, receive windows; at most 10 min)
+	  plus 20 s, if that is longer. Keep this value 15 s or more above LPWAN_SHIELD_SEND_TIMEOUT_S.
 
 config SENSEI_LPWAN_LINK_FAILURES
 	int "Failed requests (or sends without result) in a row before the shield is power-cycled"

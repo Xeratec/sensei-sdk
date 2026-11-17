@@ -44,7 +44,7 @@ static int handler_sends;
 static int handler_dups; /* a request executed twice */
 static uint32_t handler_last_seq;
 static int events_rx;
-static uint32_t seen[512]; /* seq of every tx_done event, in order of delivery */
+static uint32_t seen[16384]; /* seq of every tx_done event, in order of delivery */
 static int nseen;
 static sensei_LpwanEvent last_event;
 static uint8_t last_downlink_len;
@@ -570,19 +570,19 @@ static void hook_random(uint8_t *m2s, uint8_t *s2m) {
 
 /* Events and requests under random corruption of both directions: every event once and in order,
  * no request executed twice. */
-static void test_random_faults(void) {
-  for (uint32_t seed = 1; seed <= 40; seed++) {
+static void random_faults(uint32_t seeds, int rounds, unsigned pct) {
+  for (uint32_t seed = 1; seed <= seeds; seed++) {
     uint32_t next = 1;
     sensei_LpwanRequest rq = sensei_LpwanRequest_init_zero;
     sensei_LpwanResponse rs;
 
     reset_sim();
     rng_state = seed * 2654435761u;
-    fault_pct = 12;
+    fault_pct = pct;
     fault_hook = hook_random;
     mst.retries = 6;
     rq.which_body = sensei_LpwanRequest_get_status_tag;
-    for (int round = 0; round < 60; round++) {
+    for (int round = 0; round < rounds; round++) {
       unsigned k = rnd() % 4;
 
       while (k-- > 0 && link_slave_events_pending(&slv) < LINK_SLAVE_EVENT_SLOTS) {
@@ -591,7 +591,9 @@ static void test_random_faults(void) {
       if (rnd() % 3 == 0) {
         int err = do_req(&rq, &rs);
 
-        CHECK(err == 0 ? rs.seq == rq.seq : err == -ETIMEDOUT);
+        /* Two damaged version bytes in a row read as another frame version (D9): the master does not latch, the
+         * next request goes through, the client asks again after a pause. */
+        CHECK(err == 0 ? rs.seq == rq.seq : (err == -ETIMEDOUT || err == -EPROTONOSUPPORT));
       }
       (void)lpwan_master_fetch_events(&mst, 32);
     }
@@ -607,6 +609,13 @@ static void test_random_faults(void) {
     CHECK(handler_dups == 0);
     CHECK(do_req(&rq, &rs) == 0 && mst.failures == 0);
   }
+}
+
+static void test_random_faults(void) {
+  random_faults(40, 60, 12);
+  /* Long runs at 10 % and 30 % damage (the review fuzz): thousands of events, none lost, repeated or reordered. */
+  random_faults(4, 3000, 10);
+  random_faults(4, 3000, 30);
 }
 
 /* A28, B16: the shield restarted. With lpwan_master_reset() the first message of the new session
@@ -625,6 +634,17 @@ static void test_shield_restart(void) {
   t0 = clock_ms;
   CHECK(do_req(&rq, &rs) == 0 && rs.seq == rq.seq);
   CHECK(handler_calls == 1 && mst.n_retries == 0 && clock_ms - t0 < 20);
+
+  /* The first event of the new session is delivered too (the master took events before the restart). */
+  reset_sim();
+  push_tx_done(1);
+  CHECK(lpwan_master_fetch_events(&mst, 8) == 1);
+  restart_slave();
+  lpwan_master_reset(&mst);
+  push_tx_done(2);
+  CHECK(do_req(&rq, &rs) == 0);
+  (void)lpwan_master_fetch_events(&mst, 8);
+  CHECK(nseen == 2 && seen[1] == 2);
 
   /* Without the reset the first response of the new session has the toggle bit the master saw last:
    * it is taken as a repeat. The request still gets through with a retry. */
@@ -812,6 +832,83 @@ static void test_sm_events(void) {
   CHECK(lpwan_event_is_state(&ev));
 }
 
+/* D10: every send has one result. A second tx_done for the same seq (the watchdog first, the real one late) and a
+ * tx_done of an older send never end a later send, also not after a request that failed and was undone. An error
+ * event does not end a send. The seq is known to the machine before the request goes out (simplification). */
+static void test_sm_send_results(void) {
+  lpwan_sm_t sm, before, admitted;
+  sensei_LpwanRequest rq = sensei_LpwanRequest_init_zero;
+  sensei_LpwanEvent ev = sensei_LpwanEvent_init_zero;
+  struct lpwan_master m;
+
+  lpwan_master_init(&m, &mops, NULL);
+  CHECK(lpwan_master_next_seq(&m) == 1);
+  m.seq = 41;
+  CHECK(lpwan_master_next_seq(&m) == 42);
+  m.seq = UINT32_MAX;
+  CHECK(lpwan_master_next_seq(&m) == 1); /* 0 is never a seq: it means "none" */
+
+  lpwan_sm_init(&sm);
+  sm.state = LPWAN_ST_CONNECTED;
+  sm.tech = LPWAN_TECH_LORA;
+  rq.which_body = sensei_LpwanRequest_send_tag;
+  rq.send.radio = sensei_Radio_RADIO_LORA;
+  ev.which_body = sensei_LpwanEvent_tx_done_tag;
+
+  /* The result can come before the response of the request is read: the seq is in the machine from the start. */
+  rq.seq = 5;
+  CHECK(lpwan_sm_admit(&sm, &rq) == sensei_LpwanResult_LPWAN_OK && sm.send_seq == 5);
+  ev.tx_done.seq = 5;
+  CHECK(lpwan_sm_event(&sm, &ev) && sm.state == LPWAN_ST_CONNECTED && sm.send_seq == 0);
+  CHECK(!lpwan_sm_event(&sm, &ev)); /* second result of the same send */
+
+  /* An error event while sending does not end the send: only its tx_done does. */
+  rq.seq = 6;
+  CHECK(lpwan_sm_admit(&sm, &rq) == sensei_LpwanResult_LPWAN_OK);
+  {
+    sensei_LpwanEvent err = sensei_LpwanEvent_init_zero;
+
+    err.which_body = sensei_LpwanEvent_error_tag;
+    err.error.code = sensei_LpwanResult_LPWAN_NO_NETWORK;
+    CHECK(lpwan_sm_event(&sm, &err));
+    err.error.code = sensei_LpwanResult_LPWAN_FAILED;
+    CHECK(lpwan_sm_event(&sm, &err));
+    CHECK(sm.state == LPWAN_ST_SENDING && sm.send_seq == 6);
+  }
+  ev.tx_done.seq = 6;
+  CHECK(lpwan_sm_event(&sm, &ev) && sm.state == LPWAN_ST_CONNECTED);
+
+  /* The watchdog result (failed) came first, the next send was refused and undone, then the real result of the
+   * first send arrives late: it must not touch the machine, and not the send after it either. */
+  rq.seq = 7;
+  CHECK(lpwan_sm_admit(&sm, &rq) == sensei_LpwanResult_LPWAN_OK);
+  ev.tx_done.seq = 7;
+  ev.tx_done.ok = false;
+  CHECK(lpwan_sm_event(&sm, &ev));
+  before = sm;
+  rq.seq = 8;
+  CHECK(lpwan_sm_admit(&sm, &rq) == sensei_LpwanResult_LPWAN_OK);
+  admitted = sm;
+  lpwan_sm_revert(&sm, &before, &admitted); /* the request failed */
+  CHECK(sm.state == LPWAN_ST_CONNECTED && sm.send_seq == 0);
+  ev.tx_done.seq = 7; /* late */
+  CHECK(!lpwan_sm_event(&sm, &ev) && sm.state == LPWAN_ST_CONNECTED);
+  rq.seq = 9;
+  CHECK(lpwan_sm_admit(&sm, &rq) == sensei_LpwanResult_LPWAN_OK);
+  ev.tx_done.seq = 7;
+  CHECK(!lpwan_sm_event(&sm, &ev) && sm.state == LPWAN_ST_SENDING); /* does not end send 9 */
+  ev.tx_done.seq = 9;
+  CHECK(lpwan_sm_event(&sm, &ev) && sm.state == LPWAN_ST_CONNECTED);
+
+  /* A send given up by timeout leaves no seq behind. */
+  rq.seq = 10;
+  CHECK(lpwan_sm_admit(&sm, &rq) == sensei_LpwanResult_LPWAN_OK);
+  lpwan_sm_abort_send(&sm);
+  CHECK(sm.state == LPWAN_ST_CONNECTED && sm.send_seq == 0);
+  ev.tx_done.seq = 10;
+  CHECK(!lpwan_sm_event(&sm, &ev));
+}
+
 int main(void) {
   test_roundtrip();
   test_state_rules();
@@ -827,6 +924,7 @@ int main(void) {
   test_failures_and_version();
   test_event_reserve();
   test_sm_events();
+  test_sm_send_results();
   printf("%s\n", check_failures ? "FAILED" : "ok");
   return check_failures ? 1 : 0;
 }

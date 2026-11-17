@@ -87,15 +87,20 @@ void sensei_lpwan_set_config(const struct sensei_lpwan_config *cfg);
 bool sensei_lpwan_radio_ready(sensei_Radio radio);
 
 /**
- * LoRa payload limit now, from the configured data rate (EU868, no MAC commands in the uplink): DR0 to 2: 51 B,
- * DR3: 115 B, DR4 and up: 222 B. With ADR the network may lower the rate, so the DR0 value is the only safe
- * one. An app chunks its uplinks to this, and re-reads it after a configuration change.
+ * Bytes per LoRa chunk now (the app's fragment header included). From the configured data rate (EU868, no MAC
+ * commands in the uplink): DR0 to 2: 51 B, DR3: 115 B, DR4 and up: 222 B; with ADR the network may lower the rate, so
+ * DR0: 51 B. After every send the nRF9151 reports what the LR1121 takes in the next uplink; if that is less (MAC
+ * answers are pending), the value is that minus 15 B. Read it when a message starts and use that size for all its
+ * chunks. If done() reports -EMSGSIZE, a chunk did not fit the next uplink: read it again and chunk the message again.
  */
 uint32_t sensei_lpwan_lora_mtu(void);
 
 /**
  * Send one chunk (at most the MTU of the radio). done(err, user) runs on hooks.wq when it is out or
- * failed. Returns -EBUSY while a send is in flight, -EINVAL for a bad length.
+ * failed (-EMSGSIZE: it does not fit the next LoRa uplink). Returns -EBUSY while a send is in flight, -EINVAL for
+ * a bad length. A LoRa chunk can take minutes to go out: the LR1121 holds it back for the duty cycle (277 s after a
+ * full chunk at DR0). done() comes when the nRF9151 reports it or after the time it announced (at most 10 min and
+ * a few seconds), so the caller must not time the chunk out earlier. The shield stays on meanwhile.
  */
 int sensei_lpwan_radio_send(sensei_Radio radio, const uint8_t *chunk, size_t len, void (*done)(int err, void *user),
                             void *user);
@@ -113,7 +118,7 @@ int sensei_lpwan_lora_provision(const sensei_LoraProvision *keys);
 /**
  * Query the nRF9151 firmware version, blocking up to timeout_ms. Powers the shield for the query.
  * Not for the work queue of the hooks. Returns -EPROTONOSUPPORT if the shield speaks another
- * protocol version (the client then refuses to use it until the node reboots).
+ * protocol version (the client then refuses to use it for an hour, then asks again).
  */
 int sensei_lpwan_query_version(sensei_LpwanVersion *out, uint32_t timeout_ms);
 

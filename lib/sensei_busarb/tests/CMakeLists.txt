@@ -16,7 +16,9 @@ add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/.. sensei_busarb)
 target_compile_options(sensei_busarb PRIVATE -Wall -Wextra -Werror)
 
 enable_testing()
-add_executable(test_bus_arb test_bus_arb.c)
+# The Zephyr wrapper is compiled here too, against a stub of the kernel calls it uses.
+add_executable(test_bus_arb test_bus_arb.c ${CMAKE_CURRENT_LIST_DIR}/../zephyr/bus_arb_zephyr.c)
+target_include_directories(test_bus_arb PRIVATE ${CMAKE_CURRENT_LIST_DIR}/stub)
 target_link_libraries(test_bus_arb PRIVATE sensei_busarb)
 target_compile_options(test_bus_arb PRIVATE -Wall -Wextra -Werror)
 add_test(NAME bus_arb COMMAND test_bus_arb)

@@ -67,7 +67,9 @@ config LPWAN_SHIELD_SEND_TIMEOUT_S
 	default 45
 	help
 	  Without a tx_done the state machine would stay in SENDING and every later send would be refused.
-	  Keep it below the client's SENSEI_LPWAN_TX_TIMEOUT_S, so this side answers first.
+	  Used when the backend has no estimate (LTE). A LoRa send is given the time the LR1121 needs (duty-cycle wait
+	  and airtime, at most 10 min) plus 5 s, if that is longer. The client waits 15 s more at the least
+	  (SENSEI_LPWAN_TX_TIMEOUT_S, 60 s), so this side answers first.
 
 config LPWAN_SHIELD_LINK_STACK
 	int "SPI link thread stack size"

@@ -23,6 +23,7 @@
 #include "link.h"
 #include "lora.h"
 #include "lte.h"
+#include "sensei_lpwan/lpwan_lora.h"
 #include "service.h"
 
 LOG_MODULE_REGISTER(service, CONFIG_LPWAN_SHIELD_LOG_LEVEL);
@@ -30,15 +31,31 @@ LOG_MODULE_REGISTER(service, CONFIG_LPWAN_SHIELD_LOG_LEVEL);
 static lpwan_sm_t sm;
 static K_MUTEX_DEFINE(sm_lock);
 
-/* A send that gets no tx_done is ended after CONFIG_LPWAN_SHIELD_SEND_TIMEOUT_S with tx_done(failed), so the
- * state machine leaves SENDING (the backend or the modem may hang). The master waits longer. */
+/*
+ * A send that gets no tx_done is ended with tx_done(failed), so the state machine leaves SENDING (the backend or
+ * the modem may hang). The limit is the time the backend expects (LoRa: the duty-cycle wait of the LR1121 plus
+ * airtime) plus 5 s, at most LPWAN_SEND_MAX_MS (10 min); without an estimate CONFIG_LPWAN_SHIELD_SEND_TIMEOUT_S.
+ * The master waits longer.
+ *
+ * Each send has one tx_done: the first one wins. A real result that comes after the watchdog fired is logged and
+ * dropped. send_open_seq is the seq of the send that still waits for its result, 0: none (under sm_lock).
+ */
+#define SEND_WD_EXTRA_MS 5000U
+
 static struct k_work_delayable send_wd;
-static uint32_t send_wd_seq;
+static uint32_t send_open_seq;
 
 static void send_wd_fn(struct k_work *w) {
+  uint32_t seq;
+
   ARG_UNUSED(w);
-  LOG_WRN("send %u: no result from the backend", (unsigned)send_wd_seq);
-  svc_emit_tx_done(send_wd_seq, false, 0);
+  k_mutex_lock(&sm_lock, K_FOREVER);
+  seq = send_open_seq;
+  k_mutex_unlock(&sm_lock);
+  if (seq != 0) {
+    LOG_WRN("send %u: no result from the backend", (unsigned)seq);
+    svc_emit_tx_done(seq, false, 0, 0);
+  }
 }
 
 /* ---- events ---- */
@@ -47,9 +64,12 @@ static void send_wd_fn(struct k_work *w) {
  * leave the two machines apart. State events have reserved queue slots (link_slave.h), so this is rare. */
 void svc_emit(const sensei_LpwanEvent *evt) {
   k_mutex_lock(&sm_lock, K_FOREVER);
-  if (link_push_event(evt) == 0) {
+  if (evt->which_body == sensei_LpwanEvent_tx_done_tag && (send_open_seq == 0 || evt->tx_done.seq != send_open_seq)) {
+    LOG_WRN("tx_done for seq %u dropped: the send has its result already", (unsigned)evt->tx_done.seq);
+  } else if (link_push_event(evt) == 0) {
     lpwan_sm_event(&sm, evt);
-    if (evt->which_body == sensei_LpwanEvent_tx_done_tag && evt->tx_done.seq == send_wd_seq) {
+    if (evt->which_body == sensei_LpwanEvent_tx_done_tag) {
+      send_open_seq = 0;
       (void)k_work_cancel_delayable(&send_wd);
     }
   } else {
@@ -66,13 +86,14 @@ void svc_emit_radio(pb_size_t tag, sensei_Radio radio) {
   svc_emit(&e);
 }
 
-void svc_emit_tx_done(uint32_t seq, bool ok, uint32_t attempts) {
+void svc_emit_tx_done(uint32_t seq, bool ok, uint32_t attempts, uint32_t next_max_payload) {
   sensei_LpwanEvent e = sensei_LpwanEvent_init_zero;
 
   e.which_body = sensei_LpwanEvent_tx_done_tag;
   e.tx_done.seq = seq;
   e.tx_done.ok = ok;
   e.tx_done.attempts = attempts;
+  e.tx_done.next_max_payload = next_max_payload;
   svc_emit(&e);
 }
 
@@ -149,7 +170,7 @@ static void fill_status(sensei_LpwanResponse *r) {
 }
 
 /* Run a backend action for a request the state machine accepted. If it refuses, undo the state. */
-static sensei_LpwanResult run(const sensei_LpwanRequest *req) {
+static sensei_LpwanResult run(const sensei_LpwanRequest *req, uint32_t *send_expected_ms, uint32_t *send_next_max) {
   switch (req->which_body) {
   case sensei_LpwanRequest_lte_configure_tag:
 #ifdef CONFIG_LPWAN_SHIELD_LTE
@@ -186,12 +207,15 @@ static sensei_LpwanResult run(const sensei_LpwanRequest *req) {
 
     if (s->radio == sensei_Radio_RADIO_LORA) {
 #ifdef CONFIG_LPWAN_SHIELD_LORA
-      return lora_send(req->seq, s->port, s->confirmed, s->payload.bytes, s->payload.size);
+      return lora_send(req->seq, s->port, s->confirmed, s->payload.bytes, s->payload.size, send_expected_ms,
+                       send_next_max);
 #else
       return backend_off();
 #endif
     }
 #ifdef CONFIG_LPWAN_SHIELD_LTE
+    *send_expected_ms = 0; /* no estimate */
+    *send_next_max = 0;
     return lte_send(req->seq, s->port, s->payload.bytes, s->payload.size);
 #else
     return backend_off();
@@ -259,20 +283,38 @@ static void on_request(struct link_slave *s, const sensei_LpwanRequest *req, voi
       fill_status(&rsp);
     } else {
       bool is_send = req->which_body == sensei_LpwanRequest_send_tag;
+      uint32_t expected_ms = 0, next_max = 0;
 
       if (is_send) {
-        send_wd_seq = req->seq; /* the backend may answer at once */
-        (void)k_work_reschedule(&send_wd, K_SECONDS(CONFIG_LPWAN_SHIELD_SEND_TIMEOUT_S));
+        k_mutex_lock(&sm_lock, K_FOREVER);
+        send_open_seq = req->seq; /* the backend may answer at once */
+        k_mutex_unlock(&sm_lock);
       }
-      res = run(req);
+      res = run(req, &expected_ms, &next_max);
       if (res != sensei_LpwanResult_LPWAN_OK) {
         /* The backend refused: undo what the admission started, unless events moved it on. */
         k_mutex_lock(&sm_lock, K_FOREVER);
         lpwan_sm_revert(&sm, &before, &admitted);
-        k_mutex_unlock(&sm_lock);
         if (is_send) {
-          (void)k_work_cancel_delayable(&send_wd);
+          send_open_seq = 0;
         }
+        k_mutex_unlock(&sm_lock);
+        if (is_send && next_max != 0) {
+          rsp.which_payload = sensei_LpwanResponse_send_tag; /* too long: say what fits */
+          rsp.send.next_max_payload = next_max;
+        }
+      } else if (is_send) {
+        /* Start the watchdog unless the result is in already (tx_done during run()). */
+        k_mutex_lock(&sm_lock, K_FOREVER);
+        if (send_open_seq == req->seq) {
+          (void)k_work_reschedule(
+              &send_wd,
+              K_MSEC(lpwan_send_limit_ms(expected_ms, CONFIG_LPWAN_SHIELD_SEND_TIMEOUT_S * 1000U, SEND_WD_EXTRA_MS)));
+        }
+        k_mutex_unlock(&sm_lock);
+        rsp.which_payload = sensei_LpwanResponse_send_tag;
+        rsp.send.expected_ms = expected_ms;
+        rsp.send.next_max_payload = next_max;
       }
     }
   } else {

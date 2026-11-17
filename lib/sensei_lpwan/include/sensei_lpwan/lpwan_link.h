@@ -55,7 +55,7 @@ extern "C" {
 /** Version of the LPWAN protocol (messages and their meaning), reported in LpwanVersion.protocol.
  *  The client refuses a shield with another value (-EPROTONOSUPPORT). Bump it with a change of
  *  lpwan.proto or of the transfer rules that an older peer would misread. */
-#define LPWAN_PROTOCOL_VERSION 1u
+#define LPWAN_PROTOCOL_VERSION 2u
 
 /** Bytes per transfer: header and the largest message (LpwanRequest 1046 B), rounded up. */
 #define LPWAN_XFER_LEN 1056u
@@ -97,7 +97,7 @@ typedef enum {
 typedef struct {
   lpwan_state_t state;
   lpwan_tech_t tech;
-  uint32_t send_seq; /* seq of the send in flight: only its tx_done ends SENDING */
+  uint32_t send_seq; /* seq of the send in flight (0: none): only its tx_done ends SENDING */
 } lpwan_sm_t;
 
 void lpwan_sm_init(lpwan_sm_t *sm);
@@ -105,8 +105,8 @@ void lpwan_sm_init(lpwan_sm_t *sm);
 /**
  * Check a request against the state and apply the transition it starts.
  * Returns LPWAN_OK or the result code to send back. A rejected request changes nothing.
- * `send` records req->seq as the send in flight (the master assigns the seq later: it sets
- * sm->send_seq itself once the request went out).
+ * `send` records req->seq as the send in flight: the caller has set it before (the master side with
+ * lpwan_master_next_seq()), so a tx_done that arrives while the request is still on the wire matches.
  *
  *   get_version, get_status             any state
  *   lte_configure, lora_configure,
@@ -123,7 +123,8 @@ sensei_LpwanResult lpwan_sm_admit(lpwan_sm_t *sm, const sensei_LpwanRequest *req
 /**
  * Apply an event: connected/joined, disconnected, tx_done, error. Returns false if the event does
  * not fit the machine and was ignored: the radio is not the active technology (a late LoRa join
- * during an LTE connect), the machine is not waiting for it, or a tx_done of another send.
+ * during an LTE connect), the machine is not waiting for it, or a tx_done of another send (or a second one
+ * for a send that ended). An error event does not end a send: its tx_done (or the timeout) does.
  * Events that carry data only (downlink, time) return true and change nothing.
  */
 bool lpwan_sm_event(lpwan_sm_t *sm, const sensei_LpwanEvent *evt);

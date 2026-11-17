@@ -35,6 +35,7 @@
 #include "lr1121_modem_modem.h"
 #include "lr1121_modem_system.h"
 #include "lr1121_zephyr_hal.h"
+#include "sensei_lpwan/lpwan_lora.h"
 #include "service.h"
 
 LOG_MODULE_REGISTER(lora, CONFIG_LPWAN_SHIELD_LOG_LEVEL);
@@ -287,14 +288,14 @@ static void do_send(const struct msg *m) {
   uint8_t max = 0;
 
   if (state != L_READY) {
-    svc_emit_tx_done(m->seq, false, 0);
+    svc_emit_tx_done(m->seq, false, 0, 0);
     return;
   }
   /* The data rate and pending MAC commands decide what fits in the next uplink (the master chunks by
    * the configured data rate; with ADR the network may have lowered it). */
   if (lr1121_modem_get_next_tx_max_payload(ctx, &max) == RC_OK && m->len > max) {
     LOG_WRN("payload %u B does not fit the next uplink (%u B)", (unsigned)m->len, (unsigned)max);
-    svc_emit_tx_done(m->seq, false, 0);
+    svc_emit_tx_done(m->seq, false, 0, max);
     return;
   }
   cur_seq = m->seq;
@@ -303,7 +304,7 @@ static void do_send(const struct msg *m) {
       ctx, m->port, m->confirmed ? LR1121_MODEM_UPLINK_CONFIRMED : LR1121_MODEM_UPLINK_UNCONFIRMED, m->data, m->len);
   if (rc != RC_OK) {
     LOG_WRN("request_tx failed (rc %d)", (int)rc);
-    svc_emit_tx_done(m->seq, false, 0);
+    svc_emit_tx_done(m->seq, false, 0, 0);
     return;
   }
   state = L_SENDING;
@@ -366,7 +367,7 @@ static void handle_event(const lr1121_modem_event_fields_t *e) {
       started = false;
       state = L_IDLE;
       if (was == L_SENDING) {
-        svc_emit_tx_done(cur_seq, false, 0);
+        svc_emit_tx_done(cur_seq, false, 0, 0);
       }
       if (was != L_IDLE) {
         svc_emit_radio(sensei_LpwanEvent_disconnected_tag, sensei_Radio_RADIO_LORA);
@@ -387,11 +388,17 @@ static void handle_event(const lr1121_modem_event_fields_t *e) {
     break;
   case LR1121_MODEM_LORAWAN_EVENT_TX_DONE: {
     bool ok = cur_confirmed ? status == TX_CONFIRMED : status != TX_NOT_SENT;
+    uint8_t next_max = 0;
 
-    if (state == L_SENDING) {
-      state = L_READY;
+    if (state != L_SENDING) {
+      break; /* the empty uplink of a time request, or a stray event */
     }
-    svc_emit_tx_done(cur_seq, ok, 1);
+    state = L_READY;
+    /* The MAC answers the receive windows brought are known now: what the next uplink takes. */
+    if (lr1121_modem_get_next_tx_max_payload(ctx, &next_max) != RC_OK) {
+      next_max = 0;
+    }
+    svc_emit_tx_done(cur_seq, ok, 1, next_max);
     break;
   }
   case LR1121_MODEM_LORAWAN_EVENT_DOWN_DATA:
@@ -544,11 +551,38 @@ sensei_LpwanResult lora_join(void) {
   return r;
 }
 
-sensei_LpwanResult lora_send(uint32_t seq, uint32_t port, bool confirmed, const uint8_t *data, size_t len) {
+sensei_LpwanResult lora_send(uint32_t seq, uint32_t port, bool confirmed, const uint8_t *data, size_t len,
+                             uint32_t *expected_ms, uint32_t *next_max) {
   struct msg m = {.cmd = CMD_SEND, .seq = seq, .confirmed = confirmed};
+  uint8_t max = 0;
+  int32_t duty = 0;
+  uint32_t wait_ms = 0;
 
+  *expected_ms = 0;
+  *next_max = 0;
   if (len == 0 || len > sizeof(m.data)) {
     return sensei_LpwanResult_LPWAN_INVALID;
+  }
+  if (state != L_READY) {
+    /* SENDING: a frame still sits in the LR1121 (a send the watchdog gave up). It cannot be taken back. */
+    return state == L_SENDING ? sensei_LpwanResult_LPWAN_BUSY : sensei_LpwanResult_LPWAN_NOT_JOINED;
+  }
+  /* Read-only questions to the LR1121 (each is one locked transaction, the worker may be busy elsewhere). */
+  if (lr1121_modem_get_next_tx_max_payload(ctx, &max) == RC_OK) {
+    *next_max = max;
+    if (len > max) {
+      LOG_WRN("payload %u B does not fit the next uplink (%u B)", (unsigned)len, (unsigned)max);
+      return sensei_LpwanResult_LPWAN_INVALID; /* the master chunks again */
+    }
+  }
+  /* The LR1121 holds a frame back until the duty cycle allows it (1 %: minutes after a full chunk at DR0). */
+  if (lr1121_modem_get_duty_cycle_status(ctx, &duty) == RC_OK && duty < 0) {
+    wait_ms = (uint32_t)(-(int64_t)duty);
+  }
+  *expected_ms = lpwan_lora_expected_ms(cfg.data_rate, cfg.adr, (uint32_t)len, wait_ms);
+  if (wait_ms > 0) {
+    LOG_INF("duty cycle: send %u waits %u ms, result expected in %u ms", (unsigned)seq, (unsigned)wait_ms,
+            (unsigned)*expected_ms);
   }
   m.port = (uint8_t)(port ? port : cfg.port);
   m.len = (uint8_t)len;

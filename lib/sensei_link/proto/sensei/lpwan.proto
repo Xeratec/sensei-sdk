@@ -127,6 +127,16 @@ message NetworkTime {
   Radio radio = 2;
 }
 
+// Answer to an accepted Send.
+message SendInfo {
+  // Expected time from the request to tx_done, ms: LoRa duty-cycle wait of the LR1121 plus airtime and
+  // receive windows, at most 10 min. 0: not known (LTE, or an older shield): use the default.
+  uint32 expected_ms = 1;
+  // LoRa: payload bytes the LR1121 takes in the next uplink (MAC answers it owes are counted), 0: not known. Also in
+  // the answer to a send that was refused as too long (result LPWAN_INVALID), so the client can chunk again.
+  uint32 next_max_payload = 2;
+}
+
 message LpwanResponse {
   uint32 seq = 1;
   LpwanResult result = 2;
@@ -134,15 +144,19 @@ message LpwanResponse {
     LpwanVersion version = 3;
     LpwanStatus status = 4;
     NetworkTime time = 5;
+    SendInfo send = 6;
   }
 }
 
 message RadioEvent { Radio radio = 1; }
 
+// One per Send request at most: the first result wins, a later one for the same seq is not sent.
 message TxDone {
   uint32 seq = 1; // seq of the Send request
   bool ok = 2;
   uint32 attempts = 3;
+  // LoRa: payload bytes the LR1121 takes in the next uplink (the MAC answers it still owes are counted), 0: not known.
+  uint32 next_max_payload = 4;
 }
 
 message DownlinkRx {

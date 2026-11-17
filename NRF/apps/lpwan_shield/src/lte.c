@@ -61,6 +61,7 @@ static bool configured;
 static bool modem_ready;
 static volatile bool registered;
 static volatile bool want_connected;
+static volatile bool connect_cancelled; /* lte_disconnect() asked the connect in progress to stop */
 static int sock = -1;
 static int32_t last_rsrp_dbm;
 
@@ -232,6 +233,7 @@ static int do_connect(void) {
   apply_power_saving();
 
   k_sem_reset(&registered_sem);
+  connect_cancelled = false;
   err = lte_lc_connect_async(lte_handler);
   if (err) {
     LOG_ERR("connect_async: %d", err);
@@ -241,7 +243,11 @@ static int do_connect(void) {
     (void)lte_lc_offline();
     return -ETIMEDOUT;
   }
-  return 0;
+  /* The semaphore is also given by lte_disconnect(): registered is what counts. */
+  if (connect_cancelled) {
+    return -ECANCELED;
+  }
+  return registered ? 0 : -ENETDOWN;
 }
 
 static void worker_connect(void) {
@@ -256,7 +262,7 @@ static void worker_connect(void) {
     }
     svc_emit_radio(sensei_LpwanEvent_connected_tag, radio_id());
     emit_time();
-  } else if (err) {
+  } else if (err && err != -ECANCELED) { /* cancelled: the disconnect that did it reports itself */
     svc_emit_error(err == -ETIMEDOUT ? sensei_LpwanResult_LPWAN_TIMEOUT : sensei_LpwanResult_LPWAN_NO_NETWORK,
                    err == -ETIMEDOUT ? "no network" : "modem error");
   }
@@ -267,7 +273,7 @@ static void worker_send(const struct msg *m) {
   uint32_t attempts = 0;
 
   if (!registered) {
-    svc_emit_tx_done(m->seq, false, 0); /* coverage lost: fail at once, the master retries later */
+    svc_emit_tx_done(m->seq, false, 0, 0); /* coverage lost: fail at once, the master retries later */
     return;
   }
   for (int i = 0; i < 2 && n != m->len; i++) {
@@ -281,7 +287,7 @@ static void worker_send(const struct msg *m) {
       close_socket();
     }
   }
-  svc_emit_tx_done(m->seq, n == m->len, attempts);
+  svc_emit_tx_done(m->seq, n == m->len, attempts, 0);
 }
 
 static void lte_main(void *a, void *b, void *c) {
@@ -389,8 +395,10 @@ sensei_LpwanResult lte_connect(void) {
 
 sensei_LpwanResult lte_disconnect(void) {
   /* Now, not when the worker gets to it: the worker may sit in the registration wait for minutes. The
-   * semaphore ends that wait; worker_connect() sees want_connected false and opens no socket. */
+   * semaphore ends that wait; do_connect() sees the cancel flag and returns without a connection, also if a new
+   * connect request has set want_connected again by then. */
   want_connected = false;
+  connect_cancelled = true;
   k_sem_give(&registered_sem);
   return post(CMD_DISCONNECT, 0, NULL, 0);
 }

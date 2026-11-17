@@ -72,6 +72,10 @@ void lpwan_master_reset(struct lpwan_master *m);
 /** Clear the transmit buffer (it holds the last request, for example LoRaWAN keys). */
 void lpwan_master_wipe(struct lpwan_master *m);
 
+/** The seq the next request gets. A caller that must know it before the request goes out (a send: its tx_done can
+ *  arrive during the request) puts it in req->seq for the state machine; the master assigns the same value. */
+uint32_t lpwan_master_next_seq(const struct lpwan_master *m);
+
 /**
  * Send a request (seq is assigned here) and wait up to timeout_ms for its response. Events that
  * arrive meanwhile go to on_event. Returns 0 (rsp filled, rsp->result holds the slave's verdict),

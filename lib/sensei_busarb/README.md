@@ -26,8 +26,9 @@ block the others for ever.
   `bus_claim()`, `bus_release()`, `bus_is_held()` and `bus_claim_wait()` use one global instance with a lock
   and the uptime clock (`zephyr/bus_arb_zephyr.c`).
 - `bus_set_listener()`: one callback is told when `BUS_GAP9` is claimed or released (on the thread of the claimer, it
-  must not block). The LPWAN client uses it to switch the level shifter of the shield off while GAP9 owns SPI_A.
+  must not block). A claim that follows an expired one counts as a new claim and is reported too. The LPWAN client uses it to switch the level shifter of the shield off while GAP9 owns SPI_A.
 - Zephyr: `CONFIG_SENSEI_BUSARB` (selected by `SENSEI_GAP9` and `SENSEI_LPWAN`).
-- Host test: `cmake -S tests -B <builddir>`, or `make test-host` in the SDK root.
+- Host test: `cmake -S tests -B <builddir>`, or `make test-host` in the SDK root. It also compiles the Zephyr wrapper
+  against a stub of the few kernel calls it uses (`tests/stub/zephyr/kernel.h`, fake clock).
 
 Moved from the SENSEI IEQ node firmware (`nrf5340/src/core/bus_arb.*` and `app_bus.c`).

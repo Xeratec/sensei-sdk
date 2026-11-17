@@ -203,7 +203,8 @@ static struct gpio_callback event_cb;
 static struct lpwan_master master;
 static lpwan_sm_t sm;
 static bool link_up;
-static bool proto_bad;          /* the shield speaks another protocol version: latched until reboot */
+static bool proto_bad;          /* the shield seems to speak another protocol version */
+static int64_t proto_retry_at;  /* uptime from which the version is checked again */
 static int64_t shield_off_at;   /* uptime of the last power-off */
 static int64_t shield_retry_at; /* no bring-up before this uptime after a failed one */
 static uint32_t recoveries;     /* shield power cycles caused by a lost link */
@@ -243,6 +244,7 @@ static atomic_t sending;
 static void (*send_done)(int err, void *user);
 static void *send_user;
 static int64_t send_deadline;
+static volatile uint8_t lora_next_max; /* payload the LR1121 reported for the next LoRa uplink, 0: not known */
 static uint8_t send_buf[LTE_MTU];
 static size_t send_len;
 static sensei_Radio send_radio;
@@ -409,6 +411,7 @@ static void op_on_event(void *c, const sensei_LpwanEvent *evt) {
       break;
     }
     LOG_INF("%s", evt->which_body == sensei_LpwanEvent_joined_tag ? "joined" : "connected");
+    lora_next_max = 0; /* a new session: the first chunk follows the data rate */
     connect_end();
     up_radio = evt->which_body == sensei_LpwanEvent_joined_tag ? evt->joined.radio : evt->connected.radio;
     submit_work(&flush_work); /* the uplink queue waits for this */
@@ -421,13 +424,15 @@ static void op_on_event(void *c, const sensei_LpwanEvent *evt) {
     connect_end();
     break;
   case sensei_LpwanEvent_tx_done_tag:
-    /* The result of the send in flight, even if an error event moved the machine meanwhile. */
-    if (!(atomic_get(&sending) && evt->tx_done.seq == sm.send_seq)) {
-      /* A late result of a send that was given up, or of an older one. */
-      LOG_WRN("tx done, seq %u ignored (sending seq %u)", (unsigned)evt->tx_done.seq, (unsigned)sm.send_seq);
+    if (!applied || !atomic_get(&sending)) {
+      /* A late or second result: the send was given up, ended or is another one (the machine knows its seq). */
+      LOG_WRN("tx done, seq %u ignored (%s)", (unsigned)evt->tx_done.seq, lpwan_state_name(sm.state));
       break;
     }
     LOG_INF("tx done, seq %u, %s", (unsigned)evt->tx_done.seq, evt->tx_done.ok ? "ok" : "failed");
+    if (send_radio == sensei_Radio_RADIO_LORA) {
+      lora_next_max = (uint8_t)MIN(evt->tx_done.next_max_payload, UINT8_MAX);
+    }
     tx_timeouts = 0; /* the shield answers */
     finish_send(evt->tx_done.ok ? 0 : -EIO);
     break;
@@ -496,6 +501,9 @@ static int request(sensei_LpwanRequest *req, sensei_LpwanResponse *rsp, uint32_t
     last_result = -ENOTCONN;
     return -ENOTCONN; /* power-cycled or never started: shield_up() first */
   }
+  if (req->which_body == sensei_LpwanRequest_send_tag) {
+    req->seq = lpwan_master_next_seq(&master); /* the machine must know it before a tx_done can arrive */
+  }
   res = lpwan_sm_admit(&sm, req);
   if (res != sensei_LpwanResult_LPWAN_OK) {
     last_result = res;
@@ -529,13 +537,12 @@ static int request(sensei_LpwanRequest *req, sensei_LpwanResponse *rsp, uint32_t
     LOG_WRN("request %u rejected by nRF9151: %d", (unsigned)req->which_body, (int)rsp->result);
     return -EIO;
   }
-  if (req->which_body == sensei_LpwanRequest_send_tag) {
-    sm.send_seq = req->seq; /* the master assigned it in lpwan_master_request() */
-  }
   return 0;
 }
 
 #define REQ_TO CONFIG_SENSEI_LPWAN_REQUEST_TIMEOUT_MS
+/* The client gives a send up this long after the time the nRF9151 expects (it ends the send first, after 5 s). */
+#define SEND_CLIENT_EXTRA_MS 20000U
 
 static int simple_request(pb_size_t tag) {
   sensei_LpwanRequest rq = sensei_LpwanRequest_init_zero;
@@ -543,6 +550,15 @@ static int simple_request(pb_size_t tag) {
 
   rq.which_body = tag;
   return request(&rq, &rs, REQ_TO);
+}
+
+/* Refuse the shield for a while. Not for good: two damaged version bytes look like another version, and the
+ * shield may have been updated. The check is made again after PROTO_RETRY_MS. */
+#define PROTO_RETRY_MS (3600 * 1000LL)
+
+static void mark_proto_bad(void) {
+  proto_bad = true;
+  proto_retry_at = k_uptime_get() + PROTO_RETRY_MS;
 }
 
 static int read_version(sensei_LpwanVersion *out) {
@@ -553,13 +569,13 @@ static int read_version(sensei_LpwanVersion *out) {
   rq.which_body = sensei_LpwanRequest_get_version_tag;
   err = request(&rq, &rs, REQ_TO);
   if (err == -EPROTONOSUPPORT) {
-    proto_bad = true; /* another SPI frame version */
+    mark_proto_bad(); /* another SPI frame version (or two damaged version bytes) */
   }
   if (err == 0 && rs.which_payload == sensei_LpwanResponse_version_tag) {
     if (rs.version.protocol != LPWAN_PROTOCOL_VERSION) {
       LOG_ERR("nRF9151 speaks LPWAN protocol %u, this client %u: update the shield firmware",
               (unsigned)rs.version.protocol, (unsigned)LPWAN_PROTOCOL_VERSION);
-      proto_bad = true;
+      mark_proto_bad();
       return -EPROTONOSUPPORT;
     }
     *out = rs.version;
@@ -583,7 +599,11 @@ static int shield_up(void) {
   int64_t end;
 
   if (proto_bad) {
-    return -EPROTONOSUPPORT;
+    if (k_uptime_get() < proto_retry_at) {
+      return -EPROTONOSUPPORT;
+    }
+    proto_bad = false; /* ask again, from a fresh start of the shield */
+    shield_down();
   }
   if (shield_on && link_up) {
     return 0;
@@ -652,6 +672,7 @@ static void shield_down(void) {
   if (!shield_on) {
     return;
   }
+  finish_send(-ENOTCONN); /* a send in flight is gone with the power */
   (void)gpio_pin_configure_dt(&pin_level, GPIO_OUTPUT_INACTIVE);
   level_on = false;
   (void)gpio_pin_configure_dt(&pin_ack, GPIO_OUTPUT_INACTIVE);
@@ -659,6 +680,7 @@ static void shield_down(void) {
   shield_on = false;
   shield_off_at = k_uptime_get();
   link_up = false;
+  lora_next_max = 0;
   connect_end();
   idle_deadline = 0;
   lpwan_sm_init(&sm);
@@ -816,11 +838,28 @@ static void do_send(void) {
   s->payload.size = (pb_size_t)send_len;
   memcpy(s->payload.bytes, send_buf, send_len);
   idle_deadline = 0;
+  rs.which_payload = 0;
   if (request(&rq, &rs, REQ_TO) != 0) {
-    finish_send(-EIO);
+    if (last_result == sensei_LpwanResult_LPWAN_INVALID) {
+      /* The chunk does not fit the next uplink (MAC answers in FOpts): the answer says what fits, the app chunks again.
+       */
+      if (rs.which_payload == sensei_LpwanResponse_send_tag) {
+        lora_next_max = (uint8_t)MIN(rs.send.next_max_payload, UINT8_MAX);
+      }
+      finish_send(-EMSGSIZE);
+    } else {
+      finish_send(-EIO);
+    }
     return;
   }
-  send_deadline = k_uptime_get() + CONFIG_SENSEI_LPWAN_TX_TIMEOUT_S * 1000LL;
+  /* A send in LoRa can wait for the duty cycle of the LR1121 (minutes at DR0): the nRF9151 says how long. The
+   * result may already be in (its tx_done came during the request). */
+  if (!atomic_get(&send_finishing)) {
+    uint32_t expected = rs.which_payload == sensei_LpwanResponse_send_tag ? rs.send.expected_ms : 0;
+
+    send_deadline =
+        k_uptime_get() + lpwan_send_limit_ms(expected, CONFIG_SENSEI_LPWAN_TX_TIMEOUT_S * 1000U, SEND_CLIENT_EXTRA_MS);
+  }
 }
 
 static void do_disconnect(void) {
@@ -1004,12 +1043,19 @@ bool sensei_lpwan_radio_ready(sensei_Radio r) {
 uint32_t sensei_lpwan_lora_mtu(void) {
   const struct sensei_lpwan_config st = cfg_get();
 
-  return lpwan_lora_max_payload(st.lora_dr, st.lora_adr);
+  return lpwan_lora_chunk_max(st.lora_dr, st.lora_adr, lora_next_max);
 }
 
 int sensei_lpwan_radio_send(sensei_Radio r, const uint8_t *chunk, size_t len, void (*done)(int, void *), void *user) {
-  if (len == 0 || len > sizeof(send_buf) || (r == sensei_Radio_RADIO_LORA && len > sensei_lpwan_lora_mtu())) {
+  if (len == 0 || len > sizeof(send_buf)) {
     return -EINVAL;
+  }
+  if (r == sensei_Radio_RADIO_LORA) {
+    const struct sensei_lpwan_config st = cfg_get();
+
+    if (len > lpwan_lora_max_payload(st.lora_dr, st.lora_adr)) {
+      return -EINVAL; /* never fits; what the LR1121 can take now is checked on the nRF9151 (-EMSGSIZE) */
+    }
   }
   if (!atomic_cas(&sending, 0, 1)) {
     return -EBUSY;
@@ -1033,6 +1079,7 @@ void sensei_lpwan_set_config(const struct sensei_lpwan_config *c) {
 
   cfg = *c;
   k_spin_unlock(&cfg_lock, k);
+  lora_next_max = 0; /* the data rate may have changed */
   /* The next connect configures from the new values. */
   (void)post(CMD_SETTINGS, sensei_Radio_RADIO_BLE, false);
 }

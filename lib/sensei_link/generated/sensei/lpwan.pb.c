@@ -41,6 +41,9 @@ PB_BIND(sensei_LpwanStatus, sensei_LpwanStatus, AUTO)
 PB_BIND(sensei_NetworkTime, sensei_NetworkTime, AUTO)
 
 
+PB_BIND(sensei_SendInfo, sensei_SendInfo, AUTO)
+
+
 PB_BIND(sensei_LpwanResponse, sensei_LpwanResponse, AUTO)
 
 

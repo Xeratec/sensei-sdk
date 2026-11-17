@@ -159,6 +159,7 @@ bool lpwan_sm_event(lpwan_sm_t *sm, const sensei_LpwanEvent *evt) {
       return false;
     }
     sm->state = LPWAN_ST_CONNECTED;
+    sm->send_seq = 0; /* each send has one result: a second tx_done for it is ignored */
     return true;
   case sensei_LpwanEvent_error_tag:
     if (sm->state == LPWAN_ST_CONNECTING) {
@@ -166,7 +167,7 @@ bool lpwan_sm_event(lpwan_sm_t *sm, const sensei_LpwanEvent *evt) {
       sm->state = LPWAN_ST_IDLE;
       sm->tech = LPWAN_TECH_NONE;
     } else if (sm->state == LPWAN_ST_SENDING) {
-      sm->state = LPWAN_ST_CONNECTED;
+      /* No change: a send ends with its tx_done (or the timeout), also after an error event. */
     } else if (evt->error.code == sensei_LpwanResult_LPWAN_FAILED && sm->state != LPWAN_ST_IDLE) {
       sm->state = LPWAN_ST_ERROR;
     }
@@ -179,6 +180,7 @@ bool lpwan_sm_event(lpwan_sm_t *sm, const sensei_LpwanEvent *evt) {
 void lpwan_sm_abort_send(lpwan_sm_t *sm) {
   if (sm->state == LPWAN_ST_SENDING) {
     sm->state = LPWAN_ST_CONNECTED;
+    sm->send_seq = 0;
   }
 }
 

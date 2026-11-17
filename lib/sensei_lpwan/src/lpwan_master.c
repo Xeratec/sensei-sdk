@@ -133,13 +133,12 @@ static int build_request(struct lpwan_master *m, const sensei_LpwanRequest *req)
   return 0;
 }
 
+uint32_t lpwan_master_next_seq(const struct lpwan_master *m) { return m->seq == UINT32_MAX ? 1u : m->seq + 1u; }
+
 static int request(struct lpwan_master *m, sensei_LpwanRequest *req, sensei_LpwanResponse *rsp, uint32_t timeout_ms) {
   int err;
 
-  m->seq++;
-  if (m->seq == 0) {
-    m->seq = 1;
-  }
+  m->seq = lpwan_master_next_seq(m);
   req->seq = m->seq;
 
   for (unsigned attempt = 0; attempt <= m->retries; attempt++) {

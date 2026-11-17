@@ -24,7 +24,13 @@ int lora_init(void);
 sensei_LpwanResult lora_configure(const sensei_LoraConfigure *cfg);
 sensei_LpwanResult lora_provision(const sensei_LoraProvision *keys);
 sensei_LpwanResult lora_join(void);
-sensei_LpwanResult lora_send(uint32_t seq, uint32_t port, bool confirmed, const uint8_t *data, size_t len);
+/**
+ * Queue an uplink. Refused at once (BUSY: a frame is still queued, INVALID: it does not fit the next uplink). On
+ * success `*expected_ms` is the time to tx_done: duty-cycle wait of the LR1121, airtime, receive windows. `*next_max`
+ * is what the LR1121 takes in the next uplink (0: not known), also on a refusal.
+ */
+sensei_LpwanResult lora_send(uint32_t seq, uint32_t port, bool confirmed, const uint8_t *data, size_t len,
+                             uint32_t *expected_ms, uint32_t *next_max);
 sensei_LpwanResult lora_request_time(void);
 /** Park the radio: the session is kept. */
 sensei_LpwanResult lora_leave(void);

@@ -38,14 +38,17 @@ static void notify(enum bus_user u, bool held) {
 
 bool bus_claim(enum bus_user u, uint32_t max_hold_ms) {
   k_spinlock_key_t k = k_spin_lock(&lock);
+  int64_t now = k_uptime_get();
   bool ok, was;
 
   if (!inited) {
     bus_arb_init(&arb);
     inited = true;
   }
-  was = arb.held[u];
-  ok = bus_arb_try(&arb, u, k_uptime_get(), max_hold_ms);
+  /* An expired claim is not held: claiming again is a new claim and the listener hears of it (the level shifter
+   * may have been switched on in between). */
+  was = bus_arb_held(&arb, u, now);
+  ok = bus_arb_try(&arb, u, now, max_hold_ms);
   k_spin_unlock(&lock, k);
   if (ok && !was) {
     notify(u, true);

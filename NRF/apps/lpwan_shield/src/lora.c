@@ -52,7 +52,7 @@ LOG_MODULE_REGISTER(lora, CONFIG_LPWAN_SHIELD_LOG_LEVEL);
 #define GPS_TO_UNIX_S 315964800u
 #define GPS_UTC_LEAP_S 18u
 
-enum cmd { CMD_EVENT, CMD_JOIN, CMD_SEND, CMD_TIME, CMD_LEAVE };
+enum cmd { CMD_EVENT, CMD_JOIN, CMD_SEND, CMD_TIME, CMD_LEAVE, CMD_FLUSH, CMD_RESET };
 
 struct msg {
   enum cmd cmd;
@@ -83,6 +83,11 @@ static bool started;
 static unsigned join_failures;
 static uint32_t cur_seq;
 static bool cur_confirmed;
+static bool cur_flush; /* the frame in the LR1121 is an empty uplink for the MAC answers, no client chunk */
+static volatile bool flush_pending;     /* a CMD_FLUSH is queued */
+static volatile uint32_t pending_seq;   /* a CMD_SEND of this seq is queued and has not run yet */
+static volatile uint32_t held_until_ms; /* uptime at which the LR1121 should have reported the frame it holds */
+static volatile uint32_t held_since_ms;
 static char modem_str[24];
 static int16_t last_rssi;
 static int8_t last_snr;
@@ -284,22 +289,23 @@ static void do_join(void) {
 
 static void do_send(const struct msg *m) {
   lr1121_modem_response_code_t rc;
-
   uint8_t max = 0;
 
+  pending_seq = 0;
   if (state != L_READY) {
     svc_emit_tx_done(m->seq, false, 0, 0);
     return;
   }
   /* The data rate and pending MAC commands decide what fits in the next uplink (the master chunks by
-   * the configured data rate; with ADR the network may have lowered it). */
-  if (lr1121_modem_get_next_tx_max_payload(ctx, &max) == RC_OK && m->len > max) {
+   * the configured data rate; with ADR the network may have lowered it). 0 is "not known", not "no room". */
+  if (lr1121_modem_get_next_tx_max_payload(ctx, &max) == RC_OK && max != 0 && m->len > max) {
     LOG_WRN("payload %u B does not fit the next uplink (%u B)", (unsigned)m->len, (unsigned)max);
     svc_emit_tx_done(m->seq, false, 0, max);
     return;
   }
   cur_seq = m->seq;
   cur_confirmed = m->confirmed;
+  cur_flush = false;
   rc = lr1121_modem_request_tx(
       ctx, m->port, m->confirmed ? LR1121_MODEM_UPLINK_CONFIRMED : LR1121_MODEM_UPLINK_UNCONFIRMED, m->data, m->len);
   if (rc != RC_OK) {
@@ -307,7 +313,47 @@ static void do_send(const struct msg *m) {
     svc_emit_tx_done(m->seq, false, 0, 0);
     return;
   }
+  held_since_ms = k_uptime_get_32();
   state = L_SENDING;
+}
+
+/* MAC answers use the room of the next uplink: an empty uplink carries them (FOpts, or port 0). No client send is
+ * running; its frame has no seq and no tx_done event. */
+static void do_flush(void) {
+  flush_pending = false;
+  if (state != L_READY) {
+    return;
+  }
+  if (lr1121_modem_request_empty_tx(ctx, false, 0, LR1121_MODEM_UPLINK_UNCONFIRMED) != RC_OK) {
+    LOG_WRN("empty uplink for the MAC answers failed");
+    return;
+  }
+  cur_seq = 0;
+  cur_flush = true;
+  held_since_ms = k_uptime_get_32();
+  state = L_SENDING;
+}
+
+/* The LR1121 holds a frame for twice the time it should (the Modem-E firmware hangs, or the duty cycle estimate is far
+ * off): reset it, which drops the frame. The master hears of it: tx_done(failed), an error and `disconnected`; the next
+ * join starts the radio again and restores the session. */
+static void do_reset_stuck(void) {
+  uint32_t seq = cur_seq;
+  bool flush = cur_flush;
+
+  if (!started || state != L_SENDING) {
+    return; /* the result came in the meantime */
+  }
+  LOG_ERR("LR1121 holds a frame for too long: reset");
+  started = false;
+  state = L_IDLE;
+  cur_flush = false;
+  (void)lr1121_modem_hal_reset(ctx);
+  if (!flush) {
+    svc_emit_tx_done(seq, false, 0, 0);
+  }
+  svc_emit_error(sensei_LpwanResult_LPWAN_TIMEOUT, "LR1121 send stuck: reset");
+  svc_emit_radio(sensei_LpwanEvent_disconnected_tag, sensei_Radio_RADIO_LORA);
 }
 
 /* The master let go while a join was queued or running: stop it, so a late "joined" does not connect a
@@ -366,9 +412,10 @@ static void handle_event(const lr1121_modem_event_fields_t *e) {
       /* The radio setup is gone: ensure_started() runs it again at the next join. Tell the master. */
       started = false;
       state = L_IDLE;
-      if (was == L_SENDING) {
+      if (was == L_SENDING && !cur_flush) {
         svc_emit_tx_done(cur_seq, false, 0, 0);
       }
+      cur_flush = false;
       if (was != L_IDLE) {
         svc_emit_radio(sensei_LpwanEvent_disconnected_tag, sensei_Radio_RADIO_LORA);
       }
@@ -394,6 +441,10 @@ static void handle_event(const lr1121_modem_event_fields_t *e) {
       break; /* the empty uplink of a time request, or a stray event */
     }
     state = L_READY;
+    if (cur_flush) {
+      cur_flush = false; /* the MAC answers are out: the client's next send asks what fits */
+      break;
+    }
     /* The MAC answers the receive windows brought are known now: what the next uplink takes. */
     if (lr1121_modem_get_next_tx_max_payload(ctx, &next_max) != RC_OK) {
       next_max = 0;
@@ -489,6 +540,12 @@ static void lora_main(void *a, void *b, void *c) {
     case CMD_LEAVE:
       do_leave();
       break;
+    case CMD_FLUSH:
+      do_flush();
+      break;
+    case CMD_RESET:
+      do_reset_stuck();
+      break;
     }
     service_events();
   }
@@ -551,43 +608,115 @@ sensei_LpwanResult lora_join(void) {
   return r;
 }
 
-sensei_LpwanResult lora_send(uint32_t seq, uint32_t port, bool confirmed, const uint8_t *data, size_t len,
-                             uint32_t *expected_ms, uint32_t *next_max) {
-  struct msg m = {.cmd = CMD_SEND, .seq = seq, .confirmed = confirmed};
-  uint8_t max = 0;
-  int32_t duty = 0;
-  uint32_t wait_ms = 0;
+/* The LR1121 holds a frame, or one is on its way to it. */
+bool lora_held(uint32_t *seq, uint32_t *left_ms) {
+  uint32_t pend = pending_seq;
+  bool held = state == L_SENDING || flush_pending || pend != 0;
 
-  *expected_ms = 0;
-  *next_max = 0;
-  if (len == 0 || len > sizeof(m.data)) {
-    return sensei_LpwanResult_LPWAN_INVALID;
-  }
-  if (state != L_READY) {
-    /* SENDING: a frame still sits in the LR1121 (a send the watchdog gave up). It cannot be taken back. */
-    return state == L_SENDING ? sensei_LpwanResult_LPWAN_BUSY : sensei_LpwanResult_LPWAN_NOT_JOINED;
-  }
-  /* Read-only questions to the LR1121 (each is one locked transaction, the worker may be busy elsewhere). */
-  if (lr1121_modem_get_next_tx_max_payload(ctx, &max) == RC_OK) {
-    *next_max = max;
-    if (len > max) {
-      LOG_WRN("payload %u B does not fit the next uplink (%u B)", (unsigned)len, (unsigned)max);
-      return sensei_LpwanResult_LPWAN_INVALID; /* the master chunks again */
+  if (seq != NULL) {
+    if (flush_pending || (state == L_SENDING && cur_flush)) {
+      *seq = 0; /* no client frame */
+    } else {
+      *seq = pend != 0 ? pend : (state == L_SENDING ? cur_seq : 0);
     }
   }
-  /* The LR1121 holds a frame back until the duty cycle allows it (1 %: minutes after a full chunk at DR0). */
-  if (lr1121_modem_get_duty_cycle_status(ctx, &duty) == RC_OK && duty < 0) {
-    wait_ms = (uint32_t)(-(int64_t)duty);
+  if (left_ms != NULL) {
+    int32_t left = (int32_t)(held_until_ms - k_uptime_get_32());
+
+    *left_ms = left > 5000 ? (uint32_t)left : 5000u; /* overdue: look again soon */
   }
-  *expected_ms = lpwan_lora_expected_ms(cfg.data_rate, cfg.adr, (uint32_t)len, wait_ms);
-  if (wait_ms > 0) {
-    LOG_INF("duty cycle: send %u waits %u ms, result expected in %u ms", (unsigned)seq, (unsigned)wait_ms,
-            (unsigned)*expected_ms);
+  return held;
+}
+
+bool lora_holds_send(uint32_t seq) {
+  return seq != 0 && ((state == L_SENDING && !cur_flush && cur_seq == seq) || pending_seq == seq);
+}
+
+bool lora_reset_stuck(void) {
+  const struct msg m = {.cmd = CMD_RESET};
+
+  return k_msgq_put(&lora_q, &m, K_NO_WAIT) == 0;
+}
+
+sensei_LpwanResult lora_send(uint32_t seq, uint32_t port, bool confirmed, const uint8_t *data, size_t len,
+                             struct lora_send_info *info) {
+  struct msg m = {.cmd = CMD_SEND, .seq = seq, .confirmed = confirmed};
+  struct lpwan_lora_send_in in = {0};
+  struct lpwan_lora_send_out out;
+  lr1121_modem_response_code_t rc;
+  uint8_t u8 = 0;
+  int32_t duty = 0;
+  uint32_t left;
+
+  memset(info, 0, sizeof(*info));
+  in.len = (uint32_t)len;
+  in.held = lora_held(&in.held_seq, &left);
+  in.held_left_ms = left;
+  in.joined = state == L_READY;
+  in.est.data_rate = cfg.data_rate;
+  in.est.adr = cfg.adr;
+  in.est.confirmed = confirmed;
+  if (in.held && cur_flush && (int32_t)(k_uptime_get_32() - held_since_ms) > 2 * (int32_t)LPWAN_SEND_MAX_MS) {
+    (void)lora_reset_stuck(); /* a flush frame has no watchdog of the service */
+  }
+  if (in.joined && !in.held) {
+    /* Read-only questions to the LR1121 (each is one locked transaction, the worker may be busy elsewhere). */
+    rc = lr1121_modem_get_next_tx_max_payload(ctx, &u8);
+    in.max_known = rc == RC_OK;
+    in.max = u8;
+    /* The LR1121 holds a frame back until the duty cycle allows it (1 %: minutes after a full chunk at DR0). */
+    rc = lr1121_modem_get_duty_cycle_status(ctx, &duty);
+    in.est.duty_known = rc == RC_OK;
+    in.est.duty = duty;
+    rc = lr1121_modem_get_nb_trans(ctx, &u8);
+    in.est.nb_known = rc == RC_OK;
+    in.est.nb_trans = u8;
+  }
+  lpwan_lora_plan_send(&in, &out);
+  info->expected_ms = out.expected_ms;
+  info->next_max = out.next_max;
+  info->queued_seq = out.queued_seq;
+  switch (out.result) {
+  case sensei_LpwanResult_LPWAN_OK:
+    break;
+  case sensei_LpwanResult_LPWAN_BUSY:
+    if (out.flush) {
+      const struct msg f = {.cmd = CMD_FLUSH};
+
+      LOG_WRN("next uplink takes %u B: sending an empty uplink for the MAC answers", (unsigned)out.next_max);
+      flush_pending = true;
+      held_until_ms = k_uptime_get_32() + out.expected_ms;
+      if (k_msgq_put(&lora_q, &f, K_NO_WAIT) != 0) {
+        flush_pending = false;
+      }
+    } else if (out.queued_seq != 0 || in.held) {
+      LOG_INF("send %u: a frame is queued in the LR1121, result in %u ms", (unsigned)seq, (unsigned)out.expected_ms);
+    } else {
+      LOG_WRN("duty cycle: send %u refused, a send may be accepted in %u ms", (unsigned)seq, (unsigned)out.expected_ms);
+    }
+    return out.result;
+  case sensei_LpwanResult_LPWAN_INVALID:
+    if (out.next_max != 0) {
+      LOG_WRN("payload %u B does not fit the next uplink (%u B)", (unsigned)len, (unsigned)out.next_max);
+    }
+    return out.result;
+  default:
+    return out.result;
+  }
+  if (out.expected_ms > 10000u) {
+    LOG_INF("send %u: result expected in %u ms (duty-cycle wait %d ms)", (unsigned)seq, (unsigned)out.expected_ms,
+            in.est.duty_known && in.est.duty < 0 ? (int)-in.est.duty : 0);
   }
   m.port = (uint8_t)(port ? port : cfg.port);
   m.len = (uint8_t)len;
   memcpy(m.data, data, len);
-  return post(&m);
+  pending_seq = seq;
+  held_until_ms = k_uptime_get_32() + out.expected_ms;
+  if (k_msgq_put(&lora_q, &m, K_NO_WAIT) != 0) {
+    pending_seq = 0;
+    return sensei_LpwanResult_LPWAN_BUSY;
+  }
+  return sensei_LpwanResult_LPWAN_OK;
 }
 
 sensei_LpwanResult lora_request_time(void) {
@@ -618,6 +747,7 @@ sensei_LpwanResult lora_sleep(uint32_t deep) {
 
 void lora_fill_status(sensei_LpwanStatus *st) {
   st->lora_joined = state == L_READY || state == L_SENDING;
+  st->queued = lora_held(NULL, NULL) ? 1u : 0u;
   if (st->lora_joined) {
     st->rssi_dbm = last_rssi;
     st->snr_db = last_snr;

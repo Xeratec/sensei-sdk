@@ -23,9 +23,9 @@ nRF5340 (master)                          nRF9151 (slave)
 | Folder | What |
 |---|---|
 | `include/sensei_lpwan/lpwan_link.h` | transfer scheme, flags, shared state machine API |
-| `src/` | protocol cores without OS: `link_slave.c` (nRF9151), `lpwan_master.c` (nRF5340), `lpwan_sm.c` (both), `lpwan_timers.c` (3GPP PSM and eDRX timer coding), `lpwan_lora.c` (LoRa payload limit, airtime, send time limits) |
+| `src/` | protocol cores without OS: `link_slave.c` (nRF9151), `lpwan_master.c` (nRF5340), `lpwan_sm.c` (both), `lpwan_timers.c` (3GPP PSM and eDRX timer coding), `lpwan_lora.c` (LoRa payload limit, airtime, send time estimate, what a send gets before it is queued, the send tracking of both sides) |
 | `zephyr/` | nRF5340 client: `lpwan_client.c` (thread, shield power, shared SPI_A bus, radios), `lpwan_shell.c` |
-| `tests/` | host tests: master against slave through a simulated SPI with faults, state machine, timer coding, LoRa limits and airtime, a model of the duty-cycle wait of the LR1121 |
+| `tests/` | host tests: master against slave through a simulated SPI with faults, state machine, timer coding, LoRa limits and airtime, a model of the LR1121 (duty cycle, NbTrans, repeats) with the shield and the client around it |
 
 ## Client API (nRF5340, `sensei_lpwan/lpwan.h`)
 
@@ -40,8 +40,15 @@ nRF5340 (master)                          nRF9151 (slave)
   nRF9151 reports what the LR1121 takes in the next uplink (MAC answers it still owes use room): if that is less,
   `sensei_lpwan_lora_mtu()` returns it minus 15 B. The app reads it again for every message and after a configuration
   change and keeps that size for all chunks of the message. `radio_send` refuses a chunk above the nominal size
-  (`-EINVAL`). The nRF9151 refuses a chunk that does not fit the next uplink and says what fits: `done(-EMSGSIZE)`,
-  `sensei_lpwan_lora_mtu()` follows it, the app chunks the message again with the new size.
+  (`-EMSGSIZE`: the data rate was lowered after the message was chunked). The nRF9151 refuses a chunk that does not
+  fit the next uplink and says what fits: `done(-EMSGSIZE)` if the size to chunk by is smaller than the chunk,
+  `sensei_lpwan_lora_mtu()` follows it, the app chunks the message again with the new size. If the LR1121 says 0, the
+  size is not known and the chunk goes without a check. If MAC answers leave no room for any chunk, the nRF9151 sends an
+  empty uplink to flush them and refuses the send with `done(-EAGAIN)`.
+- `-EAGAIN` (from `done()` or `radio_send`): the LR1121 would hold the frame back for longer than a send may take (10
+  min), so the nRF9151 refused it before queueing it. Do not count it as a failure and keep the message.
+  `sensei_lpwan_lora_retry_after_ms()` says when it may be tried again; `radio_ready(LORA)` is false until then and
+  `on_up` comes when it is over.
 - `sensei_lpwan_lora_provision()`: LoRaWAN keys at run time. They are sent to the shield and dropped from RAM (after
   three failed tries too: provision again). The shell command puts the keys in the shell history: bench use only.
 
@@ -66,13 +73,25 @@ while GAP9 holds the bus and on again after it. Untested on hardware.
   power-cycle the shield. A shield that does not answer at power-on is cut and tried again after 15 s. A request
   does not count while GAP9 owns the bus.
 - **Stuck send:** the nRF9151 ends a send without result with `tx_done(failed)`, the client later. Both leave SENDING.
-  LoRa sends can wait for the duty cycle of the LR1121 (1 %: 277 s after a full chunk at DR0, 67 s at DR3): the
-  nRF9151 asks the LR1121 and puts the expected time to `tx_done` in the answer to the send (`SendInfo.expected_ms`, at
-  most 10 min). The nRF9151 gives up 5 s after it, the client 20 s after it; without an estimate (LTE) after
-  `LPWAN_SHIELD_SEND_TIMEOUT_S` (45 s) and `SENSEI_LPWAN_TX_TIMEOUT_S` (60 s). The client keeps the shield on until
-  the result or its deadline: a frame queued in the LR1121 would be lost with the power. Each send has one `tx_done`;
-  a second one (the real result after the watchdog) is dropped on the nRF9151 and ignored by the client. Only the `tx_done` of the send in flight
-  counts (it carries the request's seq).
+  LoRa sends can wait for the duty cycle of the LR1121 (1 %: 277 s after a full chunk at DR0, 67 s at DR3), and the
+  LR1121 repeats a frame NbTrans times (ADR), once more if it is confirmed, each after the duty cycle again. The
+  nRF9151 asks the LR1121 (`get_duty_cycle_status`, `get_nb_trans`) and puts the expected time to `tx_done` in the answer
+  to the send (`SendInfo.expected_ms`, at most 10 min); if a call fails or gives nonsense the estimate is conservative
+  (DR0, confirmed, a wait as after a frame of the same size). The nRF9151 looks at the send 5 s after it, the client 20
+  s after it; without an estimate (LTE) after `LPWAN_SHIELD_SEND_TIMEOUT_S` (45 s) and `SENSEI_LPWAN_TX_TIMEOUT_S` (60 s).
+  - A frame cannot be taken back from the LR1121 and the power would drop it. So while the LR1121 still holds it the
+    nRF9151 does not fail the send at that time, and the client asks the status (`queued`) at its deadline and waits
+    once more. After twice the limit the nRF9151 resets the LR1121 (the frame is dropped), reports `tx_done(failed)`, an
+    error and `disconnected`.
+  - If the client lost track of a send (it timed out, or the answer was lost) and sends again, the shield answers BUSY
+    with `SendInfo.queued_seq` and the time left. The same chunk takes over that frame (one transmission, its `tx_done`
+    is the result); another chunk waits for it and goes after. A result that no open send waits for is kept in the
+    status once (`late_tx_seq`, `late_tx_ok`): the client reads it at its deadline.
+  - A send whose duty-cycle wait would take longer than 10 min is refused before queueing: BUSY with the time after
+    which it fits (`SendInfo.expected_ms`, no `queued_seq`). The client honours it (`-EAGAIN`, see above).
+  - The shield is never switched off while a frame may be held (until twice the limit has passed).
+  Each send has one `tx_done`; a second one is kept for the status on the nRF9151. Only the `tx_done` of the send in
+  flight counts (it carries the request's seq). The shield's watchdog acts only for the send it was armed for.
 - **Events:** state events (joined, connected, disconnected, tx_done, error) have two reserved queue slots, downlinks and
   time cannot take them. The state machine moves only if the event was queued. `LpwanStatus.dropped_events` counts what
   did not fit. A joined or connected event of another radio than the active one is ignored.
@@ -80,8 +99,9 @@ while GAP9 holds the bus and on again after it. Untested on hardware.
   `LPWAN_PROTOCOL_VERSION` (in `LpwanVersion.protocol`, read at power-on). On a mismatch the client refuses the shield
   for an hour (`sensei lpwan status` says so, the self-test returns `-EPROTONOSUPPORT`), then asks again from a fresh
   start of the shield: two damaged version bytes in a row look like another version, and the shield may have been updated.
-  Bump the protocol version with every change of `lpwan.proto` or of the transfer rules (now 2: `SendInfo`,
-  `TxDone.next_max_payload`, `SendInfo.next_max_payload`).
+  Bump the protocol version with every change of `lpwan.proto` or of the transfer rules that an older peer would misread
+  (now 2: `SendInfo`, `TxDone.next_max_payload`, `SendInfo.next_max_payload`). `SendInfo.queued_seq`, `LpwanStatus.queued`,
+  `late_tx_seq` and `late_tx_ok` are new fields: an older peer ignores them and treats BUSY as a failure.
 
 ## Use it
 

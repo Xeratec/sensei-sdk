@@ -73,7 +73,11 @@ nRF5340 (master)                           nRF9151 (slave)
 - **Self-protection:** the link thread feeds a task watchdog (hardware watchdog behind it, 15 s); a modem fault resets
   the chip (`nrf_modem_fault_handler` in `main.c`); a send without result ends with `tx_done(failed)` after the time the
   backend expects plus 5 s (LoRa, up to 10 min), else after `LPWAN_SHIELD_SEND_TIMEOUT_S` (45 s), so the state machine
-  never stays in SENDING. Each send has one `tx_done`: a real result that comes after the watchdog is dropped. The nRF5340 sees a reset as a lost
+  never stays in SENDING. While the LR1121 still holds a LoRa frame the send is not failed at that time (the frame
+  would go out later, and a retry would send it twice): the watchdog looks again, and resets the LR1121 after twice
+  the time (the frame is dropped; `tx_done(failed)`, an error and `disconnected`). Each send has one `tx_done`: a real
+  result that no send waits for is kept for the status (`late_tx_seq`, once). The watchdog acts only for the send it was
+  armed for. The nRF5340 sees a reset as a lost
   link and power-cycles the shield if it does not come back. The LTE worker can wait up to 600 s for a registration
   (legitimate), so the task watchdog does not cover it.
 - **State machine** (`lib/sensei_lpwan/src/lpwan_sm.c`, on both MCUs): idle, connecting, connected, sending,
@@ -113,8 +117,9 @@ network time (from the modem through `date_time`). Three paths run in their own 
 send (worker), receive (own thread, blocks in `poll`), and the `lte_lc` callbacks. Downlinks (UDP
 datagrams) become `DownlinkRx` events. PSM and eDRX values are encoded in `lib/sensei_lpwan/src/lpwan_timers.c`
 (3GPP timer coding, host tested; the eDRX code is the 3GPP value, NB-IoT has ten of the sixteen).
-`lte_disconnect` ends a registration wait at once (a cancel flag, so a connect request that follows is not taken for
-registered). Coverage lost while connected gives an error event (`registration
+`lte_disconnect` ends a registration wait at once (a cancel flag; only `lte_connect` clears it, and the connect checks it
+and `want_connected` after it reset the semaphore, so a disconnect that comes before the connect starts is not lost, and
+a connect request that follows is not taken for registered). Coverage lost while connected gives an error event (`registration
 lost`); sends fail at once until the modem registers again.
 
 Low power: the modem stays off until the first connect. After the uplink, the nRF5340 sends
@@ -130,14 +135,19 @@ as in the commissioning project: idle, joining, joined, ready, sending; the clas
 after the join, uplink waits for `ready`. `tx done` events carry the uplink `seq`. Downlinks are
 events. Network time uses `DeviceTimeReq` (an empty uplink) and the LoRaWAN MAC time event.
 
-Before an uplink the shield asks the LR1121 how much fits (`get_next_tx_max_payload`: data rate and pending MAC commands)
-and refuses a chunk that is too long (`LPWAN_INVALID` with what fits in `SendInfo.next_max_payload`, the client reports
-`-EMSGSIZE`). It asks how long the duty cycle
-holds the frame back (`get_duty_cycle_status`: 1 % off time after a frame, 277 s after a full chunk at DR0, 67 s at DR3)
-and answers the send with the expected time to `tx_done`: wait, airtime, receive windows (`SendInfo.expected_ms`, at
-most 10 min). The watchdog and the client's deadline follow it. A frame cannot be taken back from the LR1121: while one
-is queued after a watchdog, new sends get `LPWAN_BUSY` until its `TX_DONE` comes. `tx_done` carries `next_max_payload`
-(what the next uplink takes, MAC answers counted) for the client's chunk size.
+Before an uplink the shield asks the LR1121 how much fits (`get_next_tx_max_payload`: data rate and pending MAC commands;
+0 counts as not known) and refuses a chunk that is too long (`LPWAN_INVALID` with what fits in
+`SendInfo.next_max_payload`; the client reports `-EMSGSIZE` if the size to chunk by is smaller). If less than 4 bytes
+fit, MAC answers use the room: the shield sends an empty uplink (`request_empty_tx`, no port) to flush them and answers
+`LPWAN_BUSY` with the time it takes. It asks how long the duty cycle holds the frame back (`get_duty_cycle_status`: 1 %
+off time after a frame, 277 s after a full chunk at DR0, 67 s at DR3) and how often the frame is sent
+(`get_nb_trans`, plus one if it is confirmed; each repeat waits for the duty cycle again) and answers the send with the
+expected time to `tx_done` (`SendInfo.expected_ms`, at most 10 min). If the wait alone would push a send beyond 10 min,
+the send is refused before it is queued: `LPWAN_BUSY` with the time after which it fits. If a call to the LR1121 fails
+or gives nonsense the estimate is conservative. The watchdog and the client's deadline follow the estimate. A frame
+cannot be taken back from the LR1121: a send that comes while one is queued gets `LPWAN_BUSY` with `queued_seq` (the
+send whose frame it is) and the time left. `tx_done` carries `next_max_payload` (what the next uplink takes, MAC answers
+counted) for the client's chunk size. The decisions are in `lib/sensei_lpwan/src/lpwan_lora.c` (host tested).
 
 `lte_disconnect` during a join queues a `leave_network` after the join, so a late `joined` does not connect a radio the
 master gave up. A self-reset of the LR1121 gives `tx_done(failed)` and

@@ -7,7 +7,8 @@
 #
 # Regenerate the nanopb C files of the SDK schemas (proto/sensei/*.proto) into generated/sensei/.
 #   scripts/generate.sh           write the generated files
-#   scripts/generate.sh --check   regenerate into a temp dir and fail if the committed files differ
+#   scripts/generate.sh --check   regenerate into a temp dir and fail if the committed files differ (exit 77: the
+#                                 generator cannot run here, the check is skipped)
 #
 # The generator is the one of the nanopb submodule (third_party/nanopb), the same version as the
 # runtime (see README.md). It needs Python with protobuf and grpcio-tools, for example a venv:
@@ -22,6 +23,15 @@ c_dir="$lib/generated"
 
 mode=write
 [[ "${1:-}" == "--check" ]] && mode=check
+
+# --check exits 77 (skipped, the ctest convention) if the generator cannot run here (no protobuf or grpcio-tools).
+if [[ $mode == check ]]; then
+    # shellcheck disable=SC2086
+    if ! $gen --version >/dev/null 2>&1; then
+        echo "skipped: the nanopb generator does not run (needs Python with protobuf and grpcio-tools)" >&2
+        exit 77
+    fi
+fi
 
 if [[ $mode == check ]]; then
     tmp="$(mktemp -d)"

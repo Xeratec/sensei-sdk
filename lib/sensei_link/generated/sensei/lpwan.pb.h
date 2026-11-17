@@ -129,6 +129,10 @@ typedef struct _sensei_LpwanStatus {
     int32_t snr_db;
     uint32_t queued; /* messages waiting to be sent */
     uint32_t dropped_events; /* events the shield could not queue since start (queue full) */
+    /* queued is 1 while the LR1121 holds a LoRa frame (a send is open, or one was given up): the client keeps the
+ shield powered. late_tx_*: the result of a send that had no result event (it was given up), reported once. */
+    uint32_t late_tx_seq; /* seq of that send, 0: none */
+    bool late_tx_ok;
 } sensei_LpwanStatus;
 
 typedef struct _sensei_NetworkTime {
@@ -144,6 +148,10 @@ typedef struct _sensei_SendInfo {
     /* LoRa: payload bytes the LR1121 takes in the next uplink (MAC answers it owes are counted), 0: not known. Also in
  the answer to a send that was refused as too long (result LPWAN_INVALID), so the client can chunk again. */
     uint32_t next_max_payload;
+    /* Only with result LPWAN_BUSY. LoRa: seq of the earlier send whose frame the LR1121 still holds (its tx_done comes
+ under that seq); expected_ms is the time left for it. 0: no such frame; expected_ms is then the time after which a
+ new send may be accepted (the duty-cycle wait is longer than a send may take, or MAC answers are being flushed). */
+    uint32_t queued_seq;
 } sensei_SendInfo;
 
 typedef struct _sensei_LpwanResponse {
@@ -252,9 +260,9 @@ extern "C" {
 #define sensei_LpwanSleep_init_default           {0}
 #define sensei_LpwanRequest_init_default         {0, 0, {sensei_Empty_init_default}}
 #define sensei_LpwanVersion_init_default         {false, sensei_Version_init_default, "", 0}
-#define sensei_LpwanStatus_init_default          {0, 0, 0, 0, 0, 0}
+#define sensei_LpwanStatus_init_default          {0, 0, 0, 0, 0, 0, 0, 0}
 #define sensei_NetworkTime_init_default          {0, _sensei_Radio_MIN}
-#define sensei_SendInfo_init_default             {0, 0}
+#define sensei_SendInfo_init_default             {0, 0, 0}
 #define sensei_LpwanResponse_init_default        {0, _sensei_LpwanResult_MIN, 0, {sensei_LpwanVersion_init_default}}
 #define sensei_RadioEvent_init_default           {_sensei_Radio_MIN}
 #define sensei_TxDone_init_default               {0, 0, 0, 0}
@@ -268,9 +276,9 @@ extern "C" {
 #define sensei_LpwanSleep_init_zero              {0}
 #define sensei_LpwanRequest_init_zero            {0, 0, {sensei_Empty_init_zero}}
 #define sensei_LpwanVersion_init_zero            {false, sensei_Version_init_zero, "", 0}
-#define sensei_LpwanStatus_init_zero             {0, 0, 0, 0, 0, 0}
+#define sensei_LpwanStatus_init_zero             {0, 0, 0, 0, 0, 0, 0, 0}
 #define sensei_NetworkTime_init_zero             {0, _sensei_Radio_MIN}
-#define sensei_SendInfo_init_zero                {0, 0}
+#define sensei_SendInfo_init_zero                {0, 0, 0}
 #define sensei_LpwanResponse_init_zero           {0, _sensei_LpwanResult_MIN, 0, {sensei_LpwanVersion_init_zero}}
 #define sensei_RadioEvent_init_zero              {_sensei_Radio_MIN}
 #define sensei_TxDone_init_zero                  {0, 0, 0, 0}
@@ -323,10 +331,13 @@ extern "C" {
 #define sensei_LpwanStatus_snr_db_tag            4
 #define sensei_LpwanStatus_queued_tag            5
 #define sensei_LpwanStatus_dropped_events_tag    6
+#define sensei_LpwanStatus_late_tx_seq_tag       7
+#define sensei_LpwanStatus_late_tx_ok_tag        8
 #define sensei_NetworkTime_unix_time_tag         1
 #define sensei_NetworkTime_radio_tag             2
 #define sensei_SendInfo_expected_ms_tag          1
 #define sensei_SendInfo_next_max_payload_tag     2
+#define sensei_SendInfo_queued_seq_tag           3
 #define sensei_LpwanResponse_seq_tag             1
 #define sensei_LpwanResponse_result_tag          2
 #define sensei_LpwanResponse_version_tag         3
@@ -436,7 +447,9 @@ X(a, STATIC,   SINGULAR, BOOL,     lora_joined,       2) \
 X(a, STATIC,   SINGULAR, SINT32,   rssi_dbm,          3) \
 X(a, STATIC,   SINGULAR, SINT32,   snr_db,            4) \
 X(a, STATIC,   SINGULAR, UINT32,   queued,            5) \
-X(a, STATIC,   SINGULAR, UINT32,   dropped_events,    6)
+X(a, STATIC,   SINGULAR, UINT32,   dropped_events,    6) \
+X(a, STATIC,   SINGULAR, UINT32,   late_tx_seq,       7) \
+X(a, STATIC,   SINGULAR, BOOL,     late_tx_ok,        8)
 #define sensei_LpwanStatus_CALLBACK NULL
 #define sensei_LpwanStatus_DEFAULT NULL
 
@@ -448,7 +461,8 @@ X(a, STATIC,   SINGULAR, UENUM,    radio,             2)
 
 #define sensei_SendInfo_FIELDLIST(X, a) \
 X(a, STATIC,   SINGULAR, UINT32,   expected_ms,       1) \
-X(a, STATIC,   SINGULAR, UINT32,   next_max_payload,   2)
+X(a, STATIC,   SINGULAR, UINT32,   next_max_payload,   2) \
+X(a, STATIC,   SINGULAR, UINT32,   queued_seq,        3)
 #define sensei_SendInfo_CALLBACK NULL
 #define sensei_SendInfo_DEFAULT NULL
 
@@ -555,12 +569,12 @@ extern const pb_msgdesc_t sensei_LpwanEvent_msg;
 #define sensei_LpwanRequest_size                 1046
 #define sensei_LpwanResponse_size                67
 #define sensei_LpwanSleep_size                   6
-#define sensei_LpwanStatus_size                  28
+#define sensei_LpwanStatus_size                  36
 #define sensei_LpwanVersion_size                 57
 #define sensei_LteConfigure_size                 134
 #define sensei_NetworkTime_size                  7
 #define sensei_RadioEvent_size                   2
-#define sensei_SendInfo_size                     12
+#define sensei_SendInfo_size                     18
 #define sensei_Send_size                         1037
 #define sensei_TxDone_size                       20
 

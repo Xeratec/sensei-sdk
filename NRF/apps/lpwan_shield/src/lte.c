@@ -232,8 +232,12 @@ static int do_connect(void) {
   }
   apply_power_saving();
 
+  /* A disconnect that came while this connect was queued or in the modem setup: the flag was set by it, the semaphore
+   * reset below would eat its give. */
   k_sem_reset(&registered_sem);
-  connect_cancelled = false;
+  if (!want_connected || connect_cancelled) {
+    return -ECANCELED;
+  }
   err = lte_lc_connect_async(lte_handler);
   if (err) {
     LOG_ERR("connect_async: %d", err);
@@ -244,7 +248,7 @@ static int do_connect(void) {
     return -ETIMEDOUT;
   }
   /* The semaphore is also given by lte_disconnect(): registered is what counts. */
-  if (connect_cancelled) {
+  if (connect_cancelled || !want_connected) {
     return -ECANCELED;
   }
   return registered ? 0 : -ENETDOWN;
@@ -390,13 +394,15 @@ sensei_LpwanResult lte_connect(void) {
     return sensei_LpwanResult_LPWAN_NOT_CONFIGURED;
   }
   want_connected = true;
+  connect_cancelled = false; /* a new request: an earlier disconnect does not cancel it (do_connect() checks both) */
   return post(CMD_CONNECT, 0, NULL, 0);
 }
 
 sensei_LpwanResult lte_disconnect(void) {
   /* Now, not when the worker gets to it: the worker may sit in the registration wait for minutes. The
-   * semaphore ends that wait; do_connect() sees the cancel flag and returns without a connection, also if a new
-   * connect request has set want_connected again by then. */
+   * semaphore ends that wait; do_connect() sees the cancel flag (or want_connected cleared) and returns without a
+   * connection. Only lte_connect() clears the flag, so a disconnect is not lost when it comes before do_connect()
+   * starts. */
   want_connected = false;
   connect_cancelled = true;
   k_sem_give(&registered_sem);

@@ -244,6 +244,15 @@ static atomic_t sending;
 static void (*send_done)(int err, void *user);
 static void *send_user;
 static int64_t send_deadline;
+static int64_t send_start;             /* uptime the send was taken by the shield */
+static uint32_t send_wait_seq;         /* seq whose tx_done ends the send (the request's, or the frame it adopted) */
+static bool deadline_extended;         /* the deadline passed once and the shield held the frame: waited once more */
+static bool resend_after_done;         /* the shield held another frame: send this chunk when that one is out */
+static unsigned resends;               /* resends of this chunk after a held frame */
+static struct lpwan_held held;         /* LoRa frame the shield took and has no result for */
+static struct lpwan_held held_prev;    /* `held` before the request in progress */
+static volatile int64_t lora_retry_at; /* the shield refuses LoRa sends until this uptime (duty cycle), 0: no */
+static struct k_work_delayable retry_work;
 static volatile uint8_t lora_next_max; /* payload the LR1121 reported for the next LoRa uplink, 0: not known */
 static uint8_t send_buf[LTE_MTU];
 static size_t send_len;
@@ -301,6 +310,15 @@ static void flush_fn(struct k_work *w) {
   }
 }
 
+/* The duty-cycle refusal of the shield is over: the app may send again. */
+static void retry_fn(struct k_work *w) {
+  ARG_UNUSED(w);
+  lora_retry_at = 0;
+  if (hooks.on_up != NULL) {
+    hooks.on_up(sensei_Radio_RADIO_LORA);
+  }
+}
+
 static void send_done_fn(struct k_work *w) {
   void (*cb)(int, void *) = send_done;
   void *u = send_user;
@@ -328,6 +346,9 @@ static void finish_send(int err) {
     uplink_ok++;
   }
   send_deadline = 0;
+  deadline_extended = false;
+  resend_after_done = false;
+  resends = 0;
   /* The shield goes to sleep after the idle time, also when this send failed or timed out. */
   idle_deadline = k_uptime_get() + CONFIG_SENSEI_LPWAN_IDLE_S * 1000LL;
   send_done_err = err;
@@ -350,6 +371,8 @@ static int expander_outputs(bool on) {
   err |= gpio_pin_configure_dt(&pin_busy, GPIO_INPUT);
   return err ? -EIO : 0;
 }
+
+static int post(enum cmd_type type, sensei_Radio radio, bool on);
 
 /* ---- master ops ---- */
 
@@ -424,6 +447,7 @@ static void op_on_event(void *c, const sensei_LpwanEvent *evt) {
     connect_end();
     break;
   case sensei_LpwanEvent_tx_done_tag:
+    lpwan_held_result(&held, evt->tx_done.seq); /* the frame is out (or lost): not held any more */
     if (!applied || !atomic_get(&sending)) {
       /* A late or second result: the send was given up, ended or is another one (the machine knows its seq). */
       LOG_WRN("tx done, seq %u ignored (%s)", (unsigned)evt->tx_done.seq, lpwan_state_name(sm.state));
@@ -434,6 +458,17 @@ static void op_on_event(void *c, const sensei_LpwanEvent *evt) {
       lora_next_max = (uint8_t)MIN(evt->tx_done.next_max_payload, UINT8_MAX);
     }
     tx_timeouts = 0; /* the shield answers */
+    if (resend_after_done) {
+      /* The frame of an earlier send was held: it is out now, send this chunk. */
+      resend_after_done = false;
+      deadline_extended = false;
+      send_deadline = 0;
+      if (post(CMD_SEND, send_radio, false) == 0) {
+        break;
+      }
+      finish_send(-EBUSY);
+      break;
+    }
     finish_send(evt->tx_done.ok ? 0 : -EIO);
     break;
   case sensei_LpwanEvent_downlink_rx_tag: {
@@ -503,6 +538,7 @@ static int request(sensei_LpwanRequest *req, sensei_LpwanResponse *rsp, uint32_t
   }
   if (req->which_body == sensei_LpwanRequest_send_tag) {
     req->seq = lpwan_master_next_seq(&master); /* the machine must know it before a tx_done can arrive */
+    send_wait_seq = req->seq;
   }
   res = lpwan_sm_admit(&sm, req);
   if (res != sensei_LpwanResult_LPWAN_OK) {
@@ -512,6 +548,11 @@ static int request(sensei_LpwanRequest *req, sensei_LpwanResponse *rsp, uint32_t
     return -EPERM;
   }
   admitted = sm;
+  if (req->which_body == sensei_LpwanRequest_send_tag && req->send.radio == sensei_Radio_RADIO_LORA) {
+    /* From now on the shield may hold the frame (also if the answer is lost): a tx_done for it can come at once. */
+    held_prev = held;
+    lpwan_held_arm(&held, req->seq, req->send.payload.bytes, req->send.payload.size);
+  }
   err = lpwan_master_request(&master, req, rsp, timeout_ms);
   if (err) {
     lpwan_sm_revert(&sm, &before, &admitted);
@@ -526,10 +567,15 @@ static int request(sensei_LpwanRequest *req, sensei_LpwanResponse *rsp, uint32_t
     return err;
   }
   last_result = rsp->result;
+  if (rsp->result != sensei_LpwanResult_LPWAN_OK && req->which_body == sensei_LpwanRequest_send_tag &&
+      req->send.radio == sensei_Radio_RADIO_LORA) {
+    held = held_prev; /* refused: this chunk was not taken; an earlier frame may still be held */
+  }
   if (rsp->result != sensei_LpwanResult_LPWAN_OK) {
     if (rsp->result == sensei_LpwanResult_LPWAN_NOT_CONNECTED || rsp->result == sensei_LpwanResult_LPWAN_NOT_JOINED) {
       LOG_WRN("nRF9151 is not connected, but we thought so: start again");
       lpwan_sm_init(&sm);
+      lpwan_held_clear(&held); /* it has restarted: nothing is held */
       connect_end();
     } else {
       lpwan_sm_revert(&sm, &before, &admitted);
@@ -681,6 +727,7 @@ static void shield_down(void) {
   shield_off_at = k_uptime_get();
   link_up = false;
   lora_next_max = 0;
+  lpwan_held_clear(&held); /* a frame in the LR1121 is gone with the power */
   connect_end();
   idle_deadline = 0;
   lpwan_sm_init(&sm);
@@ -819,6 +866,52 @@ static void do_connect(sensei_Radio radio) {
   idle_deadline = 0;
 }
 
+/* The deadline of the send in flight: the time the nRF9151 expects plus a margin. Until twice that time the LR1121 may
+ * still hold a LoRa frame (the nRF9151 resets it then): the shield stays on. */
+static void arm_deadline(uint32_t expected_ms) {
+  uint32_t period = lpwan_send_limit_ms(expected_ms, CONFIG_SENSEI_LPWAN_TX_TIMEOUT_S * 1000U, SEND_CLIENT_EXTRA_MS);
+  int64_t now = k_uptime_get();
+
+  send_start = now;
+  send_deadline = now + period;
+  lpwan_held_expect(&held, (uint32_t)now, period);
+}
+
+/* The nRF9151 answered a LoRa send with BUSY. If it holds the frame of an earlier send (the answer says which), the
+ * LR1121 cannot take it back: wait for its tx_done, and do not send the same chunk twice. If it holds nothing and
+ * gives a time, the duty-cycle wait is longer than a send may take (or MAC answers are flushed): refuse until then. */
+static void busy_answer(const sensei_LpwanResponse *rs) {
+  uint32_t queued_seq = rs->which_payload == sensei_LpwanResponse_send_tag ? rs->send.queued_seq : 0;
+  uint32_t after_ms = rs->which_payload == sensei_LpwanResponse_send_tag ? rs->send.expected_ms : 0;
+  enum lpwan_busy_action act = lpwan_held_busy(&held, send_buf, send_len, queued_seq);
+
+  if (act == LPWAN_BUSY_RETRY_LATER) {
+    if (after_ms != 0) {
+      lora_retry_at = k_uptime_get() + after_ms;
+      if (hooks.wq != NULL) {
+        (void)k_work_reschedule_for_queue(hooks.wq, &retry_work, K_MSEC(after_ms));
+      } else {
+        (void)k_work_reschedule(&retry_work, K_MSEC(after_ms));
+      }
+      LOG_WRN("LoRa send refused for %u s (duty cycle)", (unsigned)(after_ms / 1000));
+    }
+    finish_send(after_ms != 0 ? -EAGAIN : -EIO);
+    return;
+  }
+  if (act == LPWAN_BUSY_WAIT_RESEND && ++resends > 2) {
+    finish_send(-EBUSY); /* the shield keeps holding other frames: let the app retry */
+    return;
+  }
+  LOG_INF("the nRF9151 holds frame %u (%s): waiting for its result", (unsigned)queued_seq,
+          act == LPWAN_BUSY_ADOPT ? "this chunk" : "another one");
+  /* The shield's state machine waits for tx_done of that seq: so does ours. */
+  sm.state = LPWAN_ST_SENDING;
+  sm.send_seq = queued_seq;
+  send_wait_seq = queued_seq;
+  resend_after_done = act == LPWAN_BUSY_WAIT_RESEND;
+  arm_deadline(after_ms);
+}
+
 static void do_send(void) {
   sensei_LpwanRequest rq = sensei_LpwanRequest_init_zero;
   sensei_LpwanResponse rs;
@@ -840,13 +933,19 @@ static void do_send(void) {
   idle_deadline = 0;
   rs.which_payload = 0;
   if (request(&rq, &rs, REQ_TO) != 0) {
-    if (last_result == sensei_LpwanResult_LPWAN_INVALID) {
-      /* The chunk does not fit the next uplink (MAC answers in FOpts): the answer says what fits, the app chunks again.
-       */
-      if (rs.which_payload == sensei_LpwanResponse_send_tag) {
-        lora_next_max = (uint8_t)MIN(rs.send.next_max_payload, UINT8_MAX);
-      }
-      finish_send(-EMSGSIZE);
+    sensei_LpwanResult res = (sensei_LpwanResult)last_result;
+    uint32_t next_max = rs.which_payload == sensei_LpwanResponse_send_tag ? rs.send.next_max_payload : 0;
+
+    if (res == sensei_LpwanResult_LPWAN_INVALID) {
+      /* The chunk does not fit the next uplink (MAC answers in FOpts): the answer says what fits. The app chunks
+       * again (-EMSGSIZE) only if the size it will use is smaller; else the same chunk would be refused again. */
+      lora_next_max = (uint8_t)MIN(next_max, UINT8_MAX);
+      finish_send(send_radio == sensei_Radio_RADIO_LORA &&
+                          lpwan_lora_chunk_too_big(st.lora_dr, st.lora_adr, next_max, send_len)
+                      ? -EMSGSIZE
+                      : -EIO);
+    } else if (res == sensei_LpwanResult_LPWAN_BUSY && send_radio == sensei_Radio_RADIO_LORA) {
+      busy_answer(&rs);
     } else {
       finish_send(-EIO);
     }
@@ -857,8 +956,7 @@ static void do_send(void) {
   if (!atomic_get(&send_finishing)) {
     uint32_t expected = rs.which_payload == sensei_LpwanResponse_send_tag ? rs.send.expected_ms : 0;
 
-    send_deadline =
-        k_uptime_get() + lpwan_send_limit_ms(expected, CONFIG_SENSEI_LPWAN_TX_TIMEOUT_S * 1000U, SEND_CLIENT_EXTRA_MS);
+    arm_deadline(expected);
   }
 }
 
@@ -874,6 +972,11 @@ static void do_disconnect(void) {
 static void idle_action(void) {
   idle_deadline = 0;
   if (!shield_on || atomic_get(&sending) || connecting) {
+    return;
+  }
+  if (lpwan_held_keeps_power(&held, (uint32_t)k_uptime_get())) {
+    /* A send was given up, but the LR1121 may still hold its frame: the power would drop it. Look again later. */
+    idle_deadline = k_uptime_get() + 10000;
     return;
   }
   if (gating_wanted()) {
@@ -940,6 +1043,40 @@ static void handle_cmd(const struct cmd *c) {
 
 /* ---- thread ---- */
 
+/* The send deadline passed. A LoRa frame may still wait in the LR1121 (the duty cycle, a slow estimate): ask the
+ * nRF9151. Returns true if the send is settled or waits on (nothing more to do now). */
+static bool deadline_passed(int64_t now) {
+  sensei_LpwanRequest rq = sensei_LpwanRequest_init_zero;
+  sensei_LpwanResponse rs;
+  bool known;
+
+  if (send_radio != sensei_Radio_RADIO_LORA) {
+    return false;
+  }
+  rq.which_body = sensei_LpwanRequest_get_status_tag;
+  known = request(&rq, &rs, REQ_TO) == 0 && rs.which_payload == sensei_LpwanResponse_status_tag;
+  switch (lpwan_held_deadline(send_wait_seq, deadline_extended, known, &rs.status)) {
+  case LPWAN_DL_OK:
+  case LPWAN_DL_FAILED: {
+    bool ok = rs.status.late_tx_ok;
+
+    LOG_INF("tx result of seq %u from the status: %s", (unsigned)send_wait_seq, ok ? "ok" : "failed");
+    lpwan_held_result(&held, send_wait_seq);
+    lpwan_sm_abort_send(&sm);
+    resend_after_done = false;
+    finish_send(ok ? 0 : -EIO);
+    return true;
+  }
+  case LPWAN_DL_EXTEND:
+    LOG_WRN("the LR1121 still holds the frame of seq %u: waiting longer", (unsigned)send_wait_seq);
+    deadline_extended = true;
+    send_deadline = now + (send_deadline - send_start);
+    return true;
+  default:
+    return false;
+  }
+}
+
 static void check_timers(void) {
   int64_t now = k_uptime_get();
 
@@ -952,7 +1089,7 @@ static void check_timers(void) {
     do_disconnect();
     idle_deadline = now + 1000;
   }
-  if (atomic_get(&sending) && send_deadline && now > send_deadline) {
+  if (atomic_get(&sending) && send_deadline && now > send_deadline && !deadline_passed(now)) {
     LOG_ERR("no transmit result");
     lpwan_sm_abort_send(&sm); /* the late tx_done, if it comes, is ignored: its seq is no longer sent */
     finish_send(-ETIMEDOUT);
@@ -1026,8 +1163,18 @@ static int post(enum cmd_type type, sensei_Radio radio, bool on) {
 
 /* ---- radios ---- */
 
+uint32_t sensei_lpwan_lora_retry_after_ms(void) {
+  int64_t left = lora_retry_at - k_uptime_get();
+
+  return lora_retry_at != 0 && left > 0 ? (uint32_t)MIN(left, (int64_t)UINT32_MAX) : 0u;
+}
+
 bool sensei_lpwan_radio_ready(sensei_Radio r) {
   lpwan_tech_t want = lpwan_tech_of_radio(r);
+
+  if (r == sensei_Radio_RADIO_LORA && sensei_lpwan_lora_retry_after_ms() != 0) {
+    return false; /* refused for the duty cycle: do not wake the shield, on_up comes when it may be tried again */
+  }
   bool lte_ok = want != LPWAN_TECH_LTE || lte_nb == (r == sensei_Radio_RADIO_NBIOT);
   bool ok = link_up && sm.state == LPWAN_ST_CONNECTED && sm.tech == want && lte_ok && !atomic_get(&sending);
 
@@ -1054,7 +1201,12 @@ int sensei_lpwan_radio_send(sensei_Radio r, const uint8_t *chunk, size_t len, vo
     const struct sensei_lpwan_config st = cfg_get();
 
     if (len > lpwan_lora_max_payload(st.lora_dr, st.lora_adr)) {
-      return -EINVAL; /* never fits; what the LR1121 can take now is checked on the nRF9151 (-EMSGSIZE) */
+      /* The data rate was lowered after the message was chunked: chunk it again (the nRF9151 checks what the LR1121
+       * takes now and answers -EMSGSIZE the same way). */
+      return -EMSGSIZE;
+    }
+    if (sensei_lpwan_lora_retry_after_ms() != 0) {
+      return -EAGAIN; /* the shield refused a send for the duty cycle; on_up comes when it may be tried again */
     }
   }
   if (!atomic_cas(&sending, 0, 1)) {
@@ -1093,6 +1245,7 @@ int sensei_lpwan_init(const struct sensei_lpwan_hooks *h, const struct sensei_lp
   k_mutex_init(&bus_lock);
   k_work_init(&flush_work, flush_fn);
   k_work_init(&send_done_work, send_done_fn);
+  k_work_init_delayable(&retry_work, retry_fn);
   k_work_init(&time_item.work, time_work);
   lpwan_sm_init(&sm);
   lpwan_master_init(&master, &mops, NULL);

@@ -97,13 +97,28 @@ uint32_t sensei_lpwan_lora_mtu(void);
 
 /**
  * Send one chunk (at most the MTU of the radio). done(err, user) runs on hooks.wq when it is out or
- * failed (-EMSGSIZE: it does not fit the next LoRa uplink). Returns -EBUSY while a send is in flight, -EINVAL for
- * a bad length. A LoRa chunk can take minutes to go out: the LR1121 holds it back for the duty cycle (277 s after a
- * full chunk at DR0). done() comes when the nRF9151 reports it or after the time it announced (at most 10 min and
- * a few seconds), so the caller must not time the chunk out earlier. The shield stays on meanwhile.
+ * failed. Returns -EBUSY while a send is in flight, -EINVAL for a bad length, -EMSGSIZE for a LoRa chunk above the
+ * nominal size of the data rate now (it was lowered after the message was chunked), -EAGAIN while LoRa sends are
+ * refused for the duty cycle (see below).
+ *
+ * done(-EMSGSIZE): the chunk does not fit the next LoRa uplink. Read sensei_lpwan_lora_mtu() again; if it is smaller
+ * than the chunk, chunk the message again. done(-EAGAIN): the LR1121 would hold the frame back for longer than a send
+ * may take (10 min), so the nRF9151 refused it before queueing. Do not count it as a failure: keep the message.
+ * on_up(RADIO_LORA) comes when a send may be tried again (sensei_lpwan_lora_retry_after_ms() says when);
+ * sensei_lpwan_radio_ready() is false until then.
+ *
+ * A LoRa chunk can take minutes to go out: the LR1121 holds it back for the duty cycle (277 s after a full chunk at
+ * DR0), and repeats it NbTrans times (and once more if confirmed). The nRF9151 estimates the time; done() comes when
+ * it reports the result, or after the estimate plus a margin. If the LR1121 still holds the frame then, the client
+ * waits once more (and the nRF9151 resets the LR1121 after twice the estimate), so the caller must not time the chunk
+ * out earlier than LPWAN_SEND_MAX_MS plus a minute. The shield stays on meanwhile. A chunk that is sent again while
+ * the LR1121 still holds it is not sent twice: the client waits for the first one's result.
  */
 int sensei_lpwan_radio_send(sensei_Radio radio, const uint8_t *chunk, size_t len, void (*done)(int err, void *user),
                             void *user);
+
+/** Time until LoRa sends are accepted again after a refusal for the duty cycle, ms; 0: now. */
+uint32_t sensei_lpwan_lora_retry_after_ms(void);
 
 /**
  * Provision LoRaWAN keys (from the shell or the host link); never stored in git. The keys are

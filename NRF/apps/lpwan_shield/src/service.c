@@ -33,28 +33,58 @@ static K_MUTEX_DEFINE(sm_lock);
 
 /*
  * A send that gets no tx_done is ended with tx_done(failed), so the state machine leaves SENDING (the backend or
- * the modem may hang). The limit is the time the backend expects (LoRa: the duty-cycle wait of the LR1121 plus
- * airtime) plus 5 s, at most LPWAN_SEND_MAX_MS (10 min); without an estimate CONFIG_LPWAN_SHIELD_SEND_TIMEOUT_S.
- * The master waits longer.
+ * the modem may hang). The limit is the time the backend expects (LoRa: the duty-cycle wait of the LR1121, the
+ * transmissions and their receive windows) plus 5 s, at most LPWAN_SEND_MAX_MS (10 min); without an estimate
+ * CONFIG_LPWAN_SHIELD_SEND_TIMEOUT_S. The master waits longer.
  *
- * Each send has one tx_done: the first one wins. A real result that comes after the watchdog fired is logged and
- * dropped. send_open_seq is the seq of the send that still waits for its result, 0: none (under sm_lock).
+ * While the LR1121 still holds the frame the send is not failed at the limit: the frame would go out later and a
+ * retry would send it twice. The watchdog looks again, and resets the LR1121 after twice the limit (the frame is
+ * dropped, the send ends with tx_done(failed)). Each send has one tx_done: the first one wins. A real result that
+ * comes when no send waits for it is kept for the status (late_tx_seq), once.
+ * The send in flight is in `txt` (under sm_lock). The watchdog acts only for the send it was armed for.
  */
 #define SEND_WD_EXTRA_MS 5000U
 
 static struct k_work_delayable send_wd;
-static uint32_t send_open_seq;
+static struct lpwan_txtrack txt;
+
+static bool backend_holds_frame(uint32_t seq) {
+#ifdef CONFIG_LPWAN_SHIELD_LORA
+  return sm.tech == LPWAN_TECH_LORA && lora_holds_send(seq);
+#else
+  ARG_UNUSED(seq);
+  return false;
+#endif
+}
 
 static void send_wd_fn(struct k_work *w) {
-  uint32_t seq;
+  enum lpwan_wd_action act;
+  uint32_t seq, rearm_ms;
 
   ARG_UNUSED(w);
   k_mutex_lock(&sm_lock, K_FOREVER);
-  seq = send_open_seq;
+  act = lpwan_txt_wd(&txt, k_uptime_get_32(), backend_holds_frame(txt.open_seq), &seq, &rearm_ms);
   k_mutex_unlock(&sm_lock);
-  if (seq != 0) {
+  switch (act) {
+  case LPWAN_WD_NONE:
+    break;
+  case LPWAN_WD_WAIT:
+    if (rearm_ms > 0) {
+      LOG_WRN("send %u: the LR1121 still holds the frame", (unsigned)seq);
+      (void)k_work_reschedule(&send_wd, K_MSEC(rearm_ms));
+    }
+    break;
+  case LPWAN_WD_FAIL:
     LOG_WRN("send %u: no result from the backend", (unsigned)seq);
     svc_emit_tx_done(seq, false, 0, 0);
+    break;
+  case LPWAN_WD_RESET:
+#ifdef CONFIG_LPWAN_SHIELD_LORA
+    if (!lora_reset_stuck()) {
+      (void)k_work_reschedule(&send_wd, K_SECONDS(1)); /* the worker queue is full: try again */
+    }
+#endif
+    break;
   }
 }
 
@@ -64,12 +94,13 @@ static void send_wd_fn(struct k_work *w) {
  * leave the two machines apart. State events have reserved queue slots (link_slave.h), so this is rare. */
 void svc_emit(const sensei_LpwanEvent *evt) {
   k_mutex_lock(&sm_lock, K_FOREVER);
-  if (evt->which_body == sensei_LpwanEvent_tx_done_tag && (send_open_seq == 0 || evt->tx_done.seq != send_open_seq)) {
-    LOG_WRN("tx_done for seq %u dropped: the send has its result already", (unsigned)evt->tx_done.seq);
+  if (evt->which_body == sensei_LpwanEvent_tx_done_tag && !lpwan_txt_wants(&txt, evt->tx_done.seq)) {
+    LOG_WRN("tx_done for seq %u: no send waits for it, kept for the status", (unsigned)evt->tx_done.seq);
+    lpwan_txt_late(&txt, evt->tx_done.seq, evt->tx_done.ok);
   } else if (link_push_event(evt) == 0) {
     lpwan_sm_event(&sm, evt);
     if (evt->which_body == sensei_LpwanEvent_tx_done_tag) {
-      send_open_seq = 0;
+      lpwan_txt_done(&txt, evt->tx_done.seq);
       (void)k_work_cancel_delayable(&send_wd);
     }
   } else {
@@ -167,10 +198,23 @@ static void fill_status(sensei_LpwanResponse *r) {
 #ifdef CONFIG_LPWAN_SHIELD_LORA
   lora_fill_status(&r->status);
 #endif
+  k_mutex_lock(&sm_lock, K_FOREVER);
+  if (lpwan_txt_take_late(&txt, &r->status.late_tx_seq, &r->status.late_tx_ok)) {
+    LOG_INF("status: late result of send %u (%s)", (unsigned)r->status.late_tx_seq,
+            r->status.late_tx_ok ? "ok" : "failed");
+  }
+  k_mutex_unlock(&sm_lock);
 }
 
+/* What a send tells the master (SendInfo). */
+struct send_answer {
+  uint32_t expected_ms;
+  uint32_t next_max;
+  uint32_t queued_seq;
+};
+
 /* Run a backend action for a request the state machine accepted. If it refuses, undo the state. */
-static sensei_LpwanResult run(const sensei_LpwanRequest *req, uint32_t *send_expected_ms, uint32_t *send_next_max) {
+static sensei_LpwanResult run(const sensei_LpwanRequest *req, struct send_answer *ans) {
   switch (req->which_body) {
   case sensei_LpwanRequest_lte_configure_tag:
 #ifdef CONFIG_LPWAN_SHIELD_LTE
@@ -207,15 +251,20 @@ static sensei_LpwanResult run(const sensei_LpwanRequest *req, uint32_t *send_exp
 
     if (s->radio == sensei_Radio_RADIO_LORA) {
 #ifdef CONFIG_LPWAN_SHIELD_LORA
-      return lora_send(req->seq, s->port, s->confirmed, s->payload.bytes, s->payload.size, send_expected_ms,
-                       send_next_max);
+      {
+        struct lora_send_info li;
+        sensei_LpwanResult r = lora_send(req->seq, s->port, s->confirmed, s->payload.bytes, s->payload.size, &li);
+
+        ans->expected_ms = li.expected_ms;
+        ans->next_max = li.next_max;
+        ans->queued_seq = li.queued_seq;
+        return r;
+      }
 #else
       return backend_off();
 #endif
     }
 #ifdef CONFIG_LPWAN_SHIELD_LTE
-    *send_expected_ms = 0; /* no estimate */
-    *send_next_max = 0;
     return lte_send(req->seq, s->port, s->payload.bytes, s->payload.size);
 #else
     return backend_off();
@@ -261,9 +310,18 @@ static sensei_LpwanResult run(const sensei_LpwanRequest *req, uint32_t *send_exp
   }
 }
 
+static void fill_send_answer(sensei_LpwanResponse *rsp, const struct send_answer *a) {
+  rsp->which_payload = sensei_LpwanResponse_send_tag;
+  rsp->send.expected_ms = a->expected_ms;
+  rsp->send.next_max_payload = a->next_max;
+  rsp->send.queued_seq = a->queued_seq;
+}
+
 static void on_request(struct link_slave *s, const sensei_LpwanRequest *req, void *user) {
   sensei_LpwanResponse rsp = sensei_LpwanResponse_init_zero;
   sensei_LpwanResult res;
+  bool is_send = req->which_body == sensei_LpwanRequest_send_tag;
+  struct send_answer ans = {0};
 
   ARG_UNUSED(s);
   ARG_UNUSED(user);
@@ -282,43 +340,50 @@ static void on_request(struct link_slave *s, const sensei_LpwanRequest *req, voi
     } else if (req->which_body == sensei_LpwanRequest_get_status_tag) {
       fill_status(&rsp);
     } else {
-      bool is_send = req->which_body == sensei_LpwanRequest_send_tag;
-      uint32_t expected_ms = 0, next_max = 0;
-
       if (is_send) {
         k_mutex_lock(&sm_lock, K_FOREVER);
-        send_open_seq = req->seq; /* the backend may answer at once */
+        lpwan_txt_open(&txt, req->seq); /* the backend may answer at once */
         k_mutex_unlock(&sm_lock);
       }
-      res = run(req, &expected_ms, &next_max);
+      res = run(req, &ans);
       if (res != sensei_LpwanResult_LPWAN_OK) {
         /* The backend refused: undo what the admission started, unless events moved it on. */
         k_mutex_lock(&sm_lock, K_FOREVER);
         lpwan_sm_revert(&sm, &before, &admitted);
         if (is_send) {
-          send_open_seq = 0;
+          lpwan_txt_refused(&txt, req->seq);
         }
         k_mutex_unlock(&sm_lock);
-        if (is_send && next_max != 0) {
-          rsp.which_payload = sensei_LpwanResponse_send_tag; /* too long: say what fits */
-          rsp.send.next_max_payload = next_max;
+        if (is_send && (ans.next_max != 0 || ans.expected_ms != 0 || ans.queued_seq != 0)) {
+          fill_send_answer(&rsp, &ans); /* too long: what fits; busy: when */
         }
       } else if (is_send) {
         /* Start the watchdog unless the result is in already (tx_done during run()). */
+        uint32_t limit =
+            lpwan_send_limit_ms(ans.expected_ms, CONFIG_LPWAN_SHIELD_SEND_TIMEOUT_S * 1000U, SEND_WD_EXTRA_MS);
+
         k_mutex_lock(&sm_lock, K_FOREVER);
-        if (send_open_seq == req->seq) {
-          (void)k_work_reschedule(
-              &send_wd,
-              K_MSEC(lpwan_send_limit_ms(expected_ms, CONFIG_LPWAN_SHIELD_SEND_TIMEOUT_S * 1000U, SEND_WD_EXTRA_MS)));
+        if (lpwan_txt_armed(&txt, req->seq, k_uptime_get_32(), limit)) {
+          (void)k_work_reschedule(&send_wd, K_MSEC(limit));
         }
         k_mutex_unlock(&sm_lock);
-        rsp.which_payload = sensei_LpwanResponse_send_tag;
-        rsp.send.expected_ms = expected_ms;
-        rsp.send.next_max_payload = next_max;
+        fill_send_answer(&rsp, &ans);
       }
     }
   } else {
     k_mutex_unlock(&sm_lock);
+    if (is_send && res == sensei_LpwanResult_LPWAN_BUSY && sm.tech == LPWAN_TECH_LORA) {
+      /* A send is open (the client gave up on it, or lost track): say which frame the LR1121 holds. */
+#ifdef CONFIG_LPWAN_SHIELD_LORA
+      uint32_t held_seq, left_ms;
+
+      if (lora_held(&held_seq, &left_ms)) {
+        ans.queued_seq = held_seq;
+        ans.expected_ms = left_ms;
+        fill_send_answer(&rsp, &ans);
+      }
+#endif
+    }
   }
   rsp.result = res;
   LOG_DBG("request %u tag %u -> %d (state %s, tech %s)", (unsigned)req->seq, (unsigned)req->which_body, (int)res,
@@ -328,6 +393,7 @@ static void on_request(struct link_slave *s, const sensei_LpwanRequest *req, voi
 
 int service_start(void) {
   lpwan_sm_init(&sm);
+  lpwan_txt_init(&txt);
   k_work_init_delayable(&send_wd, send_wd_fn);
   return link_start(on_request, NULL);
 }

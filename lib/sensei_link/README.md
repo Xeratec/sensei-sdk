@@ -48,7 +48,7 @@ python3 -m venv <venv> && <venv>/bin/pip install protobuf grpcio-tools     # onc
 NANOPB_GENERATOR="<venv>/bin/python third_party/nanopb/generator/nanopb_generator.py" scripts/generate.sh
 ```
 
-`scripts/generate.sh --check` fails if the files are out of date. An app that has more schemas runs its own generator
+`scripts/generate.sh --check` fails if the files are out of date (exit 77, a skip for ctest, if the generator cannot run). An app that has more schemas runs its own generator
 with `-I <sdk>/lib/sensei_link/proto` (the node: `firmware/proto/generate.sh`, which also calls this script).
 
 ## Rules for changes

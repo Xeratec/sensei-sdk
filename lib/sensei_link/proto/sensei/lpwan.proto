@@ -120,6 +120,10 @@ message LpwanStatus {
   sint32 snr_db = 4;
   uint32 queued = 5;         // messages waiting to be sent
   uint32 dropped_events = 6; // events the shield could not queue since start (queue full)
+  // queued is 1 while the LR1121 holds a LoRa frame (a send is open, or one was given up): the client keeps the
+  // shield powered. late_tx_*: the result of a send that had no result event (it was given up), reported once.
+  uint32 late_tx_seq = 7; // seq of that send, 0: none
+  bool late_tx_ok = 8;
 }
 
 message NetworkTime {
@@ -135,6 +139,10 @@ message SendInfo {
   // LoRa: payload bytes the LR1121 takes in the next uplink (MAC answers it owes are counted), 0: not known. Also in
   // the answer to a send that was refused as too long (result LPWAN_INVALID), so the client can chunk again.
   uint32 next_max_payload = 2;
+  // Only with result LPWAN_BUSY. LoRa: seq of the earlier send whose frame the LR1121 still holds (its tx_done comes
+  // under that seq); expected_ms is the time left for it. 0: no such frame; expected_ms is then the time after which a
+  // new send may be accepted (the duty-cycle wait is longer than a send may take, or MAC answers are being flushed).
+  uint32 queued_seq = 3;
 }
 
 message LpwanResponse {

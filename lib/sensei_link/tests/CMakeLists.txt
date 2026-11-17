@@ -28,7 +28,10 @@ foreach(t test_framing test_pb)
   add_test(NAME ${t} COMMAND ${t})
 endforeach()
 
-# The committed generated files must match the .proto files. Needs NANOPB_GENERATOR (see scripts/generate.sh).
-if(DEFINED ENV{NANOPB_GENERATOR})
-  add_test(NAME generated_current COMMAND ${SENSEI_LINK_DIR}/scripts/generate.sh --check)
+# The committed generated files must match the .proto files. The generator is NANOPB_GENERATOR or the one of the
+# nanopb submodule (see scripts/generate.sh); if it cannot run (no protobuf or grpcio-tools) the test is skipped.
+find_program(SENSEI_BASH bash)
+if(SENSEI_BASH)
+  add_test(NAME generated_current COMMAND ${SENSEI_BASH} ${CMAKE_CURRENT_LIST_DIR}/../scripts/generate.sh --check)
+  set_tests_properties(generated_current PROPERTIES SKIP_RETURN_CODE 77)
 endif()

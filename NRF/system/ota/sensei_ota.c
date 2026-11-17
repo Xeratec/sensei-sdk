@@ -7,6 +7,7 @@
  */
 
 #include <zephyr/dfu/mcuboot.h>
+#include <zephyr/init.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/mgmt/mcumgr/mgmt/callbacks.h>
 #include <zephyr/storage/flash_map.h>
@@ -50,6 +51,17 @@ static struct mgmt_callback smp_request_hook = {
     .callback = smp_request_cb,
     .event_id = MGMT_EVT_OP_CMD_RECV,
 };
+
+/* Register the hook at boot, not in sensei_ota_init() at the end of the app's main(): a request that comes earlier
+ * (a host that is already connected) counts too. The hook does nothing on a confirmed image. */
+static int smp_hook_init(void) {
+  if (IS_ENABLED(CONFIG_SENSEI_OTA_CONFIRM_NEEDS_LINK)) {
+    mgmt_callback_register(&smp_request_hook);
+  }
+  return 0;
+}
+
+SYS_INIT(smp_hook_init, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);
 
 enum sensei_ota_state sensei_ota_state(void) {
   return boot_is_img_confirmed() ? SENSEI_OTA_CONFIRMED : SENSEI_OTA_TRIAL;
@@ -156,9 +168,6 @@ int sensei_ota_init(sensei_ota_check_fn check) {
   }
   LOG_WRN("image is on trial: confirm within %d s or it reverts", CONFIG_SENSEI_OTA_TRIAL_TIMEOUT_S);
   k_work_init_delayable(&trial_work, trial_fn);
-  if (IS_ENABLED(CONFIG_SENSEI_OTA_CONFIRM_NEEDS_LINK)) {
-    mgmt_callback_register(&smp_request_hook);
-  }
   k_work_schedule(&trial_work, K_SECONDS(CHECK_PERIOD_S));
   return 0;
 }

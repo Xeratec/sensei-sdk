@@ -36,7 +36,8 @@ nRF5340 (master)                          nRF9151 (slave)
   runs them (not `on_error` and `on_power`). `on_power(bool on)`: the shield's 3.3 V went on or off, once per real change,
   on the client thread, short and non-blocking (the charge counter of the node times the shield with it). A bring-up that
   fails calls on, then off after the boot timeout.
-- `sensei_lpwan_radio_ready()` and `sensei_lpwan_radio_send()`: what an app registers as its uplink radios.
+- `sensei_lpwan_radio_ready()` and `sensei_lpwan_radio_send()`: what an app registers as its uplink radios (in a
+  `struct uplink_radio` of [`sensei_uplink`](../sensei_uplink/README.md), the scheduler that queues, chunks and retries).
   MTU: LTE `SENSEI_LPWAN_MTU_LTE` 1024 B; LoRa `sensei_lpwan_lora_mtu()`, from the data rate (EU868: DR0 to DR2 51 B, DR3
   115 B, DR4 and up 222 B, no MAC commands in FOpts). With ADR the network may lower the rate: 51 B. After every send the
   nRF9151 reports what the LR1121 takes in the next uplink (MAC answers it still owes use room): if that is less,

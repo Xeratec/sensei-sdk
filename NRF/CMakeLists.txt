@@ -26,6 +26,7 @@ add_subdirectory_ifdef(CONFIG_SENSEI_SENSOR_MATH ${CMAKE_CURRENT_LIST_DIR}/../li
 add_subdirectory_ifdef(CONFIG_SENSEI_PWR_MATH ${CMAKE_CURRENT_LIST_DIR}/../lib/sensei_pwr_math/zephyr sensei_pwr_math)
 add_subdirectory_ifdef(CONFIG_SENSEI_DIAG_CODEC ${CMAKE_CURRENT_LIST_DIR}/../lib/sensei_diag/zephyr sensei_diag)
 add_subdirectory_ifdef(CONFIG_SENSEI_CHARGE ${CMAKE_CURRENT_LIST_DIR}/../lib/sensei_charge/zephyr sensei_charge)
+add_subdirectory_ifdef(CONFIG_SENSEI_UPLINK ${CMAKE_CURRENT_LIST_DIR}/../lib/sensei_uplink/zephyr sensei_uplink)
 
 target_include_directories_ifdef(CONFIG_SENSEI app PRIVATE
     system

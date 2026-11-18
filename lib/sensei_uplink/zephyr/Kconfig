@@ -1,0 +1,45 @@
+# SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+# SPDX-License-Identifier: Apache-2.0
+#
+# Authors:
+# - Philip Wiese <wiesep@iis.ee.ethz.ch>
+
+menuconfig SENSEI_UPLINK
+	bool "Uplink scheduler: queues, chunks per radio, retries, deferral, downlink receive"
+	select SENSEI_LINK
+	help
+	  Pure logic of lib/sensei_uplink: two byte-bounded queues (alerts and status, data), fragmentation to the
+	  chunk size of a radio, completion-driven sending with retries and deferral rules, and the receive side of
+	  a radio downlink. The app brings the radios (struct uplink_radio), the clock and the queue memory.
+	  See lib/sensei_uplink/README.md.
+
+if SENSEI_UPLINK
+
+config SENSEI_UPLINK_MAX_MSG
+	int "Largest message in the uplink queues, bytes"
+	default 2144
+	range 64 4096
+	help
+	  A longer message is refused (-EINVAL). Sets the size of the work buffer in struct uplink_sched. The node: the
+	  largest encoded Uplink, sealed (34 B more) or not.
+
+config SENSEI_UPLINK_PREPARE_ROOM
+	int "Room in the work buffer for what us_ops.prepare adds to a message, bytes"
+	default 9
+	range 0 256
+	help
+	  The node adds Uplink.node_id in front of a plain Uplink for LTE: tag and 8 bytes.
+
+config SENSEI_UPLINK_MAX_MTU
+	int "Largest chunk of any radio, bytes"
+	default 1024
+	range 16 1500
+	help
+	  A radio with a larger mtu is refused when a message starts. LTE: 1024 B.
+
+config SENSEI_UPLINK_MAX_RADIOS
+	int "Radios that can be registered"
+	default 4
+	range 1 16
+
+endif # SENSEI_UPLINK

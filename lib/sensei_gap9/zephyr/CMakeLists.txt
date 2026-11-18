@@ -16,6 +16,8 @@ zephyr_library_sources_ifdef(CONFIG_SENSEI_GAP9_SHELL ${SENSEI_GAP9_DIR}/zephyr/
 zephyr_library_sources_ifdef(CONFIG_SENSEI_GAP9_OTA
   ${SENSEI_GAP9_DIR}/src/g9ota_flow.c
   ${SENSEI_GAP9_DIR}/zephyr/gap9_ota.c)
+# Recovery: the codec of the recovery jobs
+zephyr_library_sources_ifdef(CONFIG_SENSEI_GAP9_RECOVERY ${SENSEI_GAP9_DIR}/src/g9rec_codec.c)
 zephyr_include_directories(${SENSEI_GAP9_DIR}/include)
 zephyr_library_include_directories(${SENSEI_GAP9_DIR}/zephyr)
 # "pwr/pwr.h" (gap9_pwr) of the SDK system module

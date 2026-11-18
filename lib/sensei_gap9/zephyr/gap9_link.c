@@ -22,6 +22,7 @@
 
 #include "gap9_priv.h"
 #include "sensei_busarb/bus_arb.h"
+#include "sensei_gap9/g9rec.h"
 #include "sensei_gap9/gap9_zephyr.h"
 
 LOG_MODULE_REGISTER(gap9, CONFIG_SENSEI_GAP9_LOG_LEVEL);
@@ -34,6 +35,11 @@ static const struct gpio_dt_spec i2c_sel = GPIO_DT_SPEC_GET(DT_ALIAS(gap9_i2c_se
 #ifdef CONFIG_SENSEI_GAP9_OTA
 static const struct gpio_dt_spec slot_sel = GPIO_DT_SPEC_GET(DT_ALIAS(gap9_slot_sel), gpios);
 #endif /* CONFIG_SENSEI_GAP9_OTA */
+#ifdef CONFIG_SENSEI_GAP9_RECOVERY_STRAP
+static const struct gpio_dt_spec strap_sel = GPIO_DT_SPEC_GET(DT_ALIAS(gap9_recovery), gpios);
+static atomic_t strap_next; /* the next power-up has the strap high */
+static bool strap_active;   /* the strap is high now (link thread) */
+#endif
 #ifdef CONFIG_SENSEI_GAP9_SHARED_GPIOS
 static const struct gpio_dt_spec shared_sel = GPIO_DT_SPEC_GET(DT_ALIAS(gap9_shared_sel), gpios);
 #endif
@@ -49,6 +55,11 @@ static struct k_work spi_work;
 static struct k_work_delayable submit_work;
 static struct k_work shutdown_work;
 static struct k_work reset_work;
+#ifdef CONFIG_SENSEI_GAP9_RECOVERY
+static struct k_work_delayable reprobe_work;
+static bool reprobe_scheduled; /* link thread */
+static void reprobe_handler(struct k_work *w);
+#endif
 #ifdef CONFIG_SENSEI_GAP9_OTA
 static struct k_work reboot_work;
 static struct k_work reboot_done_work;
@@ -161,8 +172,27 @@ static void spis_ensure_armed(void) {
 }
 
 /* After every handler: SPIS armed again, then the trigger line may go high. */
+#ifdef CONFIG_SENSEI_GAP9_RECOVERY
+/* While GAP9 is in recovery the link looks again every REPROBE_H hours. */
+static void reprobe_arm(void) {
+  if (g9_recovery(&core, NULL) && !reprobe_scheduled) {
+    reprobe_scheduled = true;
+    k_work_reschedule_for_queue(&link_wq, &reprobe_work, K_HOURS(CONFIG_SENSEI_GAP9_RECOVERY_REPROBE_H));
+  }
+}
+#endif
+
 static void link_sync(void) {
   bus_sync();
+#ifdef CONFIG_SENSEI_GAP9_RECOVERY_STRAP
+  if (strap_active && core.state == G9_RUN) { /* the HELLO came: the SSBL has read the strap long ago */
+    gpio_pin_set_dt(&strap_sel, 0);
+    strap_active = false;
+  }
+#endif
+#ifdef CONFIG_SENSEI_GAP9_RECOVERY
+  reprobe_arm();
+#endif
   if (core.state == G9_OFF || core.state == G9_CYCLE) {
     return;
   }
@@ -187,10 +217,19 @@ static void op_power(bool on) {
      * SSBL reads it after ROM and FSBL, many milliseconds later. */
     gpio_pin_set_dt(&slot_sel, atomic_get(&boot_slot) != 0);
 #endif
+#ifdef CONFIG_SENSEI_GAP9_RECOVERY_STRAP
+    /* The strap too only with the rail on; the SSBL reads pad 57 right after the slot line. */
+    strap_active = atomic_set(&strap_next, 0) != 0;
+    gpio_pin_set_dt(&strap_sel, strap_active);
+#endif
   } else {
     gap9_pwr(false);
 #ifdef CONFIG_SENSEI_GAP9_OTA
     gpio_pin_set_dt(&slot_sel, 0); /* never drive the pad of an unpowered GAP9 */
+#endif
+#ifdef CONFIG_SENSEI_GAP9_RECOVERY_STRAP
+    gpio_pin_set_dt(&strap_sel, 0);
+    strap_active = false;
 #endif
     gap9_spi_bus(false);
     gpio_pin_set_dt(&i2c_sel, 0);
@@ -375,6 +414,7 @@ static void timer_handler(struct k_work *w) {
 struct stage {
   g9_done_fn done;
   void *user;
+  bool rec; /* a recovery job */
 };
 /* The link thread (higher priority) moves a staged job into the core queue at once. It stays
  * when the job waits for SPI_A or LTE (bus_take()) or for a free queue entry. */
@@ -421,7 +461,12 @@ static void submit_handler(struct k_work *w) {
       return;
     } else {
       bus_wait_since = 0;
+#ifdef CONFIG_SENSEI_GAP9_RECOVERY
+      ret = s->rec ? g9_submit_recovery(&core, stage_job(stage_tail), s->done, s->user)
+                   : g9_submit(&core, stage_job(stage_tail), s->done, s->user);
+#else
       ret = g9_submit(&core, stage_job(stage_tail), s->done, s->user);
+#endif
     }
     if (ret != 0) {
       report_error();
@@ -535,6 +580,9 @@ int gap9_link_init(const struct gap9_link_cfg *cfg) {
 #ifdef CONFIG_SENSEI_GAP9_OTA
       &slot_sel,
 #endif
+#ifdef CONFIG_SENSEI_GAP9_RECOVERY_STRAP
+      &strap_sel,
+#endif
 #ifdef CONFIG_SENSEI_GAP9_SHARED_GPIOS
       &shared_sel,
 #endif
@@ -563,12 +611,20 @@ int gap9_link_init(const struct gap9_link_cfg *cfg) {
   };
 
   g9_init(&core, &ops, cfg->codec, &gcfg, cfg->storage.jobs, cfg->storage.result);
+#ifdef CONFIG_SENSEI_GAP9_RECOVERY
+  if (g9_set_recovery(&core, &g9rec_codec) != 0) {
+    return -EINVAL; /* the app's job or result struct is smaller than a recovery job */
+  }
+#endif
   k_work_queue_start(&link_wq, link_stack, K_THREAD_STACK_SIZEOF(link_stack), CONFIG_SENSEI_GAP9_THREAD_PRIORITY, NULL);
   k_thread_name_set(&link_wq.thread, "gap9");
   k_work_init(&spi_work, spi_handler);
   k_work_init_delayable(&submit_work, submit_handler);
   k_work_init(&shutdown_work, shutdown_handler);
   k_work_init(&reset_work, reset_handler);
+#ifdef CONFIG_SENSEI_GAP9_RECOVERY
+  k_work_init_delayable(&reprobe_work, reprobe_handler);
+#endif
 #ifdef CONFIG_SENSEI_GAP9_OTA
   k_work_init(&reboot_work, reboot_handler);
   k_work_init(&reboot_done_work, reboot_done_handler);
@@ -593,11 +649,67 @@ int gap9_link_submit(const void *job, g9_done_fn done, void *user) {
   memcpy(stage_job(stage_head), job, lcfg->codec->job_size); /* a few microseconds */
   s->done = done;
   s->user = user;
+  s->rec = false;
   stage_head++;
   k_spin_unlock(&stage_lock, k);
   k_work_reschedule_for_queue(&link_wq, &submit_work, K_NO_WAIT);
   return 0;
 }
+
+#ifdef CONFIG_SENSEI_GAP9_RECOVERY
+int gap9_link_submit_recovery(const void *job, g9_done_fn done, void *user) {
+  k_spinlock_key_t k = k_spin_lock(&stage_lock);
+
+  if (stage_head - stage_tail >= STAGE_DEPTH) {
+    k_spin_unlock(&stage_lock, k);
+    return -ENOMEM;
+  }
+  struct stage *s = &stages[stage_head % STAGE_DEPTH];
+
+  memcpy(stage_job(stage_head), job, sizeof(sensei_Gap9RecoveryJob));
+  s->done = done;
+  s->user = user;
+  s->rec = true;
+  stage_head++;
+  k_spin_unlock(&stage_lock, k);
+  k_work_reschedule_for_queue(&link_wq, &submit_work, K_NO_WAIT);
+  return 0;
+}
+
+bool gap9_link_recovery(uint32_t *reason) { return g9_recovery(&core, reason); }
+
+/* The look: GAP9 needs SPI_A like for a job; if it is busy, try again in a minute. */
+static void reprobe_handler(struct k_work *w) {
+  ARG_UNUSED(w);
+  if (!g9_recovery(&core, NULL)) {
+    reprobe_scheduled = false;
+    return;
+  }
+  if (!bus_held && !bus_take()) {
+    k_work_reschedule_for_queue(&link_wq, &reprobe_work, K_SECONDS(60));
+    return;
+  }
+  reprobe_scheduled = false;
+  g9_reprobe(&core);
+  link_sync();
+}
+
+void gap9_link_reprobe(void) {
+  if (link_ready) {
+    k_work_reschedule_for_queue(&link_wq, &reprobe_work, K_NO_WAIT);
+    reprobe_scheduled = true;
+  }
+}
+
+int gap9_link_force_recovery(void) {
+#ifdef CONFIG_SENSEI_GAP9_RECOVERY_STRAP
+  atomic_set(&strap_next, 1);
+  return 0;
+#else
+  return -ENOTSUP;
+#endif
+}
+#endif /* CONFIG_SENSEI_GAP9_RECOVERY */
 
 bool gap9_link_busy(void) { return g9_busy(&core) || stage_head != stage_tail; }
 

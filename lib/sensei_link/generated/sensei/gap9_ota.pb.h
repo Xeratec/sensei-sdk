@@ -181,8 +181,9 @@ typedef struct _sensei_Gap9OtaReply {
     bool has_slot_b;
     sensei_Gap9Slot slot_b;
     uint32_t slot_size; /* bytes a slot holds: the largest image */
-    /* GAP9 is in recovery: its boot loader found no bootable slot (or was forced) and runs the update writer. `booted_slot`
- is the slot it keeps (the confirmed one), the transfer goes into the other. 1: both slots failed, 2: forced. */
+    /* GAP9 is in recovery: its boot loader found no bootable slot (or was forced) and runs the update writer.
+ `booted_slot` is the slot it keeps (the confirmed one), the transfer goes into the other. 1: both slots failed, 2:
+ forced. */
     bool recovery;
     uint32_t recovery_reason;
 } sensei_Gap9OtaReply;

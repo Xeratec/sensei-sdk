@@ -30,6 +30,11 @@
 SENSEI_PB_DECLARE(Gap9RecoveryJob)
 SENSEI_PB_DECLARE(Gap9RecoveryResult)
 
+struct g9_codec;
+
+/** The codec of the recovery jobs for the nRF5340 link (src/g9rec_codec.c): g9_set_recovery(&g, &g9rec_codec). */
+extern const struct g9_codec g9rec_codec;
+
 struct g9rec {
   struct g9ota *o; /* the writer, set up by the caller with booted = keep */
   bool have_last;
@@ -39,6 +44,10 @@ struct g9rec {
 
 /** Serve `writer` (already g9ota_init()ed with the keep slot). */
 void g9rec_init(struct g9rec *r, struct g9ota *writer);
+
+/** The recovery job for a request of the update flow (what the nRF5340 glue sends; in g9rec_codec.c). Returns 0, or
+ * -EINVAL for an op that is no job. `seq` is left 0: the link numbers the jobs. */
+int g9rec_job_from_req(const struct g9ota_req *req, sensei_Gap9RecoveryJob *job);
 
 /** Decode a job frame payload (the signature of g9l_decode_fn). */
 bool g9rec_decode(const uint8_t *payload, size_t len, void *job);

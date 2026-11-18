@@ -139,6 +139,33 @@ int gap9_link_hold(bool on);
  */
 int gap9_link_reboot(uint8_t slot, void (*cb)(int err, const sensei_gap9_hello *hello, void *user), void *user);
 
+#ifdef CONFIG_SENSEI_GAP9_RECOVERY
+/**
+ * True while GAP9 is in recovery: its boot loader answered with the recovery HELLO and runs the update writer
+ * (PROTOCOL.md). `reason` (may be NULL): G9L_RECOVERY_BOTH_BAD or G9L_RECOVERY_FORCED. While it is true the app's jobs
+ * fail at once with -ENOEXEC and GAP9 is not powered for them. The link looks again every
+ * CONFIG_SENSEI_GAP9_RECOVERY_REPROBE_H hours.
+ */
+bool gap9_link_recovery(uint32_t *reason);
+
+/**
+ * Queue a recovery job (`const sensei_Gap9RecoveryJob *`, copied; gap9_ota.proto). The staging, the bus wait and the
+ * errors are those of gap9_link_submit(); `done` gets a `const sensei_Gap9RecoveryResult *`. -ENOEXEC (also through
+ * done): GAP9 runs its app.
+ */
+int gap9_link_submit_recovery(const void *job, g9_done_fn done, void *user);
+
+/** Power GAP9 up now to look whether it is still in recovery, instead of waiting for the next look. */
+void gap9_link_reprobe(void);
+
+/**
+ * With CONFIG_SENSEI_GAP9_RECOVERY_STRAP: the next power-up of GAP9 (gap9_link_reboot()) has the recovery strap high
+ * (P1.06 to pad 57), so that its boot loader enters recovery whatever the slots hold; the strap drops after the HELLO
+ * and with the power. Returns 0 or -ENOTSUP (no strap in this build). Untested on hardware.
+ */
+int gap9_link_force_recovery(void);
+#endif /* CONFIG_SENSEI_GAP9_RECOVERY */
+
 struct gap9_link_status {
   enum g9_state state;
   uint32_t errors;

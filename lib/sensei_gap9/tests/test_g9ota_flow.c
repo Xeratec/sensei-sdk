@@ -17,6 +17,8 @@
 #include "check.h"
 #include "g9ota_fake.h"
 #include "sensei_gap9/g9ota_flow.h"
+#include "sensei_gap9/g9rec.h"
+#include "sensei_gap9/gap9_link.h"
 #include "sensei_ota_image.h"
 
 /* ---- the fake GAP9 and its link ---- */
@@ -32,6 +34,15 @@ static struct {
   bool hello_bad; /* the HELLO has another major version */
   bool selftest_ok;
   int selftest_fails; /* the next self-tests fail, then they pass */
+  /* recovery: the boot loader runs when no slot boots (or the strap was high at power-up) */
+  struct g9rec rec;
+  bool rec_mode;    /* GAP9 runs the boot loader now */
+  bool rec_latched; /* the link knows it (the latch of gap9_core.c) */
+  uint32_t rec_reason;
+  bool strap_next;  /* the next power-up has the strap high */
+  bool strap_works; /* the SSBL reads the strap (else the app boots whatever the strap says) */
+  bool strap_wired; /* gap9_link_force_recovery() works (CONFIG_SENSEI_GAP9_RECOVERY_STRAP) */
+  int strap_calls;
   bool seal_timeout;  /* the next seal job times out (GAP9 loses power) */
   bool lie_slot;      /* the app reports the slot of the slot line, not the one the SSBL started (no
                          hand-off) */
@@ -85,11 +96,29 @@ static void gboot(uint8_t slot) {
   g.on = true;
   g.booted = first;
   g9ota_init(&tmp, &fake_ops, &g.mram, &lay, 0);
+  g.rec_mode = false;
   if (!g9ota_slot_info(&tmp, first, &si)) { /* the SSBL falls back to the other slot */
     g.booted = 1 - first;
+    if (!g9ota_slot_info(&tmp, g.booted, &si)) { /* none boots: the boot loader runs, keeping the slot line's slot */
+      g.rec_mode = true;
+      g.rec_reason = G9L_RECOVERY_BOTH_BAD;
+      g.booted = first;
+    }
   }
+  if (g.strap_next) { /* the strap is high at power-up: the SSBL enters recovery whatever the slots hold */
+    g.strap_next = false;
+    if (g.strap_works && !g.rec_mode) {
+      g.rec_mode = true;
+      g.rec_reason = G9L_RECOVERY_FORCED;
+      g.booted = first;
+    }
+  }
+  g.rec_latched = g.rec_latched && g.rec_mode;            /* an app HELLO clears the latch */
   g9ota_init(&g.ota, &fake_ops, &g.mram, &lay, g.booted); /* the RAM state of GAP9 starts again */
-  g9ota_boot_note(&g.ota);
+  g9rec_init(&g.rec, &g.ota);
+  if (!g.rec_mode) {
+    g9ota_boot_note(&g.ota);
+  }
 }
 
 /* Common start of a job of the fake GAP9: a job powers GAP9 as the link does (boot the slot line); a job that
@@ -122,7 +151,38 @@ static int f_job(const struct g9ota_req *req, g9ota_job_cb cb, void *user) {
   }
   memset(r, 0, sizeof(*r));
   g.job_err = job_start(req->op == G9OTA_OP_ABORT);
-  if (g.job_err == 0 && (g.not_built || g.bad_job)) {
+  if (g.job_err == 0 && g.rec_mode && !g.rec_latched) {
+    /* an app job reaches the boot loader: the HELLO makes the link latch recovery and the job fails */
+    g.rec_latched = true;
+    g.job_err = -ENOEXEC;
+  } else if (g.job_err == 0 && g.rec_mode) {
+    /* a recovery job, as the glue makes it: through the codec of the boot loader */
+    sensei_Gap9RecoveryJob j;
+    sensei_Gap9RecoveryResult rr;
+    uint8_t wire[sensei_Gap9RecoveryJob_size + 8];
+    int32_t n;
+
+    CHECK(g9rec_job_from_req(req, &j) == 0);
+    j.seq = (uint32_t)g.jobs;
+    n = sensei_encode_Gap9RecoveryJob(wire, sizeof(wire), &j);
+    CHECK(n > 0 && g9rec_decode(wire, (size_t)n, &j));
+    if (req->op == G9OTA_OP_SEAL) {
+      g.seals++;
+      if (g.seal_timeout) { /* GAP9 loses power before it answers */
+        g.seal_timeout = false;
+        g.on = false;
+        g.job_err = -ETIMEDOUT;
+        g.job_cb = cb;
+        g.job_user = user;
+        return 0;
+      }
+    }
+    CHECK(g9rec_run(&g.rec, &j, g.clock_ms, &rr) == 0);
+    *r = rr.info;
+    g.job_cb = cb;
+    g.job_user = user;
+    return 0;
+  } else if (g.job_err == 0 && (g.not_built || g.bad_job)) {
     /* a GAP9 build without the update, one that is not armed (NOT_BUILT), or an older firmware that does
      * not know the job (BAD_JOB): the app's glue maps both to -ENOTSUP */
     g.job_err = -ENOTSUP;
@@ -249,8 +309,29 @@ static int f_reboot(uint8_t slot, g9ota_reboot_cb cb, void *user) {
     g.rb_hello.minor = si.version.minor;
     g.rb_hello.patch = si.version.patch;
   }
+  if (g.rb_err == 0 && g.rec_mode) { /* the boot loader's HELLO: recovery, not the app */
+    g.rec_latched = true;
+    g.rb_err = -ENOEXEC;
+    g.rb_hello = (sensei_Version){G9L_RECOVERY_MAJOR, G9L_RECOVERY_PROTO, g.rec_reason, 0};
+  }
   g.rb_cb = cb;
   g.rb_user = user;
+  return 0;
+}
+
+static bool f_recovery(uint32_t *reason) {
+  if (reason != NULL) {
+    *reason = g.rec_latched ? g.rec_reason : 0;
+  }
+  return g.rec_latched;
+}
+
+static int f_force_recovery(void) {
+  g.strap_calls++;
+  if (!g.strap_wired) {
+    return -ENOTSUP;
+  }
+  g.strap_next = true;
   return 0;
 }
 
@@ -293,17 +374,30 @@ static int wakes; /* the flow asked for its housekeeping timer */
 
 static void f_wake(void) { wakes++; }
 
-static const struct g9ota_ops ops = {f_job, f_hold, f_reboot, f_set_slot, f_verify, f_persist, f_now, f_check, f_wake};
+static const struct g9ota_ops ops = {f_job, f_hold,  f_reboot, f_set_slot, f_verify, f_persist,
+                                     f_now, f_check, f_wake,   NULL,       NULL};
 /* an app without checks of its own: the check answers at once */
 static int f_nocheck(g9ota_check_cb cb, void *user) {
   cb(0, user);
   return 0;
 }
 
-static const struct g9ota_ops ops_nocheck = {f_job,     f_hold, f_reboot,  f_set_slot, f_verify,
-                                             f_persist, f_now,  f_nocheck, f_wake};
+static const struct g9ota_ops ops_nocheck = {f_job, f_hold,    f_reboot, f_set_slot, f_verify, f_persist,
+                                             f_now, f_nocheck, f_wake,   NULL,       NULL};
 /* trial_check and wake are optional */
-static const struct g9ota_ops ops_null = {f_job, f_hold, f_reboot, f_set_slot, f_verify, f_persist, f_now, NULL, NULL};
+static const struct g9ota_ops ops_null = {f_job, f_hold, f_reboot, f_set_slot, f_verify, f_persist,
+                                          f_now, NULL,   NULL,     NULL,       NULL};
+static const struct g9ota_ops ops_rec = {.job = f_job,
+                                         .hold = f_hold,
+                                         .reboot = f_reboot,
+                                         .set_slot = f_set_slot,
+                                         .verify = f_verify,
+                                         .persist = f_persist,
+                                         .now_ms = f_now,
+                                         .trial_check = f_check,
+                                         .wake = f_wake,
+                                         .recovery = f_recovery,
+                                         .force_recovery = f_force_recovery};
 static const struct g9ota_ops *cur_ops = &ops;
 
 static struct g9ota_flow flow;
@@ -1348,6 +1442,243 @@ static void test_deferred_seal(void) {
   CHECK(flow.trial.confirmed == 1);
 }
 
+/* ---- recovery: the boot loader runs the writer, the flow does the rest ---- */
+
+static void use_recovery_ops(bool strap) {
+  cur_ops = &ops_rec;
+  (void)strap;
+}
+
+/* A node with a confirmed slot 0 and both slots bad: the boot loader is what answers. */
+static void setup_both_bad(uint8_t confirmed, uint32_t min_version) {
+  struct sensei_gap9_trial t = closed(confirmed);
+  struct g9ota_store st = {.trial = t, .known = {0, 0}, .min_version = min_version};
+
+  setup(&t, confirmed, 1, 3);
+  g9ota_flow_init(&flow, cur_ops, &st);
+  g.mram.mem[(confirmed ? SENSEI_G9_SLOT_B_OFF : SENSEI_G9_SLOT_A_OFF) + 3] ^= 0x80; /* the confirmed slot is bad */
+  g.strap_wired = true;
+  g.strap_works = true;
+}
+
+static void test_recovery_update(void) {
+  static uint8_t keep_copy[SENSEI_G9_SLOT_SIZE];
+  static uint8_t boot_copy[SENSEI_G9_CKPT_OFF];
+
+  use_recovery_ops(false);
+  for (uint8_t confirmed = 0; confirmed < 2; confirmed++) {
+    uint8_t target = 1 - confirmed;
+    const uint8_t *keep = g.mram.mem + (confirmed ? SENSEI_G9_SLOT_B_OFF : SENSEI_G9_SLOT_A_OFF);
+
+    setup_both_bad(confirmed, 0);
+    memcpy(keep_copy, keep, sizeof(keep_copy));
+    memcpy(boot_copy, g.mram.mem, sizeof(boot_copy));
+    make_new(1, 4, 30000);
+    /* the first request: the boot loader answers, the flow checks the keep slot and begins */
+    CHECK(do_begin(image, img_n, false) == 0);
+    CHECK(R()->result == sensei_Gap9OtaResult_GAP9_OTA_OK &&
+          R()->stage == sensei_Gap9OtaStage_GAP9_OTA_STAGE_RECEIVING);
+    CHECK(R()->recovery && R()->recovery_reason == G9L_RECOVERY_BOTH_BAD && R()->booted_slot == confirmed);
+    CHECK(g.rec_mode && g.rec_latched && !g.seals);
+    CHECK(send_all(image, img_n, 0) == img_n);
+    CHECK(do_cmd(sensei_Gap9OtaAction_GAP9_OTA_ACTION_FINISH) == 0);
+    CHECK(flow.verified && g.seals == 1 && R()->recovery && R()->stage == sensei_Gap9OtaStage_GAP9_OTA_STAGE_VERIFIED);
+    CHECK(raw_parses(target) && !raw_parses(confirmed));
+    CHECK(memcmp(keep, keep_copy, sizeof(keep_copy)) == 0 && memcmp(g.mram.mem, boot_copy, sizeof(boot_copy)) == 0);
+    /* apply: the target boots on trial (the boot loader finds a good slot now), confirmed, the latch gone */
+    CHECK(do_cmd(sensei_Gap9OtaAction_GAP9_OTA_ACTION_APPLY) == 0);
+    pump_all();
+    CHECK(flow.trial.confirmed == target && !flow.trial.open && g.slot_line == target);
+    CHECK(!g.rec_mode && !g.rec_latched && !g9ota_flow_active(&flow));
+    CHECK(g.persisted.trial.confirmed == target && g.persisted.min_version == ((1u << 24) | (4u << 16)));
+    CHECK(do_cmd(sensei_Gap9OtaAction_GAP9_OTA_ACTION_STATUS) == 0);
+    CHECK(!R()->recovery && R()->confirmed_slot == target && R()->booted_slot == target);
+    CHECK(memcmp(keep, keep_copy, sizeof(keep_copy)) == 0 && memcmp(g.mram.mem, boot_copy, sizeof(boot_copy)) == 0);
+  }
+}
+
+static void test_recovery_refusals(void) {
+  use_recovery_ops(false);
+
+  /* the slot line says one slot, the node trusts the other: nothing is written */
+  setup_both_bad(1, 0);
+  g.slot_line = 0;
+  make_new(1, 4, 30000);
+  CHECK(do_begin(image, img_n, false) == 0);
+  CHECK(R()->result == sensei_Gap9OtaResult_GAP9_OTA_FAILED && R()->fail == sensei_Gap9OtaFail_GAP9_OTA_FAIL_KEEP);
+  CHECK(R()->recovery && g.mram.writes == 0 && !g.held && !g9ota_flow_active(&flow) && g.seals == 0);
+
+  /* a bad signature: no seal, the abort drops the image, GAP9 stays in recovery */
+  setup_both_bad(0, 0);
+  g.verify_rc = -EBADMSG;
+  make_new(1, 4, 30000);
+  CHECK(do_begin(image, img_n, false) == 0 && send_all(image, img_n, 0) == img_n);
+  CHECK(do_cmd(sensei_Gap9OtaAction_GAP9_OTA_ACTION_FINISH) == 0);
+  CHECK(R()->fail == sensei_Gap9OtaFail_GAP9_OTA_FAIL_SIGNATURE && g.seals == 0 && !flow.verified);
+  CHECK(!raw_parses(1) && R()->recovery);
+  CHECK(do_cmd(sensei_Gap9OtaAction_GAP9_OTA_ACTION_APPLY) == 0 &&
+        R()->result == sensei_Gap9OtaResult_GAP9_OTA_INVALID);
+
+  /* a lost abort after the bad signature: the image has no magic, a restart of GAP9 does not find a slot */
+  setup_both_bad(0, 0);
+  g.verify_rc = -EBADMSG;
+  make_new(1, 4, 30000);
+  CHECK(do_begin(image, img_n, false) == 0 && send_all(image, img_n, 0) == img_n);
+  g.abort_timeouts = 1 + G9OTA_FLOW_ABORT_RETRIES;
+  CHECK(do_cmd(sensei_Gap9OtaAction_GAP9_OTA_ACTION_FINISH) == 0);
+  CHECK(g.seals == 0 && !raw_parses(1) && !raw_parses(0));
+
+  /* rollback: an older image than the highest confirmed version is refused before the seal, also in recovery */
+  setup_both_bad(0, (1u << 24) | (5u << 16));
+  make_new(1, 4, 30000);
+  CHECK(do_begin(image, img_n, false) == 0 && send_all(image, img_n, 0) == img_n);
+  CHECK(do_cmd(sensei_Gap9OtaAction_GAP9_OTA_ACTION_FINISH) == 0);
+  CHECK(R()->fail == sensei_Gap9OtaFail_GAP9_OTA_FAIL_ROLLBACK && g.seals == 0 && !flow.verified && !raw_parses(1));
+  /* the same version is allowed (the writer allows it too) */
+  setup_both_bad(0, (1u << 24) | (4u << 16));
+  make_new(1, 4, 30000);
+  CHECK(do_begin(image, img_n, false) == 0 && send_all(image, img_n, 0) == img_n);
+  CHECK(do_cmd(sensei_Gap9OtaAction_GAP9_OTA_ACTION_FINISH) == 0 && flow.verified && g.seals == 1);
+
+  /* the same rule in the normal mode (the writer of the app), and a higher minimum from an older confirm */
+  cur_ops = &ops;
+  {
+    struct sensei_gap9_trial t = closed(0);
+    struct g9ota_store st = {.trial = t, .known = {0, 0}, .min_version = (1u << 24) | (9u << 16)};
+
+    setup(&t, 0, 1, 3);
+    g9ota_flow_init(&flow, cur_ops, &st);
+    make_new(1, 4, 30000);
+    CHECK(do_begin(image, img_n, false) == 0 && send_all(image, img_n, 0) == img_n);
+    CHECK(do_cmd(sensei_Gap9OtaAction_GAP9_OTA_ACTION_FINISH) == 0);
+    CHECK(R()->fail == sensei_Gap9OtaFail_GAP9_OTA_FAIL_ROLLBACK && g.seals == 0 && !raw_parses(1));
+  }
+  use_recovery_ops(false);
+}
+
+static void test_recovery_resume_and_trial(void) {
+  use_recovery_ops(false);
+
+  /* the transfer is finished and checked, the seal gets no answer (GAP9 loses power), the host comes back: begin resume
+   * in recovery checks again, the node seals */
+  setup_both_bad(0, 0);
+  make_new(1, 4, 30000);
+  CHECK(do_begin(image, img_n, false) == 0 && send_all(image, img_n, 0) == img_n);
+  g.seal_timeout = true;
+  CHECK(do_cmd(sensei_Gap9OtaAction_GAP9_OTA_ACTION_FINISH) == 0);
+  CHECK(last_err() == -ETIMEDOUT && !flow.verified && !raw_parses(1) && g.seals == 1);
+  session_gone();
+  g.clock_ms += 20000;
+  CHECK(do_begin(image, img_n, true) == 0);
+  CHECK(R()->stage == sensei_Gap9OtaStage_GAP9_OTA_STAGE_VERIFIED && flow.verified && R()->recovery && g.seals == 2);
+  CHECK(do_cmd(sensei_Gap9OtaAction_GAP9_OTA_ACTION_APPLY) == 0);
+  pump_all();
+  CHECK(flow.trial.confirmed == 1 && !g.rec_mode);
+
+  /* the new image does not load: the boot loader answers again, the trial is a failed boot, the confirmed slot stays
+   * and GAP9 stays in recovery */
+  setup_both_bad(0, 0);
+  make_new(1, 4, 30000);
+  CHECK(do_begin(image, img_n, false) == 0 && send_all(image, img_n, 0) == img_n);
+  CHECK(do_cmd(sensei_Gap9OtaAction_GAP9_OTA_ACTION_FINISH) == 0 && flow.verified);
+  memset(g.mram.mem + SENSEI_G9_SLOT_B_OFF + 0x200, 0, 16); /* the container header is gone after the seal */
+  CHECK(do_cmd(sensei_Gap9OtaAction_GAP9_OTA_ACTION_APPLY) == 0);
+  pump_all();
+  CHECK(flow.trial.confirmed == 0 && !flow.trial.open && g.persisted.min_version == 0);
+  CHECK(g.rec_mode && g.rec_latched && !g.held);
+  CHECK(do_cmd(sensei_Gap9OtaAction_GAP9_OTA_ACTION_STATUS) == 0);
+  CHECK(R()->recovery && R()->stage == sensei_Gap9OtaStage_GAP9_OTA_STAGE_FAILED &&
+        R()->fail == sensei_Gap9OtaFail_GAP9_OTA_FAIL_BOOT && R()->confirmed_slot == 0);
+
+  /* the lost-settings probe that lands in recovery is a boot failure too; the node never writes by itself */
+  {
+    struct g9ota_store none;
+
+    setup_both_bad(0, 0);
+    (void)none;
+    g9ota_flow_init(&flow, cur_ops, NULL);
+    g.mram.writes = 0;
+    g9ota_flow_poll(&flow);
+    pump_all();
+    CHECK(flow.trial.confirmed == 0 && !flow.trial.open && g.mram.writes == 0 && g.seals == 0);
+  }
+}
+
+static void test_recovery_force(void) {
+  struct sensei_gap9_trial t = closed(0);
+
+  use_recovery_ops(true);
+  /* both slots boot: the strap makes the boot loader run, the update goes through it */
+  setup(&t, 0, 1, 3);
+  g9ota_flow_init(&flow, cur_ops, &(struct g9ota_store){.trial = t});
+  g.strap_wired = g.strap_works = true;
+  make_new(1, 4, 30000);
+  memset(&B, 0, sizeof(B));
+  B.size = (uint32_t)img_n;
+  file_sha(image, img_n, B.sha256);
+  B.force_recovery = true;
+  CHECK(g9ota_flow_begin(&flow, &B, on_reply, NULL) == 0);
+  pump_all();
+  CHECK(g.strap_calls == 1 && g.rec_mode && g.rec_latched && g.reboots == 1);
+  CHECK(R()->result == sensei_Gap9OtaResult_GAP9_OTA_OK && R()->stage == sensei_Gap9OtaStage_GAP9_OTA_STAGE_RECEIVING);
+  CHECK(R()->recovery && R()->recovery_reason == G9L_RECOVERY_FORCED && R()->booted_slot == 0);
+  /* not again in this session (already in recovery: the flag is moot, no second strap) */
+  CHECK(send_all(image, img_n, 0) == img_n);
+  CHECK(do_cmd(sensei_Gap9OtaAction_GAP9_OTA_ACTION_FINISH) == 0 && flow.verified);
+  CHECK(do_cmd(sensei_Gap9OtaAction_GAP9_OTA_ACTION_APPLY) == 0);
+  pump_all();
+  CHECK(flow.trial.confirmed == 1 && !g.rec_mode && !g.rec_latched);
+
+  /* no strap in this build: refused, nothing powered */
+  setup(&t, 0, 1, 3);
+  g9ota_flow_init(&flow, cur_ops, &(struct g9ota_store){.trial = t});
+  g.strap_wired = false;
+  memset(&B, 0, sizeof(B));
+  B.size = (uint32_t)img_n;
+  file_sha(image, img_n, B.sha256);
+  B.force_recovery = true;
+  CHECK(g9ota_flow_begin(&flow, &B, on_reply, NULL) == 0);
+  pump_all();
+  CHECK(R()->result == sensei_Gap9OtaResult_GAP9_OTA_INVALID && R()->fail == sensei_Gap9OtaFail_GAP9_OTA_FAIL_STATE);
+  CHECK(!g.held && g.reboots == 0);
+
+  /* the strap is high but the SSBL does not read it (the line is not wired): the app boots, the begin fails BOOT */
+  setup(&t, 0, 1, 3);
+  g9ota_flow_init(&flow, cur_ops, &(struct g9ota_store){.trial = t});
+  g.strap_wired = true;
+  g.strap_works = false;
+  CHECK(g9ota_flow_begin(&flow, &B, on_reply, NULL) == 0);
+  pump_all();
+  CHECK(R()->result == sensei_Gap9OtaResult_GAP9_OTA_FAILED && R()->fail == sensei_Gap9OtaFail_GAP9_OTA_FAIL_BOOT);
+  CHECK(!R()->recovery && !g.held && !g.rec_mode);
+
+  /* a transfer is open: the flag is refused, the transfer goes on */
+  setup(&t, 0, 1, 3);
+  g9ota_flow_init(&flow, cur_ops, &(struct g9ota_store){.trial = t});
+  g.strap_wired = g.strap_works = true;
+  CHECK(do_begin(image, img_n, false) == 0 && R()->stage == sensei_Gap9OtaStage_GAP9_OTA_STAGE_RECEIVING);
+  CHECK(do_chunk(image, 0, 188) == 0);
+  memset(&B, 0, sizeof(B));
+  B.size = (uint32_t)img_n;
+  file_sha(image, img_n, B.sha256);
+  B.force_recovery = true;
+  B.resume = true;
+  CHECK(g9ota_flow_begin(&flow, &B, on_reply, NULL) == 0);
+  pump_all();
+  CHECK(R()->result == sensei_Gap9OtaResult_GAP9_OTA_INVALID && g.strap_calls == 0 && !g.rec_mode);
+  CHECK(do_chunk(image, R()->offset, 188) == 0 && R()->result == sensei_Gap9OtaResult_GAP9_OTA_OK);
+
+  /* an app without recovery support refuses the flag */
+  cur_ops = &ops;
+  setup(&t, 0, 1, 3);
+  g9ota_flow_init(&flow, cur_ops, &(struct g9ota_store){.trial = t});
+  CHECK(g9ota_flow_begin(&flow, &B, on_reply, NULL) == 0);
+  pump_all();
+  CHECK(R()->result == sensei_Gap9OtaResult_GAP9_OTA_INVALID && !g.held);
+  use_recovery_ops(false);
+  cur_ops = &ops;
+}
+
 int main(void) {
   test_update_and_trial(0);
   test_update_and_trial(1);
@@ -1372,5 +1703,9 @@ int main(void) {
   test_persist_retry();
   test_node_rate_limit();
   test_deferred_seal();
+  test_recovery_update();
+  test_recovery_refusals();
+  test_recovery_resume_and_trial();
+  test_recovery_force();
   DONE();
 }

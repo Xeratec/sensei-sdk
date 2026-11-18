@@ -106,6 +106,7 @@ enum g9_state { G9_OFF, G9_BOOT, G9_RUN, G9_CYCLE };
 
 struct g9_entry {
   enum { G9E_FREE, G9E_PENDING, G9E_SENT } st;
+  bool rec;     /* a recovery job (the recovery codec) */
   bool locked;  /* this entry holds the bus lock */
   bool busfree; /* bus free received */
   bool partial; /* a result frame with MORE was delivered */
@@ -126,7 +127,10 @@ struct g9 {
   bool grace;             /* first idle after a reboot: wait reboot_grace_ms */
   g9_reboot_fn reboot_fn; /* g9_reboot() is waiting for the HELLO */
   void *reboot_user;
-  int armed; /* index of the job frame in tx, -1 for NONE */
+  const struct g9_codec *rec_codec; /* the recovery jobs, NULL: no recovery support */
+  bool recovery;                    /* the last HELLO was the boot loader's: only recovery jobs run */
+  uint32_t rec_reason;              /* its Version.patch (G9L_RECOVERY_*) */
+  int armed;                        /* index of the job frame in tx, -1 for NONE */
   size_t tx_len;
   uint32_t seq;
   uint32_t errors;
@@ -143,8 +147,33 @@ struct g9 {
 void g9_init(struct g9 *g, const struct g9_ops *ops, const struct g9_codec *codec, const struct g9_cfg *cfg, void *jobs,
              void *res);
 
-/** Queue a job (copied). -ENOMEM if the queue is full. Starts a boot if GAP9 is off. */
+/** Queue a job (copied). -ENOMEM if the queue is full, -ENOEXEC while GAP9 is in recovery (nothing is powered for it).
+ * Starts a boot if GAP9 is off. */
 int g9_submit(struct g9 *g, const void *job, g9_done_fn done, void *user);
+
+/**
+ * Recovery (the SSBL of GAP9/ssbl serves the update writer when no slot boots; PROTOCOL.md, "Recovery HELLO"). Register
+ * the codec of its jobs: job_size and result_size must not exceed the app's (the queue and the decode buffer are the
+ * app's), gap9_major is the recovery protocol that this nRF5340 speaks (G9L_RECOVERY_PROTO). Without it a recovery
+ * HELLO is a version mismatch (-EPROTO, GAP9 off). Returns 0 or -EINVAL.
+ *
+ * After a HELLO with major G9L_RECOVERY_MAJOR (and that protocol as minor) the core latches "recovery": the app's jobs
+ * fail with -ENOEXEC, at once for new ones, and GAP9 stays as it is; jobs of g9_submit_recovery() run. A reboot
+ * callback gets -ENOEXEC with the HELLO. A HELLO of the app clears the latch.
+ */
+int g9_set_recovery(struct g9 *g, const struct g9_codec *rec);
+
+/** Queue a recovery job (copied). -ENOTSUP without g9_set_recovery(), -ENOEXEC while GAP9 runs its app, -ENOMEM if the
+ * queue is full. Starts a boot if GAP9 is off (its HELLO says what it is: a recovery job fails with -ENOEXEC when the
+ * app came up). */
+int g9_submit_recovery(struct g9 *g, const void *job, g9_done_fn done, void *user);
+
+/** True while the latch is set; `reason` (may be NULL) gets G9L_RECOVERY_BOTH_BAD or G9L_RECOVERY_FORCED. */
+bool g9_recovery(const struct g9 *g, uint32_t *reason);
+
+/** Look again: clear the latch and power GAP9 once if it is off (the next HELLO sets it again if it is still in
+ * recovery; the idle timer powers GAP9 off after it). The platform calls it every few hours. */
+void g9_reprobe(struct g9 *g);
 
 /** True if g9_submit() would fail with -ENOMEM. */
 bool g9_full(const struct g9 *g);

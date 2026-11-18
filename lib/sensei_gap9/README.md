@@ -27,9 +27,12 @@ numbers, status to errno, which job needs the camera bus), so any message schema
 | `gap9/g9ota_mram.c`, `g9ota_mram.h` | GAP9 | MRAM backend of the writer, slot detection, readfs of the slot (GAP SDK) |
 | `src/g9ota_flow.c`, `g9ota_flow.h` | nRF5340 | update flow: session, signature, trial boot, revert (no OS, host tested) |
 | `zephyr/gap9_ota.c`, `gap9_ota_zephyr.h` | nRF5340 | glue of the flow: settings, signature check (`sensei_crypto`), GAP9 link, timer (`CONFIG_SENSEI_GAP9_OTA`) |
-| `tests/` | host | the state machine against a simulated GAP9 master (`test_gap9_core.c`), the slot checks and the trial rule (`test_gap9_slot.c`, `test_gap9_trial.c`), the writer and the flow of the update (`test_g9ota.c`, `test_g9ota_flow.c`) |
+| `src/g9rec.c`, `g9rec.h`, `src/g9rec_codec.c` | GAP9 (SSBL), nRF5340 | recovery: the job server of the writer in the boot loader (`Gap9RecoveryJob`), and its codec for the link (no OS, host tested) |
+| `gap9/g9ota_mram_ops.c`, `g9ota_mram_ops.h` | GAP9 | the MRAM operations of the writer, shared by an app and the SSBL (GAP SDK) |
+| `tests/` | host | the state machine against a simulated GAP9 master (`test_gap9_core.c`), the slot checks and the trial rule (`test_gap9_slot.c`, `test_gap9_trial.c`), the writer and the flow of the update (`test_g9ota.c`, `test_g9ota_flow.c`), the recovery job server (`test_g9rec.c`) |
 
-The firmware update of GAP9 over the air (A/B slots, signed images, trial boot) is described in [OTA.md](OTA.md).
+The firmware update of GAP9 over the air (A/B slots, signed images, trial boot) and its recovery through the SSBL are described in
+[OTA.md](OTA.md).
 
 ## nRF5340 (Zephyr)
 

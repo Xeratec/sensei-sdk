@@ -137,6 +137,42 @@ confirms the first slot that answers with a HELLO and a status, passes the check
 B is tried if A does not answer or fails. Neither: slot A stays selected. The probe stops a damaged or unsigned image
 from being confirmed, it does not protect against a hostile one that is already running.
 
+## Recovery
+
+Untested on hardware. Off by default: `CONFIG_SENSEI_GAP9_RECOVERY` on the nRF5340 (needs `CONFIG_SENSEI_GAP9_OTA`) and
+`SENSEI_SSBL_RECOVERY` in the SSBL build (`GAP9/ssbl`).
+
+If neither slot boots, the SSBL does not stop. It runs the writer of the update itself, over the same SPI link, and the
+nRF5340 updates GAP9 through it: no debug probe in the field.
+
+- **HELLO.** The SSBL sends `Version.major` 0xFFFF (`G9L_RECOVERY_MAJOR`), `minor` = the recovery protocol (1), `patch` =
+  the reason (1: both slots failed, 2: the strap was high). An nRF5340 without recovery refuses the major (`-EPROTO`) and
+  powers GAP9 off: safe. With recovery, the link (`gap9_core.c`) switches to the second codec (`Gap9RecoveryJob`,
+  `Gap9RecoveryResult`) and latches recovery. App jobs fail at once with `-ENOEXEC` and GAP9 is not powered for them; the
+  link powers it once every `CONFIG_SENSEI_GAP9_RECOVERY_REPROBE_H` hours to look again. A HELLO of the app clears the latch.
+  The reply and the Status message report recovery and its reason.
+- **Writer.** The one of this document (`g9ota.c`, behind `g9rec.c`), with the slot on the slot line as the booted slot:
+  the keep slot. The nRF5340 drives the slot line to its confirmed slot, so keep = confirmed; the flow checks it
+  (`FAIL_KEEP`) before a transfer starts, and nothing is written otherwise. The guard never writes the keep slot, the
+  boot area or anything outside the other slot and the checkpoint sectors. The SSBL checks no signature: the nRF5340
+  does and then seals, as in the normal update.
+- **Flow.** The same requests: `begin`, `chunk`, `finish`, `apply`. The flow sends them as recovery jobs when the link
+  says recovery, and sends the first job again as a recovery job if it met the boot loader before the latch was set.
+  `apply` power cycles GAP9 with the slot line at the new slot; the SSBL starts it (the keep slot is bad), the app
+  arms the writer, which drops the record of the transfer, the trial confirms it and the latch goes. A trial or the
+  lost-settings probe that lands in recovery is a failed boot, and the flow never writes by itself.
+- **Rollback.** The flow keeps the highest version it confirmed (`min_version`, in the settings) and refuses an older
+  image (`FAIL_ROLLBACK`) before it seals, in recovery and in the normal mode: in recovery the keep slot cannot tell what
+  was running. A revert to the old slot is not a transfer and is not checked.
+- **Rate limits.** The rules of the normal update hold: a new transfer at least 10 s after the last, a session ends after
+  120 s without a request or 45 min, a forced recovery once per session.
+- **Strap.** `Gap9OtaBegin.force_recovery` powers GAP9 with P1.06 (pad 57) high, for a GAP9 that boots an image but hangs
+  before its HELLO. Only with `CONFIG_SENSEI_GAP9_RECOVERY_STRAP`, and not while a transfer is open. That P1.06 is a free
+  direct wire to pad 57 is UNVERIFIED (`TESTING.md`, T18.18): off by default.
+
+Seal and power: after `seal` the new slot is the only one that boots. A power cycle of GAP9 between `seal` and `apply`
+starts it as the fallback, without a trial; send `apply` right after the check.
+
 ## Keys
 
 The signature is checked by the nRF5340, not by GAP9 or the SSBL. The public key is in the nRF5340 image (the app takes it
@@ -159,7 +195,8 @@ was not confirmed (the probe confirms what answers). A board that has no A/B lay
 
 ## Tests
 
-`tests/test_g9ota.c` (the writer on a RAM MRAM: transfer, deferred seal, resume, a power cut at every write, the seal
+`tests/test_g9rec.c` (the recovery job server on a RAM MRAM with both slots bad: transfer, seal, keep slot never written,
+power cut at every write), `tests/test_g9ota.c` (the writer on a RAM MRAM: transfer, deferred seal, resume, a power cut at every write, the seal
 included, the running slot never written, the checks of `finish`, the address guard), `tests/test_g9ota_flow.c` (the flow against a fake link whose GAP9
 runs the real writer: transfer, signature, trial, revert, reset in a trial, lost settings), `tests/test_gap9_trial.c`,
 `GAP9/ssbl/tools/test_pack_slot.py` (the builder, and an imgtool image through the writer; CI fails if these skip).

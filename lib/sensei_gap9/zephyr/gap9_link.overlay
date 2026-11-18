@@ -19,7 +19,8 @@
  *
  * P1.04 is the net CS_nRF_GAP, wired straight to GAP9 pad 56 (alias gap9-slot-sel, node in the board
  * devicetree). It selects the firmware slot: GAP9's SSBL reads it at boot (low A, high B). The nRF5340
- * drives it before GAP9 is powered and low whenever GAP9 is off. P1.06 EXT_RX_SPI (pad 57) stays spare.
+ * drives it after the GAP9 rail is on and low whenever GAP9 is off. P1.06 EXT_RX_SPI (pad 57, alias gap9-recovery) is
+ * the recovery strap, used only with CONFIG_SENSEI_GAP9_RECOVERY_STRAP (untested on hardware); otherwise it stays spare.
  *
  * The LPWAN shield's nRF9151 link may use the same SPI pins. Enabling and parking of SPIS3 is in
  * gap9_link.c only. Add this file to EXTRA_DTC_OVERLAY_FILE in the app's CMakeLists.txt.
@@ -32,6 +33,7 @@
 		gap9-i2c-sel = &gpio_gap9_i2c_ctrl;
 		gap9-shared-sel = &gpio_gap9_shared_ctrl;
 		gap9-slot-sel = &gpio_gap9_slot_sel;
+		gap9-recovery = &gpio_gap9_recovery;
 		gap9-spis = &spi3;
 	};
 };

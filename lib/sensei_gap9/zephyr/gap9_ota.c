@@ -20,13 +20,14 @@
 
 #include "crypto/sensei_crypto.h"
 #include "sensei_gap9/g9ota_flow.h"
+#include "sensei_gap9/g9rec.h"
 #include "sensei_gap9/gap9_ota_zephyr.h"
 #include "sensei_gap9/gap9_zephyr.h"
 
 LOG_MODULE_REGISTER(sensei_gap9_ota, CONFIG_SENSEI_GAP9_LOG_LEVEL);
 
 #define SETTINGS_KEY "sensei_gap9/trial"
-#define STORE_VERSION 2u
+#define STORE_VERSION 3u /* 3: min_version */
 
 static const struct sensei_gap9_ota_cfg *cfg;
 static struct g9ota_flow flow;
@@ -52,7 +53,56 @@ SETTINGS_STATIC_HANDLER_DEFINE(sensei_gap9, "sensei_gap9", NULL, store_set, NULL
 
 /* ---- the world of the flow ---- */
 
-static int op_job(const struct g9ota_req *req, g9ota_job_cb cb, void *user) { return cfg->job(req, cb, user); }
+#ifdef CONFIG_SENSEI_GAP9_RECOVERY
+/* Recovery: the request goes to the boot loader of GAP9 as a Gap9RecoveryJob (gap9_ota.proto). One job at a time, like
+ * the app's jobs of the flow. */
+static sensei_Gap9RecoveryJob rec_job;
+static g9ota_job_cb rec_cb;
+static void *rec_user;
+
+static void rec_done(int err, const void *res, bool final, void *user) {
+  const sensei_Gap9RecoveryResult *r = res;
+  g9ota_job_cb cb = rec_cb;
+
+  ARG_UNUSED(user);
+  if (!final && err == 0) {
+    return;
+  }
+  rec_cb = NULL;
+  if (err == 0 && (r == NULL || r->status != sensei_Gap9RecoveryStatus_GAP9_RECOVERY_OK || !r->has_info)) {
+    err = r != NULL && r->status == sensei_Gap9RecoveryStatus_GAP9_RECOVERY_BAD_JOB ? -ENOTSUP : -EPROTO;
+  }
+  cb(err, err == 0 ? &r->info : NULL, rec_user);
+}
+
+static int rec_submit(const struct g9ota_req *req, g9ota_job_cb cb, void *user) {
+  if (rec_cb != NULL) {
+    return -EBUSY;
+  }
+  if (g9rec_job_from_req(req, &rec_job) != 0) {
+    return -EINVAL;
+  }
+  rec_cb = cb;
+  rec_user = user;
+  int rc = gap9_link_submit_recovery(&rec_job, rec_done, NULL);
+
+  if (rc != 0) {
+    rec_cb = NULL;
+  }
+  return rc;
+}
+
+static bool op_recovery(uint32_t *reason) { return gap9_link_recovery(reason); }
+#endif /* CONFIG_SENSEI_GAP9_RECOVERY */
+
+static int op_job(const struct g9ota_req *req, g9ota_job_cb cb, void *user) {
+#ifdef CONFIG_SENSEI_GAP9_RECOVERY
+  if (gap9_link_recovery(NULL)) {
+    return rec_submit(req, cb, user);
+  }
+#endif
+  return cfg->job(req, cb, user);
+}
 
 static int op_verify(const uint8_t hash[32], const uint8_t sig[64], const uint8_t *key_hash, size_t key_hash_len) {
   sensei_crypto_key_id_t key;
@@ -101,6 +151,10 @@ static const struct g9ota_ops ops = {
     .persist = op_persist,
     .now_ms = op_now,
     .trial_check = op_trial_check,
+#ifdef CONFIG_SENSEI_GAP9_RECOVERY
+    .recovery = op_recovery,
+    .force_recovery = gap9_link_force_recovery,
+#endif
     .wake = op_wake,
 };
 

@@ -35,6 +35,10 @@
  * status job (booted slot and image id are the new ones) and the checks of the app (`trial_check`: self-test, detect
  * job ...). Passed: the slot is confirmed and stored. Anything else, or a reset of the nRF5340 during the trial: the
  * confirmed slot boots again. `revert` is `apply` of the other slot (a verified one).
+ * - Recovery (CONFIG_SENSEI_GAP9_RECOVERY, OTA.md): when GAP9's boot loader runs the writer, the same requests work:
+ * the flow checks that the slot it keeps (the slot line, the confirmed slot) is the confirmed one (FAIL_KEEP) before a
+ * transfer starts, and writes the other slot. `begin` with `force_recovery` powers GAP9 with the strap first (once per
+ * session, never during a transfer). An image older than the highest confirmed version is refused (FAIL_ROLLBACK).
  * - New transfers (not a resume) are at least G9OTA_OPEN_MIN_MS apart (MRAM wear; GAP9 forgets its own count when it
  * loses power).
  * - Settings that cannot be stored are retried every few seconds (g9ota_flow_poll).
@@ -67,6 +71,10 @@
 struct g9ota_store {
   struct sensei_gap9_trial trial; /* confirmed slot and the trial */
   uint32_t known[2];              /* image id per slot that the flow verified or confirmed, 0: none */
+  /* The highest image version this node ever confirmed (major << 24 | minor << 16 | patch, as MCUboot compares), 0:
+   * none. A transfer of an older image is refused (GAP9_OTA_FAIL_ROLLBACK): GAP9's own check compares with the slot
+   * that runs, which is empty or bad in recovery. A revert to the old slot is not a transfer and is not checked. */
+  uint32_t min_version;
 };
 
 /** Result of a job: `info` is GAP9's answer when `err` is 0. Errors: -ENOTSUP (a GAP9 build without the update, one
@@ -111,6 +119,11 @@ struct g9ota_ops {
    * housekeeping timer (a few seconds). The timer calls g9ota_flow_poll() and starts itself again while the flow
    * wants it. NULL: the app calls g9ota_flow_poll() by itself while g9ota_flow_needs_poll(). */
   void (*wake)(void);
+  /** GAP9 is in recovery (its boot loader runs the writer, gap9_core.h g9_recovery()); `reason` may be NULL. The job
+   * callback then sends the recovery jobs. NULL: no recovery support (a build without CONFIG_SENSEI_GAP9_RECOVERY). */
+  bool (*recovery)(uint32_t *reason);
+  /** Power the next boot with the recovery strap (Gap9OtaBegin.force_recovery). 0 or -ENOTSUP. NULL: no strap. */
+  int (*force_recovery)(void);
 };
 
 enum g9ota_state {
@@ -157,6 +170,11 @@ struct g9ota_flow {
   uint8_t verify_slot; /* slot that a verify job looks at (revert, probe) */
   uint8_t seal_slot;   /* slot and image id that the seal job in flight is for */
   uint32_t seal_id;
+  uint32_t min_version;          /* the highest version confirmed; stored */
+  uint32_t trial_version;        /* version of the slot on trial, as the status job showed it */
+  bool forced;                   /* a begin forced recovery in this session */
+  bool rec_retry;                /* the job in flight was sent again as a recovery job */
+  sensei_Gap9OtaBegin rec_begin; /* the begin that waits for the check of the keep slot */
 
   struct g9ota_req req; /* about 1 KB: the job in flight */
 };

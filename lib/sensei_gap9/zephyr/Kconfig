@@ -134,6 +134,36 @@ config SENSEI_GAP9_OTA
 	  CONFIG_MBEDTLS_HEAP_SIZE=16384 or more) and have a work queue stack for it. The flow keeps one instance: one
 	  update flow per app.
 
+config SENSEI_GAP9_RECOVERY
+	bool "Recovery of the GAP9 application over the air (the update writer in the GAP9 boot loader)"
+	depends on SENSEI_GAP9_OTA
+	help
+	  Understands the HELLO of the GAP9 boot loader in recovery (no slot boots, GAP9/ssbl built with
+	  SENSEI_SSBL_RECOVERY) and updates GAP9 through it: the app's jobs fail with -ENOEXEC while it runs
+	  (GAP9 is not powered for them), the update flow writes the slot that the boot loader does not keep, checks
+	  the signature, seals and starts it on trial. The recovery jobs are the SDK's (gap9_ota.proto): the app's job
+	  struct must be at least as large as a recovery job (about 1.1 kB). Costs the recovery codec, one recovery job
+	  of RAM and the checks of the flow. Untested on hardware. Rules: lib/sensei_gap9/OTA.md, "Recovery".
+
+config SENSEI_GAP9_RECOVERY_REPROBE_H
+	int "Time between two looks at a GAP9 that is in recovery (h)"
+	default 6
+	range 1 168
+	depends on SENSEI_GAP9_RECOVERY
+	help
+	  GAP9 is in recovery after a failed update that left no bootable slot. The nRF5340 does not power it for
+	  jobs of the app any more (they fail at once). It powers it once in this time to look whether the node was
+	  repaired (JTAG, a recovery update by another host). Each look costs one power-up of GAP9 (a few hundred ms).
+
+config SENSEI_GAP9_RECOVERY_STRAP
+	bool "Recovery strap: P1.06 to GAP9 pad 57, to force recovery of a GAP9 that boots a bad image (UNVERIFIED hardware)"
+	depends on SENSEI_GAP9_RECOVERY
+	help
+	  The update flow can power GAP9 with P1.06 (EXT_RX_SPI) high; the SSBL reads pad 57 with a pull-down and enters
+	  recovery when it is high (Gap9OtaBegin.force_recovery). Needs P1.06 to be a free direct line to pad 57 with no
+	  other driver. UNTESTED ON HARDWARE (TESTING.md T18.18): off by default. With it, P1.06 is an output that is low
+	  whenever GAP9 is off (NRF/system/pwr).
+
 config SENSEI_GAP9_THREAD_PRIORITY
 	int "GAP9 link thread priority"
 	default 4

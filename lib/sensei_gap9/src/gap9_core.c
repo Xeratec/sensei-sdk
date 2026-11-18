@@ -13,9 +13,14 @@
 
 /* ---- helpers ---- */
 
-static bool uses_bus(const struct g9 *g, const struct g9_entry *e) { return g->codec->job_uses_bus(e->job); }
+static const struct g9_codec *codec_of(const struct g9 *g, const struct g9_entry *e) {
+  return e->rec ? g->rec_codec : g->codec;
+}
 
-static uint32_t job_seq(const struct g9 *g, const struct g9_entry *e) { return g->codec->job_seq(e->job); }
+/* A recovery job never uses the camera bus. */
+static bool uses_bus(const struct g9 *g, const struct g9_entry *e) { return !e->rec && g->codec->job_uses_bus(e->job); }
+
+static uint32_t job_seq(const struct g9 *g, const struct g9_entry *e) { return codec_of(g, e)->job_seq(e->job); }
 
 static struct g9_entry *find(struct g9 *g, int st) {
   for (int i = 0; i < G9_QUEUE_DEPTH; i++) {
@@ -98,7 +103,7 @@ static void arm_frame(struct g9 *g, struct g9_entry *job) {
   uint8_t flags = g->err_flag ? G9L_FLAG_ERROR : 0;
 
   if (job != NULL) {
-    int32_t len = g->codec->encode_job(g->tx + G9L_HDR, G9L_TX_CAP - G9L_HDR, job->job);
+    int32_t len = codec_of(g, job)->encode_job(g->tx + G9L_HDR, G9L_TX_CAP - G9L_HDR, job->job);
 
     if (len < 0) {
       /* cannot happen: the buffer fits the largest job */
@@ -183,6 +188,15 @@ static void fail_all(struct g9 *g, int err) {
   }
 }
 
+/* The jobs of one kind (app or recovery) that this GAP9 cannot run. */
+static void fail_kind(struct g9 *g, bool rec, int err) {
+  for (int i = 0; i < G9_QUEUE_DEPTH; i++) {
+    if (g->q[i].st != G9E_FREE && g->q[i].rec == rec) {
+      fail_entry(g, &g->q[i], err);
+    }
+  }
+}
+
 /* After power_off() and the failed entry: wait, then boot again if jobs are left. */
 static void restart(struct g9 *g) {
   if (oldest_pending(g) != NULL || g->hold || g->reboot_fn != NULL) {
@@ -228,14 +242,16 @@ bool g9_busy(const struct g9 *g) {
   return false;
 }
 
-int g9_submit(struct g9 *g, const void *job, g9_done_fn done, void *user) {
+static int submit(struct g9 *g, const void *job, g9_done_fn done, void *user, bool rec) {
   struct g9_entry *e = find(g, G9E_FREE);
+  const struct g9_codec *c = rec ? g->rec_codec : g->codec;
 
   if (e == NULL) {
     return -ENOMEM;
   }
-  memcpy(e->job, job, g->codec->job_size);
-  g->codec->job_set_seq(e->job, ++g->seq);
+  memcpy(e->job, job, c->job_size);
+  c->job_set_seq(e->job, ++g->seq);
+  e->rec = rec;
   e->done = done;
   e->user = user;
   e->locked = false;
@@ -262,6 +278,48 @@ int g9_submit(struct g9 *g, const void *job, g9_done_fn done, void *user) {
     break; /* booting or restarting: offered after HELLO */
   }
   return 0;
+}
+
+int g9_submit(struct g9 *g, const void *job, g9_done_fn done, void *user) {
+  if (g->recovery) {
+    return -ENOEXEC; /* the boot loader runs: no job of the app can, and GAP9 is not powered for it */
+  }
+  return submit(g, job, done, user, false);
+}
+
+int g9_set_recovery(struct g9 *g, const struct g9_codec *rec) {
+  if (rec == NULL || rec->job_size > g->codec->job_size || rec->result_size > g->codec->result_size ||
+      rec->encode_job == NULL || rec->decode_result == NULL || rec->job_seq == NULL || rec->job_set_seq == NULL ||
+      rec->result_seq == NULL || rec->result_err == NULL) {
+    return -EINVAL;
+  }
+  g->rec_codec = rec;
+  return 0;
+}
+
+int g9_submit_recovery(struct g9 *g, const void *job, g9_done_fn done, void *user) {
+  if (g->rec_codec == NULL) {
+    return -ENOTSUP;
+  }
+  if (g->state == G9_RUN && !g->recovery) {
+    return -ENOEXEC; /* GAP9 runs its app */
+  }
+  return submit(g, job, done, user, true);
+}
+
+bool g9_recovery(const struct g9 *g, uint32_t *reason) {
+  if (reason != NULL) {
+    *reason = g->recovery ? g->rec_reason : 0;
+  }
+  return g->recovery;
+}
+
+void g9_reprobe(struct g9 *g) {
+  g->recovery = false;
+  if (g->state == G9_OFF) {
+    g->boot_retry = true;
+    start_boot(g);
+  }
 }
 
 void g9_shutdown(struct g9 *g) {
@@ -318,8 +376,10 @@ void g9_reset(struct g9 *g) {
 /* Returns false if the frame ended the session (GAP9 is off now). */
 static bool on_hello(struct g9 *g, const uint8_t *p, size_t len) {
   bool decoded = sensei_decode_Version(p, len, &g->version);
+  bool rec = decoded && g->version.major == G9L_RECOVERY_MAJOR && g->rec_codec != NULL &&
+             g->version.minor == g->rec_codec->gap9_major;
 
-  if (!decoded || g->version.major != g->codec->gap9_major) {
+  if (!decoded || (!rec && g->version.major != g->codec->gap9_major)) {
     /* GAP9 runs a firmware with other job messages: no job can work. */
     count_error(g);
     power_off(g);
@@ -328,6 +388,11 @@ static bool on_hello(struct g9 *g, const uint8_t *p, size_t len) {
     reboot_done(g, -EPROTO, decoded ? &g->version : NULL);
     return false;
   }
+  /* Which program runs: the jobs of the other kind cannot. The app's jobs fail with -ENOEXEC in recovery (nothing is
+   * powered for them again until the latch is cleared), the recovery jobs when the app came up. */
+  g->recovery = rec;
+  g->rec_reason = rec ? g->version.patch : 0;
+  fail_kind(g, !rec, -ENOEXEC);
   if (g->state == G9_RUN) {
     /* GAP9 restarted by itself (watchdog, fault): the job it had is lost. Run it again from the
      * start, unless some of its result frames were delivered already. */
@@ -348,7 +413,7 @@ static bool on_hello(struct g9 *g, const uint8_t *p, size_t len) {
     set_timer(g, G9T_NONE, 0);
     if (g->reboot_fn != NULL) {
       g->grace = true;
-      reboot_done(g, 0, &g->version);
+      reboot_done(g, rec ? -ENOEXEC : 0, &g->version); /* a trial that lands in recovery is a failed boot */
     }
   }
   return true;
@@ -374,16 +439,17 @@ static void on_busfree(struct g9 *g, const uint8_t *p, size_t len) {
 static void on_result(struct g9 *g, const uint8_t *p, size_t len, uint8_t flags) {
   struct g9_entry *e = NULL;
   bool more = (flags & G9L_FLAG_MORE) != 0;
+  const struct g9_codec *c = g->recovery ? g->rec_codec : g->codec; /* GAP9 answers in the language it runs */
 
-  memset(g->res, 0, g->codec->result_size);
-  if (g->codec->decode_result(p, len, g->res)) {
-    e = sent_or_recovered(g, g->codec->result_seq(g->res));
+  memset(g->res, 0, c->result_size);
+  if (c->decode_result(p, len, g->res)) {
+    e = sent_or_recovered(g, c->result_seq(g->res));
   }
-  if (e == NULL || g->codec->result_seq(g->res) != job_seq(g, e)) {
+  if (e == NULL || e->rec != g->recovery || c->result_seq(g->res) != job_seq(g, e)) {
     count_error(g);
     return;
   }
-  int err = g->codec->result_err(g->res);
+  int err = c->result_err(g->res);
 
   if (uses_bus(g, e) && !e->busfree) {
     /* GAP9 is done with the camera. A successful job must say so first; a failed one (bad job,

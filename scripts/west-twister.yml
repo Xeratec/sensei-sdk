@@ -39,3 +39,4 @@ manifest:
           - tf-psa-crypto
           - oberon-psa-crypto
           - nanopb
+          - zcbor

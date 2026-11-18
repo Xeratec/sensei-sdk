@@ -27,7 +27,7 @@ for id in A B; do
 done
 ls -l $W/app_A.bin $W/app_B.bin
 
-mk() { python3 -I "$PACK" --app $W/app_$1.bin --version "$2" --damage "$3" -o $W/slot_$4.bin >/dev/null; }
+mk() { python3 -I "$PACK" --app $W/app_$1.bin --kind sensei-ssbl-test --version "$2" --damage "$3" -o $W/slot_$4.bin >/dev/null; }
 
 # case name | forced slot | slot A damage | slot B damage | must contain (in order) | must not contain
 run_case() {

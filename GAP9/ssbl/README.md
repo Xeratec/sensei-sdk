@@ -10,7 +10,7 @@ Authors:
 
 Second stage bootloader of the GAP9 on the SENSEI base board. It starts the firmware of slot A or slot B of the MRAM. The
 nRF5340 picks the slot with the level of GAP9 pad 56 (net `CS_nRF_GAP`, nRF P1.04): low A, high B. The SSBL does not decide
-whether a firmware is good. The nRF5340 does (trial boot, [`sensei_gap9_trial.h`](../../NRF/system/ota/sensei_gap9_trial.h)).
+whether a firmware is good. The nRF5340 does (trial boot, [`gap9_trial.h`](../../lib/sensei_gap9/include/sensei_gap9/gap9_trial.h)).
 
 Forked from `utils/ssbl/src` of the GAP SDK 5.22.3 (GreenWaves Technologies, Apache-2.0): the load of the app binary into L2
 and the launch are the same SDK calls. The partition and volume table, the boot counter and the GAP CLI recovery are gone.
@@ -66,8 +66,11 @@ tools/ssbl_docker.sh build <outdir>     # board build, <outdir>/ssbl is the ELF 
 cmake -B build . [-DSENSEI_PLATFORM=gvsoc] [-DSENSEI_SSBL_FORCE_SLOT=0|1] [-DSENSEI_SSBL_SLOT_A=<file> -DSENSEI_SSBL_SLOT_B=<file>]
 ```
 
-`tools/pack_slot.py` packs an app binary (and a readfs) into an unsigned slot image for tests and test boards. Released
-images are signed with imgtool by the node's tools.
+`tools/pack_slot.py` is the one builder of slot images: from `chip.soc.mram.bin` (or an app binary and a readfs) it makes
+the container, and the unsigned slot for the tests and test boards, or the image signed with imgtool for the update over the
+air (`--kind` is the board id, `--key` or `--dev` signs). An app also uses it for its factory flash. `tools/check_handoff.py`
+fails the build of an app if a section covers the hand-off record. `make test-python` in the SDK root runs
+`tools/test_pack_slot.py`. See [`lib/sensei_gap9/OTA.md`](../../lib/sensei_gap9/OTA.md).
 
 ## Test
 

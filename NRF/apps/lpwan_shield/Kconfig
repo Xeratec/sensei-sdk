@@ -96,6 +96,32 @@ config LPWAN_SHIELD_LTE_EVAL
 	  The client asks before a send that can wait (lte_eval); the result (energy estimate, RSRP, coverage level) is an
 	  event. The node defers non-urgent data when the estimate is bad.
 
+config LPWAN_SHIELD_GNSS
+	bool "GNSS of the nRF9151: one fix on request"
+	default y
+	select MODEM_ANTENNA if !LPWAN_SHIELD_SIM
+	help
+	  The nRF5340 asks for a fix (gnss_fix) and gets position, time and time to fix as an event. GNSS is in the system mode
+	  of the modem (LTE-M or NB-IoT with GPS) and active (functional mode 31) only for an attempt; it also works with LTE
+	  off. It runs only while LTE is idle (PSM, eDRX gaps, LTE off). The active antenna of the shield is supplied
+	  through the modem's COEX0 pin (AT%XCOEX0, set by the NCS library modem_antenna). No A-GNSS. Needs the modem
+	  library, so it comes with LPWAN_SHIELD_LTE. See README.md.
+	depends on LPWAN_SHIELD_LTE
+
+if LPWAN_SHIELD_GNSS
+
+config LPWAN_SHIELD_GNSS_STACK
+	int "GNSS worker stack size"
+	default 2560
+
+# COEX0 switches the supply of the GNSS antenna (EN_3V3_GNSS_ANT, load switch U5): high while GNSS is active in
+# 1565 to 1586 MHz. This is the string of Nordic's modem_antenna library for an antenna with an LNA that COEX0 controls
+# (what the library calls the "onboard" case). No MAGPIO: the shield has no antenna tuner on those pins.
+config MODEM_ANTENNA_AT_COEX0
+	default "AT\%XCOEX0=1,1,1565,1586"
+
+endif # LPWAN_SHIELD_GNSS
+
 config LPWAN_SHIELD_PROPRIETARY_PSM
 	bool "Proprietary PSM when the network grants no PSM"
 	default y

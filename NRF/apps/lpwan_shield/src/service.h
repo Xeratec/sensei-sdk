@@ -32,6 +32,8 @@ void svc_emit_tx_done_ack(uint32_t seq, bool ok, uint32_t attempts, bool acked, 
 void svc_emit_downlink(sensei_Radio radio, uint32_t port, const uint8_t *data, size_t len);
 void svc_emit_time(sensei_Radio radio, uint32_t unix_s);
 void svc_emit_error(sensei_LpwanResult code, const char *msg);
+/** The end of a GNSS fix (an event the master waits for). */
+void svc_emit_gnss_result(const sensei_GnssFixResult *r);
 
 /** Current state (for status and logs). */
 lpwan_state_t svc_state(void);

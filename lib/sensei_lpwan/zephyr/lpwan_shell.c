@@ -8,7 +8,7 @@
 
 /**
  * @file lpwan_shell.c
- * @brief Shell: sensei lpwan status | power | join | connect | disconnect | provision.
+ * @brief Shell: sensei lpwan status | power | join | connect | disconnect | gnss | provision.
  */
 
 #include <stdlib.h>
@@ -108,12 +108,39 @@ static int cmd_provision(const struct shell *sh, size_t argc, char **argv) {
   return err;
 }
 
-SHELL_STATIC_SUBCMD_SET_CREATE(sub_lpwan, SHELL_CMD(status, NULL, "Shield, link and radio state", cmd_status),
-                               SHELL_CMD_ARG(power, NULL, "power on|off", cmd_power, 2, 0),
-                               SHELL_CMD(join, NULL, "Join LoRaWAN", cmd_join),
-                               SHELL_CMD_ARG(connect, NULL, "connect lora|ltem|nbiot", cmd_connect, 2, 0),
-                               SHELL_CMD(disconnect, NULL, "Release the active radio", cmd_disconnect),
-                               SHELL_CMD_ARG(provision, NULL, "provision <dev_eui> <join_eui> <app_key> (hex)",
-                                             cmd_provision, 4, 0),
-                               SHELL_SUBCMD_SET_END);
+/* The result arrives later on the hook work queue: print it on the shell that asked. */
+static const struct shell *gnss_sh;
+
+static void gnss_done(int err, const sensei_GnssFixResult *r, void *user) {
+  ARG_UNUSED(user);
+  if (err == 0 && r->status == sensei_GnssFixStatus_GNSS_FIX_OK) {
+    shell_print(gnss_sh, "GNSS fix after %u ms: lat %d lon %d (deg x 1e7), alt %d m, +-%u m, %u satellites, time %u",
+                (unsigned)r->ttff_ms, (int)r->lat_e7, (int)r->lon_e7, (int)r->alt_m, (unsigned)r->acc_m,
+                (unsigned)r->sats, (unsigned)r->unix_time);
+  } else {
+    shell_print(gnss_sh, "GNSS: %s (err %d)", lpwan_gnss_status_name(r->status), err);
+  }
+}
+
+static int cmd_gnss(const struct shell *sh, size_t argc, char **argv) {
+  int err;
+
+  gnss_sh = sh;
+  err = sensei_lpwan_gnss_fix(argc > 1 ? (uint32_t)strtoul(argv[1], NULL, 10) : 0, gnss_done, NULL);
+  if (err) {
+    shell_error(sh, "GNSS fix not started (%d)", err);
+  } else {
+    shell_print(sh, "GNSS fix asked for (needs sky view and the antenna supply): the result follows");
+  }
+  return err;
+}
+
+SHELL_STATIC_SUBCMD_SET_CREATE(
+    sub_lpwan, SHELL_CMD(status, NULL, "Shield, link and radio state", cmd_status),
+    SHELL_CMD_ARG(power, NULL, "power on|off", cmd_power, 2, 0), SHELL_CMD(join, NULL, "Join LoRaWAN", cmd_join),
+    SHELL_CMD_ARG(connect, NULL, "connect lora|ltem|nbiot", cmd_connect, 2, 0),
+    SHELL_CMD(disconnect, NULL, "Release the active radio", cmd_disconnect),
+    SHELL_CMD_ARG(gnss, NULL, "gnss [timeout_s]: one GNSS fix of the nRF9151", cmd_gnss, 1, 1),
+    SHELL_CMD_ARG(provision, NULL, "provision <dev_eui> <join_eui> <app_key> (hex)", cmd_provision, 4, 0),
+    SHELL_SUBCMD_SET_END);
 SHELL_SUBCMD_ADD((sensei), lpwan, &sub_lpwan, "LPWAN shield (LoRaWAN, LTE-M, NB-IoT)", NULL, 1, 0);

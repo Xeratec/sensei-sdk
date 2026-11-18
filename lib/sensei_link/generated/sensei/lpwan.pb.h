@@ -84,6 +84,16 @@ typedef enum _sensei_DfuFail {
     sensei_DfuFail_DFU_FAIL_RATE = 11 /* too many new transfers in a short time: wait and ask again (result BUSY) */
 } sensei_DfuFail;
 
+typedef enum _sensei_GnssFixStatus {
+    sensei_GnssFixStatus_GNSS_FIX_OK = 0, /* a valid fix: the position fields are set */
+    sensei_GnssFixStatus_GNSS_FIX_TIMEOUT = 1, /* no fix within the time */
+    sensei_GnssFixStatus_GNSS_FIX_BLOCKED = 2, /* the modem kept GNSS blocked (LTE busy, time windows too short) until the end */
+    sensei_GnssFixStatus_GNSS_FIX_BUSY = 3, /* not started: LTE was connecting, sending or disconnecting (client side verdict) */
+    sensei_GnssFixStatus_GNSS_FIX_NOT_SUPPORTED = 4, /* the shield has no GNSS (client side verdict) */
+    sensei_GnssFixStatus_GNSS_FIX_FAILED = 5, /* modem error (library, functional mode, GNSS start) */
+    sensei_GnssFixStatus_GNSS_FIX_CANCELLED = 6 /* gnss_cancel, or the link or the power was lost */
+} sensei_GnssFixStatus;
+
 /* LTE connection evaluation (AT%CONEVAL), the answer to lte_eval. */
 typedef enum _sensei_EnergyEstimate {
     sensei_EnergyEstimate_ENERGY_UNKNOWN = 0, /* the evaluation failed or the modem gave no value */
@@ -178,6 +188,22 @@ typedef struct _sensei_DfuStatus {
     int32_t detail;
 } sensei_DfuStatus;
 
+typedef struct _sensei_GnssFixRequest {
+    uint32_t timeout_s; /* 0: 120 s, at most 900 */
+} sensei_GnssFixRequest;
+
+typedef struct _sensei_GnssFixResult {
+    uint32_t seq; /* seq of the gnss_fix request */
+    sensei_GnssFixStatus status;
+    int32_t lat_e7; /* degrees x 1e7, north positive (with status OK) */
+    int32_t lon_e7; /* degrees x 1e7, east positive */
+    int32_t alt_m; /* above the ellipsoid as the modem reports it, m */
+    uint32_t acc_m; /* horizontal accuracy estimate of the modem, m (0: unknown) */
+    uint32_t sats; /* satellites used in the fix */
+    uint32_t unix_time; /* UTC of the fix, Unix s (0: not known) */
+    uint32_t ttff_ms; /* from the start of the receiver to the fix; without a fix the time it ran */
+} sensei_GnssFixResult;
+
 typedef struct _sensei_LpwanSleep {
     uint32_t deep; /* 0: idle with modem kept registered, 1: deepest state */
 } sensei_LpwanSleep;
@@ -211,6 +237,9 @@ typedef struct _sensei_LpwanRequest {
         sensei_Empty dfu_abort; /* drop the open transfer */
         sensei_Empty dfu_status; /* state and next offset (the resume query) */
         sensei_DfuConfirm dfu_confirm; /* the master accepted the handshake of an image on trial (sent again until trial ends) */
+        /* GNSS of the nRF9151: one fix. Tags 50 to 59 are reserved for it. An older shield answers LPWAN_UNSUPPORTED. */
+        sensei_GnssFixRequest gnss_fix; /* answered at once (OK, BUSY, INVALID); the result follows as the gnss_result event */
+        sensei_Empty gnss_cancel; /* end the fix that runs: the gnss_result event follows with status CANCELLED */
     };
 } sensei_LpwanRequest;
 
@@ -223,6 +252,7 @@ typedef struct _sensei_LpwanVersion {
     bool trial; /* the running image is on trial: the master confirms it with dfu_confirm */
     uint32_t dfu_targets; /* bit 0: the app can be updated, bit 1: the modem firmware can (0: no update support) */
     char lte_modem[25]; /* firmware of the nRF91 modem (AT%SHORTSWVER), empty until the modem library has run */
+    bool gnss; /* the shield app has the GNSS (gnss_fix is understood); false for an older shield */
 } sensei_LpwanVersion;
 
 typedef struct _sensei_LpwanStatus {
@@ -254,6 +284,13 @@ typedef struct _sensei_LpwanStatus {
     uint32_t attaches; /* registrations with the network */
     bool has_psm_entries;
     uint32_t psm_entries; /* times the modem went into PSM (modem sleep of type PSM) */
+    /* GNSS since the shield started. Set when the shield has the GNSS, absent otherwise. gnss_on_ms wraps after 49 days. */
+    bool has_gnss_attempts;
+    uint32_t gnss_attempts; /* fixes started */
+    bool has_gnss_fixes;
+    uint32_t gnss_fixes; /* ... that ended with a fix */
+    bool has_gnss_on_ms;
+    uint32_t gnss_on_ms; /* time GNSS was active (functional mode 31 to 30), ms */
     /* LTE, fields 20 and up. rssi_dbm is the RSRP. */
     sensei_RaiSupport rai_support; /* what the network told the modem (LTE_LC_EVT_RAI_UPDATE), for the current cell */
     uint32_t lte_answers; /* sends that waited for an answer (LTE_RAI_ONE_RESP) and got one, since start */
@@ -344,6 +381,7 @@ typedef struct _sensei_LpwanEvent {
         sensei_NetworkTime network_time;
         sensei_LpwanError error;
         sensei_ConnEval conn_eval;
+        sensei_GnssFixResult gnss_result; /* the end of a fix (OK or not); tags 50 to 59 are the GNSS's */
     };
 } sensei_LpwanEvent;
 
@@ -381,6 +419,10 @@ extern "C" {
 #define _sensei_DfuFail_MAX sensei_DfuFail_DFU_FAIL_RATE
 #define _sensei_DfuFail_ARRAYSIZE ((sensei_DfuFail)(sensei_DfuFail_DFU_FAIL_RATE+1))
 
+#define _sensei_GnssFixStatus_MIN sensei_GnssFixStatus_GNSS_FIX_OK
+#define _sensei_GnssFixStatus_MAX sensei_GnssFixStatus_GNSS_FIX_CANCELLED
+#define _sensei_GnssFixStatus_ARRAYSIZE ((sensei_GnssFixStatus)(sensei_GnssFixStatus_GNSS_FIX_CANCELLED+1))
+
 #define _sensei_EnergyEstimate_MIN sensei_EnergyEstimate_ENERGY_UNKNOWN
 #define _sensei_EnergyEstimate_MAX sensei_EnergyEstimate_ENERGY_EFFICIENT
 #define _sensei_EnergyEstimate_ARRAYSIZE ((sensei_EnergyEstimate)(sensei_EnergyEstimate_ENERGY_EFFICIENT+1))
@@ -405,6 +447,9 @@ extern "C" {
 #define sensei_DfuStatus_state_ENUMTYPE sensei_DfuState
 #define sensei_DfuStatus_target_ENUMTYPE sensei_DfuTarget
 #define sensei_DfuStatus_fail_ENUMTYPE sensei_DfuFail
+
+
+#define sensei_GnssFixResult_status_ENUMTYPE sensei_GnssFixStatus
 
 
 
@@ -437,10 +482,12 @@ extern "C" {
 #define sensei_DfuConfirm_init_default           {0}
 #define sensei_DfuChunk_init_default             {0, {0, {0}}, 0}
 #define sensei_DfuStatus_init_default            {_sensei_DfuState_MIN, _sensei_DfuTarget_MIN, 0, 0, 0, _sensei_DfuFail_MIN, 0}
+#define sensei_GnssFixRequest_init_default       {0}
+#define sensei_GnssFixResult_init_default        {0, _sensei_GnssFixStatus_MIN, 0, 0, 0, 0, 0, 0, 0}
 #define sensei_LpwanSleep_init_default           {0}
 #define sensei_LpwanRequest_init_default         {0, 0, {sensei_Empty_init_default}}
-#define sensei_LpwanVersion_init_default         {false, sensei_Version_init_default, "", 0, 0, 0, 0, ""}
-#define sensei_LpwanStatus_init_default          {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, false, sensei_FaultRecord_init_default, 0, false, 0, false, 0, false, 0, _sensei_RaiSupport_MIN, 0, 0}
+#define sensei_LpwanVersion_init_default         {false, sensei_Version_init_default, "", 0, 0, 0, 0, "", 0}
+#define sensei_LpwanStatus_init_default          {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, false, sensei_FaultRecord_init_default, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, _sensei_RaiSupport_MIN, 0, 0}
 #define sensei_NetworkTime_init_default          {0, _sensei_Radio_MIN}
 #define sensei_SendInfo_init_default             {0, 0, 0}
 #define sensei_LpwanResponse_init_default        {0, _sensei_LpwanResult_MIN, 0, {sensei_LpwanVersion_init_default}}
@@ -458,10 +505,12 @@ extern "C" {
 #define sensei_DfuConfirm_init_zero              {0}
 #define sensei_DfuChunk_init_zero                {0, {0, {0}}, 0}
 #define sensei_DfuStatus_init_zero               {_sensei_DfuState_MIN, _sensei_DfuTarget_MIN, 0, 0, 0, _sensei_DfuFail_MIN, 0}
+#define sensei_GnssFixRequest_init_zero          {0}
+#define sensei_GnssFixResult_init_zero           {0, _sensei_GnssFixStatus_MIN, 0, 0, 0, 0, 0, 0, 0}
 #define sensei_LpwanSleep_init_zero              {0}
 #define sensei_LpwanRequest_init_zero            {0, 0, {sensei_Empty_init_zero}}
-#define sensei_LpwanVersion_init_zero            {false, sensei_Version_init_zero, "", 0, 0, 0, 0, ""}
-#define sensei_LpwanStatus_init_zero             {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, false, sensei_FaultRecord_init_zero, 0, false, 0, false, 0, false, 0, _sensei_RaiSupport_MIN, 0, 0}
+#define sensei_LpwanVersion_init_zero            {false, sensei_Version_init_zero, "", 0, 0, 0, 0, "", 0}
+#define sensei_LpwanStatus_init_zero             {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, false, sensei_FaultRecord_init_zero, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, _sensei_RaiSupport_MIN, 0, 0}
 #define sensei_NetworkTime_init_zero             {0, _sensei_Radio_MIN}
 #define sensei_SendInfo_init_zero                {0, 0, 0}
 #define sensei_LpwanResponse_init_zero           {0, _sensei_LpwanResult_MIN, 0, {sensei_LpwanVersion_init_zero}}
@@ -511,6 +560,16 @@ extern "C" {
 #define sensei_DfuStatus_chunk_max_tag           5
 #define sensei_DfuStatus_fail_tag                6
 #define sensei_DfuStatus_detail_tag              7
+#define sensei_GnssFixRequest_timeout_s_tag      1
+#define sensei_GnssFixResult_seq_tag             1
+#define sensei_GnssFixResult_status_tag          2
+#define sensei_GnssFixResult_lat_e7_tag          3
+#define sensei_GnssFixResult_lon_e7_tag          4
+#define sensei_GnssFixResult_alt_m_tag           5
+#define sensei_GnssFixResult_acc_m_tag           6
+#define sensei_GnssFixResult_sats_tag            7
+#define sensei_GnssFixResult_unix_time_tag       8
+#define sensei_GnssFixResult_ttff_ms_tag         9
 #define sensei_LpwanSleep_deep_tag               1
 #define sensei_LpwanRequest_seq_tag              1
 #define sensei_LpwanRequest_get_version_tag      2
@@ -533,6 +592,8 @@ extern "C" {
 #define sensei_LpwanRequest_dfu_abort_tag        44
 #define sensei_LpwanRequest_dfu_status_tag       45
 #define sensei_LpwanRequest_dfu_confirm_tag      46
+#define sensei_LpwanRequest_gnss_fix_tag         50
+#define sensei_LpwanRequest_gnss_cancel_tag      51
 #define sensei_LpwanVersion_firmware_tag         1
 #define sensei_LpwanVersion_modem_tag            2
 #define sensei_LpwanVersion_protocol_tag         3
@@ -540,6 +601,7 @@ extern "C" {
 #define sensei_LpwanVersion_trial_tag            5
 #define sensei_LpwanVersion_dfu_targets_tag      6
 #define sensei_LpwanVersion_lte_modem_tag        7
+#define sensei_LpwanVersion_gnss_tag             8
 #define sensei_LpwanStatus_lte_connected_tag     1
 #define sensei_LpwanStatus_lora_joined_tag       2
 #define sensei_LpwanStatus_rssi_dbm_tag          3
@@ -555,6 +617,9 @@ extern "C" {
 #define sensei_LpwanStatus_rrc_connected_ms_tag  13
 #define sensei_LpwanStatus_attaches_tag          14
 #define sensei_LpwanStatus_psm_entries_tag       15
+#define sensei_LpwanStatus_gnss_attempts_tag     16
+#define sensei_LpwanStatus_gnss_fixes_tag        17
+#define sensei_LpwanStatus_gnss_on_ms_tag        18
 #define sensei_LpwanStatus_rai_support_tag       20
 #define sensei_LpwanStatus_lte_answers_tag       21
 #define sensei_LpwanStatus_lte_no_answer_tag     22
@@ -598,6 +663,7 @@ extern "C" {
 #define sensei_LpwanEvent_network_time_tag       6
 #define sensei_LpwanEvent_error_tag              7
 #define sensei_LpwanEvent_conn_eval_tag          8
+#define sensei_LpwanEvent_gnss_result_tag        50
 
 /* Struct field encoding specification for nanopb */
 #define sensei_LteConfigure_FIELDLIST(X, a) \
@@ -670,6 +736,24 @@ X(a, STATIC,   SINGULAR, SINT32,   detail,            7)
 #define sensei_DfuStatus_CALLBACK NULL
 #define sensei_DfuStatus_DEFAULT NULL
 
+#define sensei_GnssFixRequest_FIELDLIST(X, a) \
+X(a, STATIC,   SINGULAR, UINT32,   timeout_s,         1)
+#define sensei_GnssFixRequest_CALLBACK NULL
+#define sensei_GnssFixRequest_DEFAULT NULL
+
+#define sensei_GnssFixResult_FIELDLIST(X, a) \
+X(a, STATIC,   SINGULAR, UINT32,   seq,               1) \
+X(a, STATIC,   SINGULAR, UENUM,    status,            2) \
+X(a, STATIC,   SINGULAR, SINT32,   lat_e7,            3) \
+X(a, STATIC,   SINGULAR, SINT32,   lon_e7,            4) \
+X(a, STATIC,   SINGULAR, SINT32,   alt_m,             5) \
+X(a, STATIC,   SINGULAR, UINT32,   acc_m,             6) \
+X(a, STATIC,   SINGULAR, UINT32,   sats,              7) \
+X(a, STATIC,   SINGULAR, FIXED32,  unix_time,         8) \
+X(a, STATIC,   SINGULAR, UINT32,   ttff_ms,           9)
+#define sensei_GnssFixResult_CALLBACK NULL
+#define sensei_GnssFixResult_DEFAULT NULL
+
 #define sensei_LpwanSleep_FIELDLIST(X, a) \
 X(a, STATIC,   SINGULAR, UINT32,   deep,              1)
 #define sensei_LpwanSleep_CALLBACK NULL
@@ -696,7 +780,9 @@ X(a, STATIC,   ONEOF,    MESSAGE,  (body,dfu_finish,dfu_finish),  42) \
 X(a, STATIC,   ONEOF,    MESSAGE,  (body,dfu_apply,dfu_apply),  43) \
 X(a, STATIC,   ONEOF,    MESSAGE,  (body,dfu_abort,dfu_abort),  44) \
 X(a, STATIC,   ONEOF,    MESSAGE,  (body,dfu_status,dfu_status),  45) \
-X(a, STATIC,   ONEOF,    MESSAGE,  (body,dfu_confirm,dfu_confirm),  46)
+X(a, STATIC,   ONEOF,    MESSAGE,  (body,dfu_confirm,dfu_confirm),  46) \
+X(a, STATIC,   ONEOF,    MESSAGE,  (body,gnss_fix,gnss_fix),  50) \
+X(a, STATIC,   ONEOF,    MESSAGE,  (body,gnss_cancel,gnss_cancel),  51)
 #define sensei_LpwanRequest_CALLBACK NULL
 #define sensei_LpwanRequest_DEFAULT NULL
 #define sensei_LpwanRequest_body_get_version_MSGTYPE sensei_Empty
@@ -719,6 +805,8 @@ X(a, STATIC,   ONEOF,    MESSAGE,  (body,dfu_confirm,dfu_confirm),  46)
 #define sensei_LpwanRequest_body_dfu_abort_MSGTYPE sensei_Empty
 #define sensei_LpwanRequest_body_dfu_status_MSGTYPE sensei_Empty
 #define sensei_LpwanRequest_body_dfu_confirm_MSGTYPE sensei_DfuConfirm
+#define sensei_LpwanRequest_body_gnss_fix_MSGTYPE sensei_GnssFixRequest
+#define sensei_LpwanRequest_body_gnss_cancel_MSGTYPE sensei_Empty
 
 #define sensei_LpwanVersion_FIELDLIST(X, a) \
 X(a, STATIC,   OPTIONAL, MESSAGE,  firmware,          1) \
@@ -727,7 +815,8 @@ X(a, STATIC,   SINGULAR, UINT32,   protocol,          3) \
 X(a, STATIC,   SINGULAR, FIXED32,  image_id,          4) \
 X(a, STATIC,   SINGULAR, BOOL,     trial,             5) \
 X(a, STATIC,   SINGULAR, UINT32,   dfu_targets,       6) \
-X(a, STATIC,   SINGULAR, STRING,   lte_modem,         7)
+X(a, STATIC,   SINGULAR, STRING,   lte_modem,         7) \
+X(a, STATIC,   SINGULAR, BOOL,     gnss,              8)
 #define sensei_LpwanVersion_CALLBACK NULL
 #define sensei_LpwanVersion_DEFAULT NULL
 #define sensei_LpwanVersion_firmware_MSGTYPE sensei_Version
@@ -748,6 +837,9 @@ X(a, STATIC,   SINGULAR, BOOL,     rssi_valid,       12) \
 X(a, STATIC,   OPTIONAL, UINT32,   rrc_connected_ms,  13) \
 X(a, STATIC,   OPTIONAL, UINT32,   attaches,         14) \
 X(a, STATIC,   OPTIONAL, UINT32,   psm_entries,      15) \
+X(a, STATIC,   OPTIONAL, UINT32,   gnss_attempts,    16) \
+X(a, STATIC,   OPTIONAL, UINT32,   gnss_fixes,       17) \
+X(a, STATIC,   OPTIONAL, UINT32,   gnss_on_ms,       18) \
 X(a, STATIC,   SINGULAR, UENUM,    rai_support,      20) \
 X(a, STATIC,   SINGULAR, UINT32,   lte_answers,      21) \
 X(a, STATIC,   SINGULAR, UINT32,   lte_no_answer,    22)
@@ -832,7 +924,8 @@ X(a, STATIC,   ONEOF,    MESSAGE,  (body,tx_done,tx_done),   4) \
 X(a, STATIC,   ONEOF,    MESSAGE,  (body,downlink_rx,downlink_rx),   5) \
 X(a, STATIC,   ONEOF,    MESSAGE,  (body,network_time,network_time),   6) \
 X(a, STATIC,   ONEOF,    MESSAGE,  (body,error,error),   7) \
-X(a, STATIC,   ONEOF,    MESSAGE,  (body,conn_eval,conn_eval),   8)
+X(a, STATIC,   ONEOF,    MESSAGE,  (body,conn_eval,conn_eval),   8) \
+X(a, STATIC,   ONEOF,    MESSAGE,  (body,gnss_result,gnss_result),  50)
 #define sensei_LpwanEvent_CALLBACK NULL
 #define sensei_LpwanEvent_DEFAULT NULL
 #define sensei_LpwanEvent_body_joined_MSGTYPE sensei_RadioEvent
@@ -843,6 +936,7 @@ X(a, STATIC,   ONEOF,    MESSAGE,  (body,conn_eval,conn_eval),   8)
 #define sensei_LpwanEvent_body_network_time_MSGTYPE sensei_NetworkTime
 #define sensei_LpwanEvent_body_error_MSGTYPE sensei_LpwanError
 #define sensei_LpwanEvent_body_conn_eval_MSGTYPE sensei_ConnEval
+#define sensei_LpwanEvent_body_gnss_result_MSGTYPE sensei_GnssFixResult
 
 extern const pb_msgdesc_t sensei_LteConfigure_msg;
 extern const pb_msgdesc_t sensei_LoraConfigure_msg;
@@ -852,6 +946,8 @@ extern const pb_msgdesc_t sensei_DfuBegin_msg;
 extern const pb_msgdesc_t sensei_DfuConfirm_msg;
 extern const pb_msgdesc_t sensei_DfuChunk_msg;
 extern const pb_msgdesc_t sensei_DfuStatus_msg;
+extern const pb_msgdesc_t sensei_GnssFixRequest_msg;
+extern const pb_msgdesc_t sensei_GnssFixResult_msg;
 extern const pb_msgdesc_t sensei_LpwanSleep_msg;
 extern const pb_msgdesc_t sensei_LpwanRequest_msg;
 extern const pb_msgdesc_t sensei_LpwanVersion_msg;
@@ -875,6 +971,8 @@ extern const pb_msgdesc_t sensei_LpwanEvent_msg;
 #define sensei_DfuConfirm_fields &sensei_DfuConfirm_msg
 #define sensei_DfuChunk_fields &sensei_DfuChunk_msg
 #define sensei_DfuStatus_fields &sensei_DfuStatus_msg
+#define sensei_GnssFixRequest_fields &sensei_GnssFixRequest_msg
+#define sensei_GnssFixResult_fields &sensei_GnssFixResult_msg
 #define sensei_LpwanSleep_fields &sensei_LpwanSleep_msg
 #define sensei_LpwanRequest_fields &sensei_LpwanRequest_msg
 #define sensei_LpwanVersion_fields &sensei_LpwanVersion_msg
@@ -897,15 +995,17 @@ extern const pb_msgdesc_t sensei_LpwanEvent_msg;
 #define sensei_DfuConfirm_size                   5
 #define sensei_DfuStatus_size                    30
 #define sensei_DownlinkRx_size                   1035
+#define sensei_GnssFixRequest_size               6
+#define sensei_GnssFixResult_size                49
 #define sensei_LoraConfigure_size                20
 #define sensei_LoraProvision_size                38
 #define sensei_LpwanError_size                   52
 #define sensei_LpwanEvent_size                   1038
 #define sensei_LpwanRequest_size                 1048
-#define sensei_LpwanResponse_size                164
+#define sensei_LpwanResponse_size                185
 #define sensei_LpwanSleep_size                   6
-#define sensei_LpwanStatus_size                  153
-#define sensei_LpwanVersion_size                 96
+#define sensei_LpwanStatus_size                  174
+#define sensei_LpwanVersion_size                 98
 #define sensei_LteConfigure_size                 134
 #define sensei_NetworkTime_size                  7
 #define sensei_RadioEvent_size                   2

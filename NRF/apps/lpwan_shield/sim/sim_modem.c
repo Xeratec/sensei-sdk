@@ -117,7 +117,14 @@ void lte_lc_register_handler(lte_lc_evt_handler_t h) { handler = h; }
 
 int lte_lc_system_mode_set(enum lte_lc_system_mode mode, enum lte_lc_system_mode_preference pref) {
   ARG_UNUSED(pref);
-  LOG_INF("modem: system mode %s", mode == LTE_LC_SYSTEM_MODE_NBIOT ? "NB-IoT" : "LTE-M");
+  LOG_INF("modem: system mode %s%s",
+          mode == LTE_LC_SYSTEM_MODE_NBIOT || mode == LTE_LC_SYSTEM_MODE_NBIOT_GPS ? "NB-IoT" : "LTE-M",
+          mode == LTE_LC_SYSTEM_MODE_NBIOT_GPS || mode == LTE_LC_SYSTEM_MODE_LTEM_GPS ? " with GNSS" : "");
+  return 0;
+}
+
+int lte_lc_func_mode_set(enum lte_lc_func_mode mode) {
+  LOG_INF("modem: functional mode %d", (int)mode);
   return 0;
 }
 

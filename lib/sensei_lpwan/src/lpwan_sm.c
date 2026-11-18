@@ -40,6 +40,11 @@ sensei_LpwanResult lpwan_sm_admit(lpwan_sm_t *sm, const sensei_LpwanRequest *req
   case sensei_LpwanRequest_dfu_confirm_tag:
     return sensei_LpwanResult_LPWAN_OK;
 
+  case sensei_LpwanRequest_gnss_fix_tag:
+  case sensei_LpwanRequest_gnss_cancel_tag:
+    /* The GNSS is independent of the radio state; what a fix may do next to LTE is lpwan_gnss_admit(). */
+    return sensei_LpwanResult_LPWAN_OK;
+
   case sensei_LpwanRequest_dfu_begin_tag:
   case sensei_LpwanRequest_dfu_chunk_tag:
   case sensei_LpwanRequest_dfu_finish_tag:
@@ -135,6 +140,7 @@ bool lpwan_event_is_state(const sensei_LpwanEvent *evt) {
   case sensei_LpwanEvent_disconnected_tag:
   case sensei_LpwanEvent_tx_done_tag:
   case sensei_LpwanEvent_error_tag:
+  case sensei_LpwanEvent_gnss_result_tag: /* no state change, but the master waits for it: keep its queue slot */
     return true;
   default:
     return false;

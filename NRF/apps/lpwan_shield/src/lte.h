@@ -38,6 +38,9 @@ void lte_fill_status(sensei_LpwanStatus *st);
 void lte_modem_string(char *out, size_t cap);
 /** Start the modem library if it is not running (idempotent). 0 or a negative errno. */
 int lte_modem_init(void);
+/** GNSS: start the modem library if needed and, unless LTE is on, set the system mode with GNSS (the modem takes it
+ * only while off). With LTE on the mode was set at the connect, with GNSS in it. 0 or a negative errno. */
+int lte_gnss_prepare(void);
 /** The firmware update shut the modem library down and started it again (ok: it runs): read the version again. */
 void lte_modem_restarted(bool ok);
 

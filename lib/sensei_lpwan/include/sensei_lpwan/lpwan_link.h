@@ -110,6 +110,7 @@ void lpwan_sm_init(lpwan_sm_t *sm);
  * lpwan_master_next_seq()), so a tx_done that arrives while the request is still on the wire matches.
  *
  *   get_version, get_status, diag_ack   any state
+ *   gnss_fix, gnss_cancel               any state (no change; the shield decides with lpwan_gnss.h)
  *   lte_configure, lora_configure,
  *   lora_provision                      IDLE
  *   lte_connect, lora_join              IDLE, tech NONE, then CONNECTING (tech LTE or LORA)
@@ -134,8 +135,9 @@ sensei_LpwanResult lpwan_sm_admit(lpwan_sm_t *sm, const sensei_LpwanRequest *req
  */
 bool lpwan_sm_event(lpwan_sm_t *sm, const sensei_LpwanEvent *evt);
 
-/** True for events that move the state machine (joined, connected, disconnected, tx_done, error).
- *  The others (downlink, network time) may be dropped when the event queue is nearly full. */
+/** True for events that move the state machine (joined, connected, disconnected, tx_done, error) and for the result of
+ *  a GNSS fix, which the master waits for. The others (downlink, network time, connection evaluation) may be dropped
+ *  when the event queue is nearly full. */
 bool lpwan_event_is_state(const sensei_LpwanEvent *evt);
 
 /** The master gives up the send in flight (timeout): SENDING becomes CONNECTED. */

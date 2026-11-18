@@ -31,6 +31,7 @@ static int link_port;
 static int ctl_port;
 static char *bind_addr;
 static char *lr_state;
+static char *gnss_opt;
 
 static void add_options(void) {
   static struct args_struct_t opts[] = {
@@ -62,6 +63,14 @@ static void add_options(void) {
           .dest = (void *)&lr_state,
           .descript = "File with what the LR1121 keeps in its flash (LoRaWAN session), default: none",
       },
+      {
+          .option = "gnss",
+          .name = "scenario",
+          .type = 's',
+          .dest = (void *)&gnss_opt,
+          .descript = "Scenario of the fake GNSS, the words of the control command 'gnss', e.g. \"fix 5 473764000 "
+                      "85476000 410 5 8\"",
+      },
       ARG_TABLE_ENDMARKER,
   };
 
@@ -72,6 +81,7 @@ NATIVE_TASK(add_options, PRE_BOOT_1, 10);
 int sim_opt_link_port(void) { return link_port; }
 const char *sim_opt_lr_state(void) { return lr_state; }
 const char *sim_opt_bind(void) { return bind_addr != NULL ? bind_addr : "127.0.0.1"; }
+const char *sim_opt_gnss(void) { return gnss_opt; }
 
 /* ---- hex ---- */
 
@@ -166,6 +176,10 @@ static void command(char *text) {
     sim_lr_command(argc - 1, argv + 1);
   } else if (strcmp(argv[0], "modem") == 0) {
     sim_modem_command(argc - 1, argv + 1);
+#ifdef CONFIG_LPWAN_SHIELD_GNSS
+  } else if (strcmp(argv[0], "gnss") == 0) {
+    sim_gnss_command(argc - 1, argv + 1);
+#endif
   } else if (strcmp(argv[0], "shield") == 0 && argc > 1 && strcmp(argv[1], "reset") == 0) {
     sim_shield_restart("reset on request of the harness");
   } else {
@@ -214,8 +228,32 @@ static void ctl_main(void *a, void *b, void *c) {
   }
 }
 
+/* The option holds the words of a gnss command; it applies before the first fix and survives a restart (the exec keeps
+ * the command line). */
+static void apply_gnss_option(void) {
+#ifdef CONFIG_LPWAN_SHIELD_GNSS
+  char *argv[8];
+  int argc = 0;
+  char *save = NULL;
+  char *copy;
+
+  if (gnss_opt == NULL) {
+    return;
+  }
+  copy = strdup(gnss_opt);
+  for (char *t = strtok_r(copy, " ,\t", &save); t != NULL && argc < 8; t = strtok_r(NULL, " ,\t", &save)) {
+    argv[argc++] = t;
+  }
+  if (argc > 0) {
+    sim_gnss_command(argc, argv);
+  }
+  free(copy);
+#endif
+}
+
 void sim_shield_start(void) {
   LOG_INF("simulated LPWAN shield (native_sim)");
+  apply_gnss_option();
   if (ctl_port <= 0) {
     LOG_WRN("no control port (-ctl_port): the LoRaWAN network is not reachable");
     return;

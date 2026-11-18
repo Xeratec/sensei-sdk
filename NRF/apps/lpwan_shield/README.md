@@ -9,7 +9,7 @@ Authors:
 # LPWAN shield firmware (nRF9151)
 
 Firmware for the nRF9151 on the SENSEI LPWAN shield. It is an SPI slave of the nRF5340 and gives
-it LTE-M, NB-IoT and LoRaWAN (through the LR1121). Any SENSEI app on the nRF5340 can use it through
+it LTE-M, NB-IoT, LoRaWAN (through the LR1121) and a GNSS fix of the nRF9151. Any SENSEI app on the nRF5340 can use it through
 the client library `lib/sensei_lpwan`.
 
 - Pin map and hardware findings: [HARDWARE.md](HARDWARE.md)
@@ -44,11 +44,11 @@ The SENSEI IEQ node builds it with `make nrf9151` and `make nrf9151-release` (`f
 
 | Build | Flash (non-secure image) | RAM | MCUboot | TF-M |
 |---|---|---|---|---|
-| Release | 107.2 kB | 56 kB | 27.4 kB of 64 kB | 64.3 kB |
-| Debug (RTT log, modem trace) | 166.2 kB | 66 kB | 27.4 kB of 64 kB | 64.3 kB |
+| Release | 113.1 kB | 59 kB | 27.4 kB of 64 kB | 64.3 kB |
+| Debug (RTT log, modem trace) | 173.9 kB | 69 kB | 27.4 kB of 64 kB | 64.3 kB |
 
-The non-secure slot is 196.6 kB (188 kB usable) with MCUboot; 212 kB without. Kconfig: `LPWAN_SHIELD_LTE`, `LPWAN_SHIELD_LORA` (both default y).
-Turn one off to save flash.
+The non-secure slot is 196.6 kB (188 kB usable) with MCUboot; 212 kB without. Kconfig: `LPWAN_SHIELD_LTE`, `LPWAN_SHIELD_LORA`,
+`LPWAN_SHIELD_GNSS` (all default y). Turn one off to save flash; the GNSS costs 4.9 kB in Release and 5.7 kB in Debug (before it: 108.2 kB and 168.2 kB).
 
 ## Simulated shield (native_sim)
 
@@ -177,6 +177,39 @@ network grants none (the event `LTE_LC_EVT_PSM_UPDATE` with a TAU of -1 is logge
 Low power: the modem stays off until the first connect. After the uplink, the nRF5340 sends
 `sleep(0)`: the nRF9151 stays registered and the modem sleeps in PSM; the CPU idles with the SPIS
 armed. `sleep(1)` or `lte_disconnect` puts the modem offline.
+
+## GNSS (`src/gnss.c`)
+
+`CONFIG_LPWAN_SHIELD_GNSS` (default y, needs `LPWAN_SHIELD_LTE` for the modem library). One fix per request, on the NCS `nrf_modem_gnss`
+API. Not tested on hardware.
+
+- **Messages** (`lpwan.proto`, tags 50 to 59): the request `gnss_fix { timeout_s }` (0: 120 s, at most 900) is answered at once (`LPWAN_OK`,
+  `LPWAN_BUSY`, `LPWAN_INVALID`); the result is the event `gnss_result`: `GnssFixResult` with the request's `seq`, a status (`ok`, `timeout`,
+  `blocked`, `failed`, `cancelled`; `busy` and `not supported` are the client's verdicts), latitude and longitude in degrees x 1e7, altitude
+  (above the WGS-84 ellipsoid, as the modem reports it), accuracy (2D, 1 sigma, rounded up), satellites used, the UTC time of the fix and the time
+  to fix. `gnss_cancel` ends a running fix (the result follows as `cancelled`). `LpwanVersion.gnss` says that the app has the GNSS;
+  `LpwanStatus.gnss_attempts`, `gnss_fixes` and `gnss_on_ms` (time GNSS was active) count since the shield started. A shield without it (an older
+  app, or `LPWAN_SHIELD_GNSS=n`) answers `LPWAN_UNSUPPORTED`: the client takes that, and a missing `gnss` in the version, as "not supported" and
+  nothing else changes.
+- **Modem.** The system mode is LTE-M or NB-IoT **with GPS** (`LTE_LC_SYSTEM_MODE_LTEM_GPS`, `_NBIOT_GPS`), set at the connect and, for a fix
+  without LTE (a LoRa-only node), by the fix itself (`lte_gnss_prepare()` starts the modem library). The normal functional mode activates the
+  GNSS that is in the system mode, so the connect takes it back at once (`LTE_LC_FUNC_MODE_DEACTIVATE_GNSS`): GNSS is active only for an
+  attempt: a worker thread sets functional mode 31, starts a single fix (`fix_interval` 0, `fix_retry` = the timeout), waits for a valid PVT
+  frame, the timeout or a cancel, stops, sets mode 30 and queues the event. It works with LTE off.
+- **Fix and LTE.** The modem runs GNSS only while LTE is idle (PSM, eDRX gaps, LTE off); there is no priority mode. If it keeps GNSS blocked
+  (`BLOCKED` event, or the PVT flags say that the windows were missed or too short, typical with PSM and eDRX both off) until the timeout, the
+  result is `blocked`. The rule for a fix and an LTE message (`lib/sensei_lpwan/include/sensei_lpwan/lpwan_gnss.h`, host-tested): a send never
+  waits for a fix (the modem gives LTE priority); the functional mode changes (connect, disconnect, configure, evaluation, deep sleep) and the
+  fix exclude each other. A fix is refused (`LPWAN_BUSY`) while LTE connects, sends or disconnects; while one runs the shield refuses those
+  requests with `LPWAN_BUSY`, and the nRF5340 client keeps LTE out of the way until the result. LoRa is not touched.
+- **Antenna.** The active antenna is supplied through the modem's COEX0 pin (net `EN_3V3_GNSS_ANT`, load switch U5, see HARDWARE.md). The
+  shield selects the NCS library `modem_antenna` (`CONFIG_MODEM_ANTENNA`), which sends `AT%XCOEX0=1,1,1565,1586` at every start of the modem
+  library: COEX0 is high while GNSS is active in 1565 to 1586 MHz. No `AT%XMAGPIO` (the shield has no antenna tuner on those pins). **Untested on
+  hardware:** the supply, whether this COEX0 setting is the one the load switch needs, and the LR1121 coexistence line (COEX2, `AT%XCOEX2`) is
+  not set.
+- **Not done.** No A-GNSS and no nRF Cloud (no account): the receiver starts from what the modem keeps (ephemeris, almanac, last position). Assistance
+  data over the node's own link is a follow-up, as is a charge-counter state for `gnss_on_ms` in the node.
+- **Simulation.** The simulated shield has a fake `nrf_modem_gnss` (sim/README.md): a fix after a time, a timeout, blocked, or an error.
 
 ## LoRaWAN (`src/lora.c`)
 

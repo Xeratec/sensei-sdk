@@ -42,9 +42,13 @@ const char *sim_opt_bind(void);
 /** Restart the process: the shield has lost its power (what a reset or a power cycle does on the board). */
 void sim_shield_restart(const char *why);
 
-/** Commands of the harness: "lr <...>" (sim_lr1121.c), "modem <...>" (sim_modem.c). */
+/** Commands of the harness: "lr <...>" (sim_lr1121.c), "modem <...>" (sim_modem.c), "gnss <...>" (sim_gnss.c). */
 void sim_lr_command(int argc, char **argv);
 void sim_modem_command(int argc, char **argv);
+void sim_gnss_command(int argc, char **argv);
+
+/** The option -gnss="<words of the gnss command>": the scenario that survives a restart of the shield. NULL: none. */
+const char *sim_opt_gnss(void);
 
 /** Hex text to bytes and back. Returns the number of bytes (or -1 for bad text). */
 int sim_hex_decode(const char *hex, uint8_t *out, int cap);

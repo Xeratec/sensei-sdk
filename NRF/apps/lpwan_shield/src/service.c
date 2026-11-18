@@ -24,9 +24,13 @@
 
 #include "dfu.h"
 #include "diag.h"
+#ifdef CONFIG_LPWAN_SHIELD_GNSS
+#include "gnss.h"
+#endif
 #include "link.h"
 #include "lora.h"
 #include "lte.h"
+#include "sensei_lpwan/lpwan_gnss.h"
 #include "sensei_lpwan/lpwan_lora.h"
 #include "service.h"
 
@@ -167,6 +171,14 @@ void svc_emit_time(sensei_Radio radio, uint32_t unix_s) {
   svc_emit(&e);
 }
 
+void svc_emit_gnss_result(const sensei_GnssFixResult *r) {
+  sensei_LpwanEvent e = sensei_LpwanEvent_init_zero;
+
+  e.which_body = sensei_LpwanEvent_gnss_result_tag;
+  e.gnss_result = *r;
+  svc_emit(&e);
+}
+
 void svc_emit_error(sensei_LpwanResult code, const char *msg) {
   sensei_LpwanEvent e = sensei_LpwanEvent_init_zero;
 
@@ -192,6 +204,7 @@ static void fill_version(sensei_LpwanResponse *r) {
   r->version.firmware.patch = APP_PATCHLEVEL;
   r->version.protocol = LPWAN_PROTOCOL_VERSION;
   dfu_fill_version(&r->version);
+  r->version.gnss = IS_ENABLED(CONFIG_LPWAN_SHIELD_GNSS);
   r->version.modem[0] = '\0';
 #ifdef CONFIG_LPWAN_SHIELD_LORA
   lora_modem_string(r->version.modem, sizeof(r->version.modem));
@@ -215,6 +228,9 @@ static void fill_status(sensei_LpwanResponse *r) {
 #endif
 #ifdef CONFIG_LPWAN_SHIELD_LORA
   lora_fill_status(&r->status);
+#endif
+#ifdef CONFIG_LPWAN_SHIELD_GNSS
+  gnss_fill_status(&r->status);
 #endif
   k_mutex_lock(&sm_lock, K_FOREVER);
   if (lpwan_txt_take_late(&txt, &r->status.late_tx_seq, &r->status.late_tx_ok)) {
@@ -299,6 +315,24 @@ static sensei_LpwanResult run(const sensei_LpwanRequest *req, struct send_answer
 #endif
     }
     return backend_off();
+  case sensei_LpwanRequest_gnss_fix_tag:
+#ifdef CONFIG_LPWAN_SHIELD_GNSS
+  {
+    k_mutex_lock(&sm_lock, K_FOREVER);
+    sensei_LpwanResult adm = lpwan_gnss_admit(&sm, gnss_active());
+
+    k_mutex_unlock(&sm_lock);
+    return adm == sensei_LpwanResult_LPWAN_OK ? gnss_start(req->seq, req->gnss_fix.timeout_s) : adm;
+  }
+#else
+    return backend_off();
+#endif
+  case sensei_LpwanRequest_gnss_cancel_tag:
+#ifdef CONFIG_LPWAN_SHIELD_GNSS
+    return gnss_cancel();
+#else
+    return backend_off();
+#endif
   case sensei_LpwanRequest_lte_eval_tag:
 #ifdef CONFIG_LPWAN_SHIELD_LTE
     return lte_eval();
@@ -382,7 +416,17 @@ static void on_request(struct link_slave *s, const sensei_LpwanRequest *req, voi
   lpwan_sm_t admitted;
 
   /* An update holds the link: no radio work meanwhile (the flash, the modem and the CPU are busy). */
-  res = dfu_holds_link() && !allowed_during_dfu(req) ? sensei_LpwanResult_LPWAN_BUSY : lpwan_sm_admit(&sm, req);
+  if (dfu_holds_link() && !allowed_during_dfu(req)) {
+    res = sensei_LpwanResult_LPWAN_BUSY;
+#ifdef CONFIG_LPWAN_SHIELD_GNSS
+  } else if (gnss_active() && lpwan_gnss_refuses(req, &sm)) {
+    /* A fix and the LTE connect, disconnect, send and configure exclude each other (lpwan_gnss.h). Before the
+     * admission, which would move the state machine. */
+    res = sensei_LpwanResult_LPWAN_BUSY;
+#endif
+  } else {
+    res = lpwan_sm_admit(&sm, req);
+  }
   admitted = sm;
   if (res == sensei_LpwanResult_LPWAN_OK) {
     k_mutex_unlock(&sm_lock);

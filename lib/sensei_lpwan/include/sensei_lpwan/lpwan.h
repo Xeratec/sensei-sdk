@@ -29,6 +29,7 @@
 #include <zephyr/kernel.h>
 
 #include "sensei/lpwan.pb.h"
+#include "sensei_lpwan/lpwan_gnss.h"
 #include "sensei_lpwan/lpwan_rai.h"
 
 #ifdef __cplusplus
@@ -299,12 +300,52 @@ struct sensei_lpwan_shield_diag {
   uint32_t rrc_connected_ms; /**< time in the RRC connected state, ms; wraps after 49 days */
   uint32_t attaches;         /**< registrations with the network */
   uint32_t psm_entries;      /**< times the modem went into PSM */
+  /** GNSS of the shield since it started (LpwanStatus 16 to 18). Valid only when the shield reported them. Like the
+   *  LTE counters they restart from zero with the shield. gnss_on_ms is the time GNSS was active: a charge counter
+   *  can count it. */
+  bool gnss_valid;
+  uint32_t gnss_attempts;
+  uint32_t gnss_fixes;
+  uint32_t gnss_on_ms;
 };
 
 /** The shield's diagnostics (the node puts the reset cause in Status). -ENODATA: not read yet. The counters are as old
  *  as the last status read: it comes with every version read, so refresh them with sensei_lpwan_query_version() (the
  *  shield stays on with LTE, so that costs one SPI exchange). */
 int sensei_lpwan_shield_diag(struct sensei_lpwan_shield_diag *out);
+
+/**
+ * GNSS of the shield's nRF9151: one position fix on request. The shield is powered if it is off. The rules of a fix
+ * next to LTE are in sensei_lpwan/lpwan_gnss.h: LoRa is not touched; with LTE the client keeps LTE out of the way until
+ * the fix has ended (sensei_lpwan_radio_ready(LTE) is false, an LTE send gives -EAGAIN, on_up(RADIO_BLE) follows), and
+ * a fix is not started while an LTE connect or send is in flight.
+ *
+ * done(err, res, user) runs on hooks.wq. err 0: the shield answered, res->status tells how the fix ended (GNSS_FIX_OK
+ * with the position, TIMEOUT, BLOCKED, CANCELLED, FAILED). Else res->status is the verdict of the client:
+ *   -ENOTSUP     the shield has no GNSS (an older shield app, or built without it): GNSS_FIX_NOT_SUPPORTED. Neither an
+ *                unknown request nor a missing answer breaks the link: the client treats it as "not supported".
+ *   -EBUSY       not started: LTE was connecting or sending, a fix was already running, an update of the shield holds
+ *                the link, GAP9 has the bus: GNSS_FIX_BUSY. Try again later.
+ *   -ETIMEDOUT   no result within the time and the margin: the client asked the shield to cancel.
+ *   -ENOTCONN    the shield lost its power or the link while the fix ran. -EIO, -EPROTONOSUPPORT: the link failed.
+ * The callback runs after the pending flag is cleared: it may start the next fix.
+ */
+typedef void (*sensei_lpwan_gnss_done_fn)(int err, const sensei_GnssFixResult *res, void *user);
+
+/** Ask for a fix. timeout_s 0 is 120 s, at most 900. Returns 0 if it was queued, -EINVAL for a bad timeout, -EBUSY if
+ *  a fix is pending. The result comes in done(), also for a fix that could not start. */
+int sensei_lpwan_gnss_fix(uint32_t timeout_s, sensei_lpwan_gnss_done_fn done, void *user);
+
+/** End the fix that is pending or runs; done() follows (status CANCELLED, or whatever came first). No-op without one.
+ */
+int sensei_lpwan_gnss_cancel(void);
+
+/** True from sensei_lpwan_gnss_fix() until done() is called. */
+bool sensei_lpwan_gnss_busy(void);
+
+/** Whether the shield has the GNSS, from its last version read: 1 yes, 0 no, -ENODATA not read yet (the shield is
+ *  off: ask for a fix, the answer is -ENOTSUP if there is none). */
+int sensei_lpwan_gnss_supported(void);
 
 /** One-line state for the shell and status messages. */
 const char *sensei_lpwan_state_str(void);

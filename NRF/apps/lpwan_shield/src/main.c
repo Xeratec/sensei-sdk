@@ -23,6 +23,9 @@
 
 #include "dfu.h"
 #include "diag.h"
+#ifdef CONFIG_LPWAN_SHIELD_GNSS
+#include "gnss.h"
+#endif
 #include "lora.h"
 #include "lte.h"
 
@@ -73,6 +76,12 @@ int main(void) {
   err = lte_init();
   if (err) {
     LOG_ERR("LTE init failed: %d", err);
+  }
+#endif
+#ifdef CONFIG_LPWAN_SHIELD_GNSS
+  err = gnss_init();
+  if (err) {
+    LOG_ERR("GNSS init failed: %d", err);
   }
 #endif
 #ifdef CONFIG_LPWAN_SHIELD_LORA

@@ -292,15 +292,39 @@ void lte_modem_restarted(bool ok) {
   k_mutex_unlock(&modem_lock);
 }
 
+/* With the GNSS built in, GNSS is in the system mode, so that a fix needs only the functional mode 31 (gnss.c). */
+static enum lte_lc_system_mode system_mode(void) {
+  bool nb = cfg.mode == sensei_LteMode_LTE_NB_IOT;
+
+  if (IS_ENABLED(CONFIG_LPWAN_SHIELD_GNSS)) {
+    return nb ? LTE_LC_SYSTEM_MODE_NBIOT_GPS : LTE_LC_SYSTEM_MODE_LTEM_GPS;
+  }
+  return nb ? LTE_LC_SYSTEM_MODE_NBIOT : LTE_LC_SYSTEM_MODE_LTEM;
+}
+
+int lte_gnss_prepare(void) {
+  int err = lte_modem_init();
+
+  if (err) {
+    return err;
+  }
+  if (!want_connected) { /* the modem is off or offline: the system mode may change. LTE on: it has GNSS already */
+    err = lte_lc_system_mode_set(system_mode(), LTE_LC_SYSTEM_MODE_PREFER_AUTO);
+    if (err) {
+      LOG_ERR("system mode with GNSS: %d", err);
+      return -EIO;
+    }
+  }
+  return 0;
+}
+
 static int do_connect(void) {
   int err = lte_modem_init();
 
   if (err) {
     return err;
   }
-  err =
-      lte_lc_system_mode_set(cfg.mode == sensei_LteMode_LTE_NB_IOT ? LTE_LC_SYSTEM_MODE_NBIOT : LTE_LC_SYSTEM_MODE_LTEM,
-                             LTE_LC_SYSTEM_MODE_PREFER_AUTO);
+  err = lte_lc_system_mode_set(system_mode(), LTE_LC_SYSTEM_MODE_PREFER_AUTO);
   if (err) {
     LOG_ERR("system mode: %d", err);
     return -EIO;
@@ -320,6 +344,13 @@ static int do_connect(void) {
   if (err) {
     LOG_ERR("connect_async: %d", err);
     return -EIO;
+  }
+  if (IS_ENABLED(CONFIG_LPWAN_SHIELD_GNSS)) {
+    /* The normal functional mode also activates the GNSS that is in the system mode: it is active only for a fix. */
+    err = lte_lc_func_mode_set(LTE_LC_FUNC_MODE_DEACTIVATE_GNSS);
+    if (err) {
+      LOG_WRN("GNSS stays active (%d)", err);
+    }
   }
   if (k_sem_take(&registered_sem, K_SECONDS(CONFIG_LPWAN_SHIELD_LTE_CONNECT_TIMEOUT_S)) != 0) {
     (void)lte_lc_offline();

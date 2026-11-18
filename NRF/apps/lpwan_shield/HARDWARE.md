@@ -41,7 +41,7 @@ shield (J1 40-pin, J2 50-pin) or MCU pins. Items marked **verify** were not conf
 | LR1121 event | P0.02 | nRF91_GPIO4 | LR1121 DIO9 (Modem-E event) |
 | LTE antenna | ANT | RF50_LTE1 | RF connector J3 (RF50_LTE2), U.FL J4 (RF50_LTE4) |
 | GNSS | GPS | RF50_GNSS1 | U.FL J5 (RF50_GNSS2) |
-| GNSS antenna supply | COEX0 | EN_3V3_GNSS_ANT | load switch U5 |
+| GNSS antenna supply | COEX0 | EN_3V3_GNSS_ANT | load switch U5. The app sets `AT%XCOEX0=1,1,1565,1586` (NCS `modem_antenna`), **verify** on hardware |
 | LTE/GNSS coexistence | COEX2 | GNSS_LTE_ACTIVE | LR1121 DIO7 |
 | SIM | SIM_CLK/IO/RST | SIM_* | SIM holder U8 via ESD U7 |
 | SWD, reset | SWDIO/SWDCLK/RESET | nRF91_SWDIO ... | debug header J12 and base board J2 |

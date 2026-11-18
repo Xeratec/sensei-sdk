@@ -157,6 +157,38 @@ message DfuStatus {
   sint32 detail = 7;
 }
 
+// ---- GNSS of the nRF9151 ----
+//
+// One fix on request: gnss_fix is answered at once, the result is the gnss_result event. The fix runs only while LTE is
+// idle (PSM, eDRX gaps, LTE off); the rules for a fix and LTE are in
+// lib/sensei_lpwan/include/sensei_lpwan/lpwan_gnss.h.
+
+enum GnssFixStatus {
+  GNSS_FIX_OK = 0;            // a valid fix: the position fields are set
+  GNSS_FIX_TIMEOUT = 1;       // no fix within the time
+  GNSS_FIX_BLOCKED = 2;       // the modem kept GNSS blocked (LTE busy, time windows too short) until the end
+  GNSS_FIX_BUSY = 3;          // not started: LTE was connecting, sending or disconnecting (client side verdict)
+  GNSS_FIX_NOT_SUPPORTED = 4; // the shield has no GNSS (client side verdict)
+  GNSS_FIX_FAILED = 5;        // modem error (library, functional mode, GNSS start)
+  GNSS_FIX_CANCELLED = 6;     // gnss_cancel, or the link or the power was lost
+}
+
+message GnssFixRequest {
+  uint32 timeout_s = 1; // 0: 120 s, at most 900
+}
+
+message GnssFixResult {
+  uint32 seq = 1; // seq of the gnss_fix request
+  GnssFixStatus status = 2;
+  sint32 lat_e7 = 3;     // degrees x 1e7, north positive (with status OK)
+  sint32 lon_e7 = 4;     // degrees x 1e7, east positive
+  sint32 alt_m = 5;      // above the ellipsoid as the modem reports it, m
+  uint32 acc_m = 6;      // horizontal accuracy estimate of the modem, m (0: unknown)
+  uint32 sats = 7;       // satellites used in the fix
+  fixed32 unix_time = 8; // UTC of the fix, Unix s (0: not known)
+  uint32 ttff_ms = 9;    // from the start of the receiver to the fix; without a fix the time it ran
+}
+
 message LpwanSleep {
   uint32 deep = 1; // 0: idle with modem kept registered, 1: deepest state
 }
@@ -189,6 +221,9 @@ message LpwanRequest {
     Empty dfu_abort = 44;        // drop the open transfer
     Empty dfu_status = 45;       // state and next offset (the resume query)
     DfuConfirm dfu_confirm = 46; // the master accepted the handshake of an image on trial (sent again until trial ends)
+    // GNSS of the nRF9151: one fix. Tags 50 to 59 are reserved for it. An older shield answers LPWAN_UNSUPPORTED.
+    GnssFixRequest gnss_fix = 50; // answered at once (OK, BUSY, INVALID); the result follows as the gnss_result event
+    Empty gnss_cancel = 51;       // end the fix that runs: the gnss_result event follows with status CANCELLED
   }
 }
 
@@ -200,6 +235,7 @@ message LpwanVersion {
   bool trial = 5;         // the running image is on trial: the master confirms it with dfu_confirm
   uint32 dfu_targets = 6; // bit 0: the app can be updated, bit 1: the modem firmware can (0: no update support)
   string lte_modem = 7;   // firmware of the nRF91 modem (AT%SHORTSWVER), empty until the modem library has run
+  bool gnss = 8;          // the shield app has the GNSS (gnss_fix is understood); false for an older shield
 }
 
 message LpwanStatus {
@@ -231,6 +267,10 @@ message LpwanStatus {
   optional uint32 rrc_connected_ms = 13; // time in the RRC connected state, ms (a running period is included)
   optional uint32 attaches = 14;         // registrations with the network
   optional uint32 psm_entries = 15;      // times the modem went into PSM (modem sleep of type PSM)
+  // GNSS since the shield started. Set when the shield has the GNSS, absent otherwise. gnss_on_ms wraps after 49 days.
+  optional uint32 gnss_attempts = 16; // fixes started
+  optional uint32 gnss_fixes = 17;    // ... that ended with a fix
+  optional uint32 gnss_on_ms = 18;    // time GNSS was active (functional mode 31 to 30), ms
 }
 
 message NetworkTime {
@@ -331,5 +371,6 @@ message LpwanEvent {
     NetworkTime network_time = 6;
     LpwanError error = 7;
     ConnEval conn_eval = 8;
+    GnssFixResult gnss_result = 50; // the end of a fix (OK or not); tags 50 to 59 are the GNSS's
   }
 }

@@ -38,6 +38,12 @@ PB_BIND(sensei_DfuChunk, sensei_DfuChunk, 2)
 PB_BIND(sensei_DfuStatus, sensei_DfuStatus, AUTO)
 
 
+PB_BIND(sensei_GnssFixRequest, sensei_GnssFixRequest, AUTO)
+
+
+PB_BIND(sensei_GnssFixResult, sensei_GnssFixResult, AUTO)
+
+
 PB_BIND(sensei_LpwanSleep, sensei_LpwanSleep, AUTO)
 
 
@@ -75,6 +81,8 @@ PB_BIND(sensei_ConnEval, sensei_ConnEval, AUTO)
 
 
 PB_BIND(sensei_LpwanEvent, sensei_LpwanEvent, 2)
+
+
 
 
 

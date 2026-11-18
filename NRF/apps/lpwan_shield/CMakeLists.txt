@@ -65,6 +65,11 @@ if(CONFIG_LPWAN_SHIELD_SIM AND CONFIG_LPWAN_SHIELD_LTE)
   target_sources(app PRIVATE sim/sim_modem.c)
 endif()
 
+target_sources_ifdef(CONFIG_LPWAN_SHIELD_GNSS app PRIVATE src/gnss.c)
+if(CONFIG_LPWAN_SHIELD_SIM AND CONFIG_LPWAN_SHIELD_GNSS)
+  target_sources(app PRIVATE sim/sim_gnss.c)
+endif()
+
 if(CONFIG_LPWAN_SHIELD_LORA)
   set(LR_DIR ${CMAKE_CURRENT_LIST_DIR}/third_party/lr1121_modem)
   target_sources(app PRIVATE src/lora.c)

@@ -223,7 +223,9 @@ enum cmd_type {
   CMD_PROVISION,
   CMD_VERSION,
   CMD_DFU,
-  CMD_EVAL
+  CMD_EVAL,
+  CMD_GNSS,
+  CMD_GNSS_CANCEL
 };
 
 struct cmd {
@@ -327,6 +329,20 @@ static bool eval_info_valid;
 static int64_t eval_info_at;
 static sensei_RaiSupport rai_seen;
 #define EVAL_TIMEOUT_MS 30000u /* the shield evaluates for seconds at most */
+
+/* GNSS fix of the shield (lpwan_gnss.h). gnss_pending: from the call to the callback, it keeps LTE out of the way (the
+ * rule is in lpwan_gnss.h). gnss_open: the thread works on it, from the start of do_gnss() to gnss_finish(). */
+static atomic_t gnss_pending;
+static atomic_t gnss_cancel_flag; /* cancel asked before the request went out */
+static bool gnss_open;            /* thread owned */
+static int64_t gnss_deadline;     /* result not later than this (thread owned), 0: the request has not gone out */
+static uint32_t gnss_seq;         /* seq of the gnss_fix request, the result event carries it */
+static uint32_t gnss_timeout;     /* s, as requested */
+static sensei_lpwan_gnss_done_fn gnss_done;
+static void *gnss_user;
+static sensei_GnssFixResult gnss_res;
+static int gnss_err;
+static struct k_work gnss_work;
 
 /* Update of the shield: the session holds the link (no data uplinks, no power gating) from dfu_begin until it ends
  * (apply, abort, an idle or too long session, or an error that ends it). One request at a time. The rules and the
@@ -575,6 +591,54 @@ static void eval_failed(bool unsupported) {
   eval_flush();
 }
 
+/* ---- GNSS fix ---- */
+
+/* The fix is over (a result, a verdict of the client, a lost link): the callback runs on the hook work queue. */
+static void gnss_finish(int err, sensei_GnssFixStatus status, const sensei_GnssFixResult *res) {
+  if (!gnss_open) {
+    return;
+  }
+  gnss_open = false;
+  gnss_deadline = 0;
+  memset(&gnss_res, 0, sizeof(gnss_res));
+  if (res != NULL) {
+    gnss_res = *res;
+  }
+  gnss_res.status = status;
+  gnss_err = err;
+  if (shield_on && !connecting && !atomic_get(&sending) && !atomic_get(&dfu_active)) {
+    idle_deadline =
+        k_uptime_get() + CONFIG_SENSEI_LPWAN_IDLE_S * 1000LL; /* a LoRa or BLE node powers the shield down */
+  }
+  submit_work(&gnss_work);
+}
+
+static void gnss_done_fn(struct k_work *w) {
+  sensei_lpwan_gnss_done_fn cb = gnss_done;
+  void *u = gnss_user;
+  sensei_GnssFixResult r = gnss_res;
+  int err = gnss_err;
+
+  ARG_UNUSED(w);
+  gnss_done = NULL;
+  atomic_set(&gnss_pending, 0); /* before the callback: it may ask for the next fix */
+  if (cb != NULL) {
+    cb(err, &r, u);
+  }
+  if (hooks.on_up != NULL) {
+    hooks.on_up(sensei_Radio_RADIO_BLE); /* LTE was kept out of the way: the uplink queue may go on */
+  }
+}
+
+static void gnss_event(const sensei_GnssFixResult *r) {
+  if (!gnss_open || r->seq != gnss_seq) {
+    LOG_WRN("GNSS result of seq %u ignored (%s)", (unsigned)r->seq, gnss_open ? "another fix" : "none waits");
+    return;
+  }
+  LOG_INF("GNSS: %s, %u satellites, %u ms", lpwan_gnss_status_name(r->status), (unsigned)r->sats, (unsigned)r->ttff_ms);
+  gnss_finish(0, r->status, r);
+}
+
 static void op_on_event(void *c, const sensei_LpwanEvent *evt) {
   /* False: the event does not fit (the radio is not the active one, a tx_done of another send). */
   bool applied = lpwan_sm_event(&sm, evt);
@@ -663,6 +727,9 @@ static void op_on_event(void *c, const sensei_LpwanEvent *evt) {
     break;
   case sensei_LpwanEvent_conn_eval_tag:
     eval_result(&evt->conn_eval);
+    break;
+  case sensei_LpwanEvent_gnss_result_tag:
+    gnss_event(&evt->gnss_result);
     break;
   case sensei_LpwanEvent_error_tag:
     LOG_WRN("nRF9151 error %d: %s", (int)evt->error.code, evt->error.message);
@@ -815,6 +882,10 @@ static void read_diag(void) {
   shield_diag.rrc_connected_ms = rs.status.rrc_connected_ms;
   shield_diag.attaches = rs.status.attaches;
   shield_diag.psm_entries = rs.status.psm_entries;
+  shield_diag.gnss_valid = rs.status.has_gnss_attempts && rs.status.has_gnss_fixes && rs.status.has_gnss_on_ms;
+  shield_diag.gnss_attempts = rs.status.gnss_attempts;
+  shield_diag.gnss_fixes = rs.status.gnss_fixes;
+  shield_diag.gnss_on_ms = rs.status.gnss_on_ms;
   if (rs.status.has_fault) {
     shield_diag.has_fault = true;
     shield_diag.fault = rs.status.fault;
@@ -1010,7 +1081,8 @@ static void shield_down(void) {
   if (!shield_on) {
     return;
   }
-  finish_send(-ENOTCONN); /* a send in flight is gone with the power */
+  finish_send(-ENOTCONN);                                                /* a send in flight is gone with the power */
+  gnss_finish(-ENOTCONN, sensei_GnssFixStatus_GNSS_FIX_CANCELLED, NULL); /* so is a fix */
 #ifdef CONFIG_SENSEI_LPWAN_SIM
   (void)lpwan_sim_master_power(false); /* 3.3 V off */
 #else
@@ -1113,6 +1185,9 @@ static void do_connect(sensei_Radio radio) {
   }
   if (atomic_get(&dfu_active)) {
     return; /* the update holds the link; on_up comes when it ends */
+  }
+  if (want == LPWAN_TECH_LTE && atomic_get(&gnss_pending)) {
+    return; /* a fix and an LTE connect exclude each other; on_up comes when the fix is over */
   }
   if (sm.state == LPWAN_ST_CONNECTED && sm.tech == want &&
       (want != LPWAN_TECH_LTE || lte_nb == (radio == sensei_Radio_RADIO_NBIOT))) {
@@ -1232,6 +1307,10 @@ static void do_send(void) {
     finish_send(-EAGAIN); /* on_up comes when the session ends */
     return;
   }
+  if (lpwan_tech_of_radio(send_radio) == LPWAN_TECH_LTE && atomic_get(&gnss_pending)) {
+    finish_send(-EAGAIN); /* a fix runs (a send that came before it was already asked for): on_up comes after it */
+    return;
+  }
   if (lpwan_tech_of_radio(send_radio) == LPWAN_TECH_LTE &&
       !bus_claim_wait(BUS_LTE_TX, (CONFIG_SENSEI_LPWAN_TX_TIMEOUT_S + 5) * 1000U, LPWAN_BUS_WAIT_MS)) {
     LOG_WRN("GAP9 busy, LTE send postponed");
@@ -1300,6 +1379,76 @@ static void do_eval(void) {
   }
 }
 
+/* Ask the shield for a fix. The result is an event (gnss_event); the deadline covers the time of the fix and the
+ * margin. */
+static void do_gnss(void) {
+  sensei_LpwanRequest rq = sensei_LpwanRequest_init_zero;
+  sensei_LpwanResponse rs;
+  bool known_no;
+  uint32_t timeout_s = 0;
+  int err;
+
+  gnss_open = true;
+  if (atomic_get(&gnss_cancel_flag)) {
+    gnss_finish(0, sensei_GnssFixStatus_GNSS_FIX_CANCELLED, NULL);
+    return;
+  }
+  if (atomic_get(&dfu_active)) {
+    gnss_finish(-EBUSY, sensei_GnssFixStatus_GNSS_FIX_BUSY, NULL); /* the update holds the link */
+    return;
+  }
+  err = shield_up();
+  if (err) {
+    bool later = err == -EAGAIN || err == -EBUSY; /* a retry window of the bring-up, GAP9 on the bus */
+
+    gnss_finish(later ? -EBUSY : err, later ? sensei_GnssFixStatus_GNSS_FIX_BUSY : sensei_GnssFixStatus_GNSS_FIX_FAILED,
+                NULL);
+    return;
+  }
+  k_spinlock_key_t k = k_spin_lock(&ver_lock);
+
+  known_no = shield_ver_valid && !shield_ver.gnss;
+  k_spin_unlock(&ver_lock, k);
+  if (known_no) {
+    gnss_finish(-ENOTSUP, sensei_GnssFixStatus_GNSS_FIX_NOT_SUPPORTED, NULL);
+    return;
+  }
+  if (lpwan_gnss_admit(&sm, false) != sensei_LpwanResult_LPWAN_OK) {
+    gnss_finish(-EBUSY, sensei_GnssFixStatus_GNSS_FIX_BUSY, NULL); /* LTE connects or sends */
+    return;
+  }
+  (void)lpwan_gnss_timeout(gnss_timeout, &timeout_s);
+  gnss_seq = lpwan_master_next_seq(&master); /* the result event may come before the answer is read */
+  rq.which_body = sensei_LpwanRequest_gnss_fix_tag;
+  rq.gnss_fix.timeout_s = gnss_timeout;
+  err = request(&rq, &rs, REQ_TO);
+  if (err) {
+    switch (last_result) {
+    case sensei_LpwanResult_LPWAN_UNSUPPORTED: /* an older shield app: it does not know the request */
+      gnss_finish(-ENOTSUP, sensei_GnssFixStatus_GNSS_FIX_NOT_SUPPORTED, NULL);
+      break;
+    case sensei_LpwanResult_LPWAN_BUSY:
+      gnss_finish(-EBUSY, sensei_GnssFixStatus_GNSS_FIX_BUSY, NULL);
+      break;
+    default:
+      gnss_finish(err == -EBUSY ? -EBUSY : -EIO,
+                  err == -EBUSY ? sensei_GnssFixStatus_GNSS_FIX_BUSY : sensei_GnssFixStatus_GNSS_FIX_FAILED, NULL);
+      break;
+    }
+    return;
+  }
+  if (gnss_open) { /* not over already */
+    gnss_deadline = k_uptime_get() + lpwan_gnss_wait_ms(timeout_s);
+    idle_deadline = 0; /* the shield stays on until the result */
+  }
+}
+
+static void do_gnss_cancel(void) {
+  if (gnss_open && gnss_deadline != 0 && link_up) {
+    (void)simple_request(sensei_LpwanRequest_gnss_cancel_tag); /* the event ends the fix */
+  }
+}
+
 static void do_disconnect(void) {
   if (!link_up) {
     return;
@@ -1311,7 +1460,7 @@ static void do_disconnect(void) {
 
 static void idle_action(void) {
   idle_deadline = 0;
-  if (!shield_on || atomic_get(&sending) || connecting || atomic_get(&dfu_active)) {
+  if (!shield_on || atomic_get(&sending) || connecting || atomic_get(&dfu_active) || gnss_open) {
     return;
   }
   if (lpwan_upd_keep_power(&upd, k_uptime_get())) { /* a new shield image is not confirmed yet */
@@ -1629,6 +1778,12 @@ static void handle_cmd(const struct cmd *c) {
   case CMD_EVAL:
     do_eval();
     break;
+  case CMD_GNSS:
+    do_gnss();
+    break;
+  case CMD_GNSS_CANCEL:
+    do_gnss_cancel();
+    break;
   case CMD_SETTINGS:
     /* The next connect configures from the new settings. A connected LoRa or LTE link is
      * re-configured when it is released. If the radio is no longer an LPWAN one, let go. */
@@ -1695,6 +1850,11 @@ static void check_timers(void) {
       link_recover("no transmit result");
     }
   }
+  if (gnss_open && gnss_deadline != 0 && now > gnss_deadline) {
+    LOG_ERR("no GNSS result");
+    do_gnss_cancel(); /* the shield may still run it */
+    gnss_finish(-ETIMEDOUT, sensei_GnssFixStatus_GNSS_FIX_FAILED, NULL);
+  }
   if (idle_deadline && now > idle_deadline) {
     idle_action();
   }
@@ -1741,6 +1901,9 @@ static void thread_fn(void *a, void *b, void *c) {
     }
     if (idle_deadline && idle_deadline < next) {
       next = idle_deadline;
+    }
+    if (gnss_open && gnss_deadline != 0 && gnss_deadline < next) {
+      next = gnss_deadline;
     }
     if (atomic_get(&dfu_active) && dfu_wake() < next) {
       next = dfu_wake();
@@ -1803,6 +1966,9 @@ bool sensei_lpwan_radio_ready(sensei_Radio r) {
     return false; /* an update of the shield holds the link: on_up comes when it ends */
   }
 
+  if (want == LPWAN_TECH_LTE && atomic_get(&gnss_pending)) {
+    return false; /* a fix runs: LTE stays out of the way, on_up(RADIO_BLE) comes after it */
+  }
   if (r == sensei_Radio_RADIO_LORA && sensei_lpwan_lora_retry_after_ms() != 0) {
     return false; /* refused for the duty cycle: do not wake the shield, on_up comes when it may be tried again */
   }
@@ -1835,6 +2001,9 @@ int sensei_lpwan_radio_send_ex(sensei_Radio r, const uint8_t *chunk, size_t len,
   }
   if (atomic_get(&dfu_active)) {
     return -EAGAIN; /* the app waits for on_up (RADIO_BLE) at the end of the session: no failure */
+  }
+  if (lpwan_tech_of_radio(r) == LPWAN_TECH_LTE && atomic_get(&gnss_pending)) {
+    return -EAGAIN; /* a fix runs: on_up (RADIO_BLE) comes when it is over, no failure */
   }
   if (r == sensei_Radio_RADIO_LORA) {
     const struct sensei_lpwan_config st = cfg_get();
@@ -1941,6 +2110,7 @@ int sensei_lpwan_init(const struct sensei_lpwan_hooks *h, const struct sensei_lp
   k_work_init(&flush_work, flush_fn);
   k_work_init(&send_done_work, send_done_fn);
   k_work_init(&dfu_job.work, dfu_done_fn);
+  k_work_init(&gnss_work, gnss_done_fn);
   k_work_init_delayable(&retry_work, retry_fn);
   k_work_init(&time_item.work, time_work);
   lpwan_sm_init(&sm);
@@ -1987,6 +2157,46 @@ int sensei_lpwan_init(const struct sensei_lpwan_hooks *h, const struct sensei_lp
   k_thread_name_set(&thread, "lpwan");
   LOG_INF("LPWAN client ready, shield off");
   return 0;
+}
+
+/* ---- GNSS: API ---- */
+
+int sensei_lpwan_gnss_fix(uint32_t timeout_s, sensei_lpwan_gnss_done_fn done, void *user) {
+  uint32_t t;
+
+  if (!lpwan_gnss_timeout(timeout_s, &t)) {
+    return -EINVAL;
+  }
+  if (!atomic_cas(&gnss_pending, 0, 1)) {
+    return -EBUSY;
+  }
+  gnss_timeout = timeout_s;
+  gnss_done = done;
+  gnss_user = user;
+  atomic_set(&gnss_cancel_flag, 0);
+  if (post(CMD_GNSS, sensei_Radio_RADIO_BLE, false) != 0) {
+    atomic_set(&gnss_pending, 0);
+    return -EBUSY;
+  }
+  return 0;
+}
+
+int sensei_lpwan_gnss_cancel(void) {
+  if (!atomic_get(&gnss_pending)) {
+    return 0;
+  }
+  atomic_set(&gnss_cancel_flag, 1);
+  return post(CMD_GNSS_CANCEL, sensei_Radio_RADIO_BLE, false);
+}
+
+bool sensei_lpwan_gnss_busy(void) { return atomic_get(&gnss_pending) != 0; }
+
+int sensei_lpwan_gnss_supported(void) {
+  k_spinlock_key_t k = k_spin_lock(&ver_lock);
+  int r = shield_ver_valid ? (shield_ver.gnss ? 1 : 0) : -ENODATA;
+
+  k_spin_unlock(&ver_lock, k);
+  return r;
 }
 
 /* ---- update of the shield: API ---- */

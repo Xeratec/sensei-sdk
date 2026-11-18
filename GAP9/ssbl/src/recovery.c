@@ -30,7 +30,7 @@
 #define PAD_SAMPLES 5
 
 static struct g9ota writer; /* 8 KiB buffer: .bss */
-static struct g9rec rec;
+static struct g9rec server;
 
 bool recovery_strap(void) {
 #ifdef SENSEI_SSBL_RECOVERY_TEST_STRAP
@@ -72,7 +72,7 @@ int recovery_run(uint8_t keep, uint32_t reason) {
     printf("recovery: layout refused (%d)\n", rc);
     return rc;
   }
-  g9rec_init(&rec, &writer);
+  g9rec_init(&server, &writer);
   printf("recovery: keep slot %c, reason %u\n", 'A' + keep, (unsigned)reason);
-  return recovery_serve(&rec, reason);
+  return recovery_serve(&server, reason);
 }

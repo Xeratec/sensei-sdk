@@ -217,8 +217,56 @@ def test_container_only_needs_no_key(tmp_path):
     m.write_bytes(fake_mram(APP, READFS))
     assert mk.main(["--mram", str(m), "--container-only", "-o", str(out)]) == 0
     assert out.read_bytes() == mk.build_container(APP, READFS)
-    assert mk.main(["--mram", str(m), "--kind", KIND, "-o", str(out)]) == 0  # no key: an unsigned slot
-    assert mk.main(["--mram", str(m), "-o", str(out)]) == 1  # no board id
+    assert mk.main(["--mram", str(m), "--kind", KIND, "--unsigned", "-o", str(out)]) == 0
+    assert mk.main(["--mram", str(m), "--unsigned", "-o", str(out)]) == 1  # no board id
+
+
+def test_no_key_is_an_error_not_an_unsigned_image(tmp_path, monkeypatch, capsys):
+    """Without a key (and without $SENSEI_GAP9_KEY) the tool stops: an unsigned image only on request."""
+    monkeypatch.delenv("SENSEI_GAP9_KEY", raising = False)
+    m, out = tmp_path / "chip.soc.mram.bin", tmp_path / "slot.bin"
+    m.write_bytes(fake_mram(APP, READFS))
+    assert mk.main(["--mram", str(m), "--kind", KIND, "-o", str(out)]) == 1
+    assert "no key" in capsys.readouterr().err and not out.exists()
+    app = tmp_path / "app.bin"
+    app.write_bytes(APP)
+    assert mk.main(["--app", str(app), "--kind", KIND, "-o", str(out)]) == 1 and not out.exists()
+    # on request: --unsigned, or --damage (also "none"), with --mram and with --app
+    for extra in (["--unsigned"], ["--damage", "none"], ["--damage", "header"]):
+        out.unlink(missing_ok = True)
+        assert mk.main(["--app", str(app), "--kind", KIND, *extra, "-o", str(out)]) == 0 and out.exists()
+        out.unlink()
+        assert mk.main(["--mram", str(m), "--kind", KIND, *extra, "-o", str(out)]) == 0 and out.exists()
+    # a key that does not exist is no reason to fall back to an unsigned image
+    out.unlink()
+    assert mk.main(["--mram", str(m), "--kind", KIND, "--key", str(tmp_path / "none.pem"), "-o", str(out)]) == 1
+    assert not out.exists()
+
+
+def test_app_path_checks_the_app(tmp_path):
+    """--app gets the same checks as --mram (sensei_g9_app_check): a section over the hand-off record, the SSBL area or
+    the end of the L2, and XIP, are not packed, signed or not."""
+    app, out = tmp_path / "app.bin", tmp_path / "slot.bin"
+    base = 1332 + 52
+    xip = bytearray(make_app(0x400, [(base, 0x1C000100, 0x100, 0)]))
+    struct.pack_into("<I", xip, 32, 4)
+    bad = {
+        "hand-off": make_app(0x400, [(base, 0x1C00FF00 - 0x10, 0x20, 0)]),
+        "SSBL": make_app(0x400, [(base, 0x1C100000 - 0x80, 0x100, 0)]),
+        "L2": make_app(0x400, [(base, 0x1C190000 - 0x10, 0x100, 0)]),
+        "XIP": bytes(xip),
+        "no descriptor": bytes(64),
+    }
+    for what, data in bad.items():
+        app.write_bytes(data)
+        for extra in (["--unsigned"], ["--dev"], ["--damage",
+                                                  "none"], ["--container-only"], ["--split",
+                                                                                  str(tmp_path / "s")]):
+            out.unlink(missing_ok = True)
+            assert mk.main(["--app", str(app), "--kind", KIND, *extra, "-o", str(out)]) == 1, (what, extra)
+            assert not out.exists(), (what, extra)
+    app.write_bytes(make_app(0x400, [(base, 0x1C000100, 0x100, 0)]))
+    assert mk.main(["--app", str(app), "--kind", KIND, "--unsigned", "-o", str(out)]) == 0
 
 
 def test_split(tmp_path):
@@ -253,7 +301,12 @@ def test_unsigned_slot(tmp_path):
     app, rfs, out = tmp_path / "app.bin", tmp_path / "rfs.bin", tmp_path / "slot.bin"
     app.write_bytes(APP)
     rfs.write_bytes(READFS)
-    base = ["--app", str(app), "--readfs", str(rfs), "--kind", KIND, "--version", "1.2.3+4", "-o", str(out)]
+    base = [
+        "--app",
+        str(app), "--readfs",
+        str(rfs), "--kind", KIND, "--version", "1.2.3+4", "--unsigned", "-o",
+        str(out)
+    ]
     assert mk.main(base) == 0
     data = out.read_bytes()
     container = mk.build_container(APP, READFS)
@@ -263,7 +316,7 @@ def test_unsigned_slot(tmp_path):
     assert prot == {0xA0: KIND.encode()}
     assert tlv == {0x10: hashlib.sha256(data[:hdr + img + plen]).digest()}
     # without readfs the container says so
-    assert mk.main(["--app", str(app), "--kind", KIND, "-o", str(out)]) == 0
+    assert mk.main(["--app", str(app), "--kind", KIND, "--unsigned", "-o", str(out)]) == 0
     _, _, _, r_off, r_size = struct.unpack_from("<IIIII", out.read_bytes(), 0x200 + 4)
     assert (r_off, r_size) == (0, 0)
     # the damages of the tests
@@ -280,7 +333,7 @@ def test_unsigned_slot(tmp_path):
 def test_slot_must_fit(tmp_path):
     app, out = tmp_path / "app.bin", tmp_path / "slot.bin"
     app.write_bytes(make_app(mk.SLOT_SIZE))
-    assert mk.main(["--app", str(app), "--kind", KIND, "-o", str(out)]) == 1
+    assert mk.main(["--app", str(app), "--kind", KIND, "--unsigned", "-o", str(out)]) == 1
 
 
 def _imgtool() -> str:

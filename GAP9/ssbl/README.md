@@ -68,10 +68,12 @@ cmake -B build . [-DSENSEI_PLATFORM=gvsoc] [-DSENSEI_SSBL_FORCE_SLOT=0|1] [-DSEN
 ```
 
 `tools/pack_slot.py` is the one builder of slot images: from `chip.soc.mram.bin` (or an app binary and a readfs) it makes
-the container, and the unsigned slot for the tests and test boards, or the image signed with imgtool for the update over the
-air (`--kind` is the board id, `--key` or `--dev` signs). An app also uses it for its factory flash. `tools/check_handoff.py`
+the container, and the unsigned slot for the tests and test boards (only with `--unsigned` or `--damage`), or the image
+signed with imgtool for the update over the air (`--kind` is the board id, `--key` or `--dev` signs; without a key and
+without `--unsigned` the tool stops). The app binary of `--app` gets the same checks as the one of `--mram`. An app also uses it for its factory flash. `tools/check_handoff.py`
 fails the build of an app if a section covers the hand-off record. `make test-python` in the SDK root runs
-`tools/test_pack_slot.py`. See [`lib/sensei_gap9/OTA.md`](../../lib/sensei_gap9/OTA.md).
+`tools/test_pack_slot.py` (needs pytest, cryptography and imgtool: without imgtool the signed-image tests skip, in CI
+they fail; the workflow `python-tests.yml` installs them). See [`lib/sensei_gap9/OTA.md`](../../lib/sensei_gap9/OTA.md).
 
 ## Test
 

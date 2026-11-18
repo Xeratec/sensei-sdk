@@ -25,7 +25,7 @@ inside the app. An app that fails is not packed.
   pack_slot.py --mram build/chip.soc.mram.bin --kind <board> --dev -o app.signed.bin   (the MCUboot development key)
   pack_slot.py --mram build/chip.soc.mram.bin --container-only -o container.bin         (no key, no imgtool)
   pack_slot.py --mram build/chip.soc.mram.bin --split dir                       (dir/app.bin and dir/readfs.bin)
-  pack_slot.py --app app.bin [--readfs rfs.bin] --kind <board> [--damage app|header|trailer|none] -o slot.bin
+  pack_slot.py --app app.bin [--readfs rfs.bin] --kind <board> --unsigned [--damage app|header|trailer|none] -o slot.bin
                                                           (unsigned, for the SSBL tests and the factory flash of a test board)
 
 `--kind` is the board id that the update writer and the nRF5340 check (for example "sensei-ieq-gap9"). The version is
@@ -33,8 +33,10 @@ inside the app. An app that fails is not packed.
 the firmware reports in its HELLO, or the nRF5340 reverts the update). The key is a PEM file (ECDSA P-256) from `--key`
 or `$SENSEI_GAP9_KEY`; it must lie outside git. `--dev` signs with the public development key of MCUboot
 (`root-ec-p256.pem`, `$MCUBOOT_DEV_KEY` or `$ZEPHYR_BASE/../bootloader/mcuboot`): anyone can sign for it (lab nodes
-only). imgtool: `$IMGTOOL` or the one on PATH. Without a key the image is unsigned: the SSBL does not look at the
-signature, the writer and the nRF5340 do.
+only). imgtool: `$IMGTOOL` or the one on PATH. An unsigned image (the SSBL does not look at the signature, the writer and
+the nRF5340 do, and refuse it) is made only on request: `--unsigned`, or `--damage`. Without a key and without these
+the tool stops, so that a missing key never gives an image that the node would refuse (or, on a board without the
+check, accept). The app binary of `--app` gets the same checks as the one of `--mram`.
 
 Tests: test_pack_slot.py in this folder.
 """
@@ -313,11 +315,14 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--key", type = Path, default = os.environ.get("SENSEI_GAP9_KEY"), help = "PEM key (ECDSA P-256)")
     ap.add_argument("--dev", action = "store_true", help = "sign with the MCUboot development key (Debug nodes only)")
     ap.add_argument("--container-only", action = "store_true", help = "write the container only, no key needed")
+    ap.add_argument("--unsigned",
+                    action = "store_true",
+                    help = "write an unsigned slot image (SSBL tests, factory flash of a test board); needs no key")
     ap.add_argument("--imgtool", default = os.environ.get("IMGTOOL", "imgtool"))
     ap.add_argument("--damage",
                     choices = ["none", "app", "header", "trailer"],
-                    default = "none",
-                    help = "break the unsigned slot (for tests)")
+                    default = None,
+                    help = "break the unsigned slot (for tests; implies --unsigned)")
     args = ap.parse_args(argv)
     try:
         if args.mram:
@@ -325,6 +330,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.app:
             app = args.app.read_bytes()
             readfs = args.readfs.read_bytes() if args.readfs else b""
+            check_app(app)  # as for --mram: an app that would harm the SSBL or the record is not packed
         else:
             raise ImageError("--mram or --app is needed")
         if args.split:
@@ -365,10 +371,14 @@ def main(argv: list[str] | None = None) -> int:
             how = f"version {version}, kind {args.kind}, app {len(app)} B, readfs {len(readfs)} B"
             print(f"{args.out}: {how}, {args.out.stat().st_size} B of {SLOT_SIZE}")
             return 0
+        if not (args.unsigned or args.damage is not None):
+            raise ImageError(
+                "no key: give --key (or $SENSEI_GAP9_KEY) or --dev to sign, or --unsigned for an image that "
+                "the writer and the nRF5340 refuse")
         slot = bytearray(build_unsigned(container, version, args.kind))
         if len(slot) > SLOT_SIZE:
             raise ImageError(f"slot image is {len(slot)} B, a slot holds {SLOT_SIZE} B")
-        damage(slot, args.damage, len(app), len(container))
+        damage(slot, args.damage or "none", len(app), len(container))
         args.out.write_bytes(slot)
         print(f"{args.out}: {len(slot)} B (unsigned), app {len(app)} B, readfs {len(readfs)} B")
         return 0

@@ -23,6 +23,9 @@ PB_BIND(sensei_Gap9OtaBegin, sensei_Gap9OtaBegin, AUTO)
 PB_BIND(sensei_Gap9OtaData, sensei_Gap9OtaData, 2)
 
 
+PB_BIND(sensei_Gap9OtaSeal, sensei_Gap9OtaSeal, AUTO)
+
+
 PB_BIND(sensei_Gap9OtaStatus, sensei_Gap9OtaStatus, AUTO)
 
 

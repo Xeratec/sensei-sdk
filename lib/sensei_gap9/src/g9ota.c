@@ -101,7 +101,7 @@ bool g9ota_ckpt_decode(const uint8_t in[G9OTA_CKPT_LEN], struct g9ota_ckpt *c) {
   c->offset = rd32(in + 16);
   memcpy(c->sha, in + 20, 32);
   memcpy(c->hdr0, in + 52, 16);
-  return c->state >= G9OTA_CK_OPEN && c->state <= G9OTA_CK_CLEARED && c->target < 2;
+  return c->state >= G9OTA_CK_OPEN && c->state <= G9OTA_CK_CHECKED && c->target < 2;
 }
 
 /* ---- Guarded MRAM access: the one place that writes ---- */
@@ -162,8 +162,8 @@ static struct slot_rd slot_rd_of(const struct g9ota *o, uint8_t slot, bool targe
 
 /* The first MRAM word of the file (16 bytes, the MCUboot magic is in it) is not programmed while
  * the image comes in: a slot that is not complete never parses, whatever else is in it. It is
- * kept in the checkpoint records and written at the end of `finish` (seal_header). The reads of
- * `finish` see the file as it is: those 16 bytes come from the record. */
+ * kept in the checkpoint records and written by `seal` (seal_header), after the nRF5340 checked the
+ * signature. The reads of `finish` see the file as it is: those 16 bytes come from the record. */
 // cppcheck-suppress constParameterCallback ; the signature is fixed by sensei_g9_read_fn
 static int slot_read(void *c, uint32_t off, void *buf, size_t len) {
   const struct slot_rd *r = c;
@@ -396,7 +396,8 @@ static bool target_busy(struct g9ota *o, uint8_t slot) {
   if (!o->ck_loaded) {
     ck_load(o);
   }
-  return o->ck.valid && o->ck.state == G9OTA_CK_OPEN && o->ck.target == slot;
+  /* OPEN: bytes are coming. CHECKED: complete and checked, but not sealed (the nRF5340 has not accepted it yet). */
+  return o->ck.valid && (o->ck.state == G9OTA_CK_OPEN || o->ck.state == G9OTA_CK_CHECKED) && o->ck.target == slot;
 }
 
 bool g9ota_slot_info(struct g9ota *o, uint8_t slot, sensei_Gap9Slot *out) {
@@ -436,6 +437,7 @@ static void fill_state(const struct g9ota *o, sensei_Gap9OtaInfo *info, sensei_G
   info->chunk_max = G9OTA_CHUNK_MAX;
   info->booted_slot = o->booted;
   info->slot_size = o->cfg.slot_size;
+  info->sealed = o->sealed;
 }
 
 static void fill_slots(struct g9ota *o, sensei_Gap9OtaInfo *info) {
@@ -516,6 +518,7 @@ sensei_Gap9OtaResult g9ota_begin(struct g9ota *o, const sensei_Gap9OtaBegin *req
   o->fail = sensei_Gap9OtaFail_GAP9_OTA_FAIL_NONE;
   o->detail = 0;
   o->have_key_hash = false;
+  o->sealed = false;
   memset(o->hdr0, 0, sizeof(o->hdr0));
   if (resumed && from > 0) {
     memcpy(o->hdr0, o->ck.hdr0, sizeof(o->hdr0)); /* the first sector is in, without these bytes */
@@ -543,6 +546,11 @@ sensei_Gap9OtaResult g9ota_begin(struct g9ota *o, const sensei_Gap9OtaBegin *req
     }
   }
   o->stage = sensei_Gap9OtaStage_GAP9_OTA_STAGE_RECEIVING;
+  if (resumed && from == o->size && (o->ck.state == G9OTA_CK_CHECKED || o->ck.state == G9OTA_CK_DONE)) {
+    /* The transfer was finished before the restart: check it again and answer VERIFIED with the proof, so that the
+     * node can check the signature and seal without a new transfer. */
+    return g9ota_finish(o, info);
+  }
   return done(o, info, true);
 }
 
@@ -729,8 +737,8 @@ static int check_image(const struct g9ota *o, struct slot_rd *r, uint32_t size, 
 }
 
 /* The last write of an image: the first MRAM word of the file, with the magic. The slot holds
- * everything else, checked. The word is erased (FF): one aligned program of 16 bytes. After a cut
- * in that program it is torn: then the sector is written again whole (erase, program). A cut in
+ * everything else, checked, and the nRF5340 accepted its signature. The word is erased (FF): one aligned program of 16
+ * bytes. After a cut in that program it is torn: then the sector is written again whole (erase, program). A cut in
  * between leaves a slot without a header (it never parses); a resume finds that `finish` fails the
  * hash and the host sends the image again from 0. */
 static int seal_header(struct g9ota *o) {
@@ -830,7 +838,35 @@ sensei_Gap9OtaResult g9ota_finish(struct g9ota *o, sensei_Gap9OtaInfo *info) {
       return image_fail(o, info, sensei_Gap9OtaFail_GAP9_OTA_FAIL_DOWNGRADE, 0);
     }
   }
-  /* 6. Complete and checked: now the slot gets its magic, then the record. */
+  /* 6. Complete and checked: the record says so. The slot gets its magic only from `seal`, after the nRF5340 checked
+   * the signature. A resume of a transfer that is sealed already stays sealed. */
+  if (o->ck.valid && o->ck.state == G9OTA_CK_DONE && o->ck.target == o->target && o->ck.size == o->size &&
+      memcmp(o->ck.sha, o->sha, 32) == 0) {
+    o->sealed = true;
+  } else {
+    e = ck_put(o, G9OTA_CK_CHECKED, o->size);
+    if (e != 0) {
+      set_fail(o, sensei_Gap9OtaFail_GAP9_OTA_FAIL_FLASH, e);
+      return done(o, info, true);
+    }
+  }
+  o->stage = sensei_Gap9OtaStage_GAP9_OTA_STAGE_VERIFIED;
+  return done(o, info, true);
+}
+
+sensei_Gap9OtaResult g9ota_seal(struct g9ota *o, const sensei_Gap9OtaSeal *req, sensei_Gap9OtaInfo *info) {
+  int e;
+
+  if (o->stage != sensei_Gap9OtaStage_GAP9_OTA_STAGE_VERIFIED) {
+    return reject(o, info, sensei_Gap9OtaFail_GAP9_OTA_FAIL_STATE, sensei_Gap9OtaResult_GAP9_OTA_INVALID, true);
+  }
+  if (memcmp(req->image_hash, o->image_hash, 32) != 0) {
+    /* not the image that finish answered: the nRF5340 accepted something else */
+    return reject(o, info, sensei_Gap9OtaFail_GAP9_OTA_FAIL_IMAGE, sensei_Gap9OtaResult_GAP9_OTA_INVALID, true);
+  }
+  if (o->sealed) {
+    return done(o, info, true); /* a repeat: the answer was lost */
+  }
   e = seal_header(o);
   if (e == 0) {
     e = ck_put(o, G9OTA_CK_DONE, o->size);
@@ -839,7 +875,7 @@ sensei_Gap9OtaResult g9ota_finish(struct g9ota *o, sensei_Gap9OtaInfo *info) {
     set_fail(o, sensei_Gap9OtaFail_GAP9_OTA_FAIL_FLASH, e);
     return done(o, info, true);
   }
-  o->stage = sensei_Gap9OtaStage_GAP9_OTA_STAGE_VERIFIED;
+  o->sealed = true;
   return done(o, info, true);
 }
 
@@ -900,7 +936,7 @@ void g9ota_boot_note(struct g9ota *o) {
   if (!o->ck_loaded) {
     ck_load(o);
   }
-  if (o->ck.valid && o->ck.state == G9OTA_CK_DONE && o->ck.target == o->booted) {
+  if (o->ck.valid && (o->ck.state == G9OTA_CK_DONE || o->ck.state == G9OTA_CK_CHECKED) && o->ck.target == o->booted) {
     (void)ck_put(o, G9OTA_CK_CLEARED, 0); /* the image of that transfer runs: nothing is waiting */
   }
 }
@@ -912,10 +948,11 @@ sensei_Gap9OtaResult g9ota_abort(struct g9ota *o, sensei_Gap9OtaInfo *info) {
     ck_load(o);
   }
   /* Something is open: this session's transfer, or the record of one from a session that lost
-   * power: OPEN (not complete) or DONE (complete, not started, for instance after a failed
-   * signature check of the node). A record of an image that runs is consumed (g9ota_boot_note). */
-  if (open ||
-      (o->ck.valid && (o->ck.state == G9OTA_CK_OPEN || o->ck.state == G9OTA_CK_DONE) && o->ck.target == o->target)) {
+   * power: OPEN (not complete), CHECKED (complete, not sealed: the node did not accept it, or did not get to it) or
+   * DONE (sealed, not started). A record of an image that runs is consumed (g9ota_boot_note). */
+  if (open || (o->ck.valid &&
+               (o->ck.state == G9OTA_CK_OPEN || o->ck.state == G9OTA_CK_CHECKED || o->ck.state == G9OTA_CK_DONE) &&
+               o->ck.target == o->target)) {
     if (!open) {
       o->flushed = o->ck.offset; /* sectors that were written */
     }
@@ -927,6 +964,7 @@ sensei_Gap9OtaResult g9ota_abort(struct g9ota *o, sensei_Gap9OtaInfo *info) {
   o->fail = sensei_Gap9OtaFail_GAP9_OTA_FAIL_NONE;
   o->detail = 0;
   o->have_key_hash = false;
+  o->sealed = false;
   return done(o, info, true);
 }
 
@@ -954,6 +992,9 @@ int g9ota_dispatch(struct g9ota *o, const struct g9ota_req *req, uint32_t now_ms
     return 0;
   case G9OTA_OP_ABORT:
     (void)g9ota_abort(o, info);
+    return 0;
+  case G9OTA_OP_SEAL:
+    (void)g9ota_seal(o, &req->u.seal, info);
     return 0;
   default:
     return -EINVAL;

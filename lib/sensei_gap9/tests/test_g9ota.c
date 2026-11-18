@@ -86,6 +86,26 @@ static sensei_Gap9OtaResult send_chunk(const uint8_t *img, uint32_t off, size_t 
   return g9ota_chunk(&ota, &d, info);
 }
 
+/* Seal the transfer with the hash that `fin` (the answer to finish) carries. */
+static sensei_Gap9OtaResult seal_with(const sensei_Gap9OtaInfo *fin, sensei_Gap9OtaInfo *info) {
+  sensei_Gap9OtaSeal sl = sensei_Gap9OtaSeal_init_zero;
+
+  memcpy(sl.image_hash, fin->image_hash.bytes, 32);
+  return g9ota_seal(&ota, &sl, info);
+}
+
+/* finish, then seal as the node does after its signature check. `info` is the answer to the seal. */
+static sensei_Gap9OtaResult finish_seal(sensei_Gap9OtaInfo *info) {
+  sensei_Gap9OtaInfo fin;
+  sensei_Gap9OtaResult r = g9ota_finish(&ota, &fin);
+
+  if (r != sensei_Gap9OtaResult_GAP9_OTA_OK) {
+    *info = fin;
+    return r;
+  }
+  return seal_with(&fin, info);
+}
+
 /* Send img[from, n) in chunks of `step`; stops at the first answer that is not OK. */
 static sensei_Gap9OtaResult send_from(const uint8_t *img, size_t n, uint32_t from, size_t step,
                                       sensei_Gap9OtaInfo *info) {
@@ -221,17 +241,36 @@ static void test_transfer(uint8_t booted, size_t step) {
   CHECK(send_from(image, n, 0, step, &info) == sensei_Gap9OtaResult_GAP9_OTA_OK);
   CHECK(info.offset == n);
   CHECK(g9ota_finish(&ota, &info) == sensei_Gap9OtaResult_GAP9_OTA_OK);
-  CHECK(info.stage == sensei_Gap9OtaStage_GAP9_OTA_STAGE_VERIFIED);
+  CHECK(info.stage == sensei_Gap9OtaStage_GAP9_OTA_STAGE_VERIFIED && !info.sealed);
   CHECK(info.image_hash.size == 32 && info.signature.size == 64 && info.key_hash.size == 32);
   CHECK(info.signature.bytes[0] == 0x20 && info.signature.bytes[32] == 0x40 && info.key_hash.bytes[0] == 0x11);
-  CHECK(memcmp(slot_mem(tgt), image, n) == 0);
+  /* checked, not sealed: every byte but the magic word is in, the slot does not parse and is no image */
+  CHECK(memcmp(slot_mem(tgt) + 16, image + 16, n - 16) == 0 && !slot_parses(tgt));
+  CHECK(!(booted ? info.slot_a : info.slot_b).valid);
+  {
+    sensei_Gap9OtaInfo fin = info;
+    sensei_Gap9OtaSeal sl = sensei_Gap9OtaSeal_init_zero;
+
+    /* a seal for another hash is refused and writes nothing */
+    memcpy(sl.image_hash, fin.image_hash.bytes, 32);
+    sl.image_hash[7] ^= 1;
+    CHECK(g9ota_seal(&ota, &sl, &info) == sensei_Gap9OtaResult_GAP9_OTA_INVALID &&
+          info.fail == sensei_Gap9OtaFail_GAP9_OTA_FAIL_IMAGE && !info.sealed && !slot_parses(tgt));
+    CHECK(seal_with(&fin, &info) == sensei_Gap9OtaResult_GAP9_OTA_OK && info.sealed);
+  }
+  CHECK(memcmp(slot_mem(tgt), image, n) == 0 && slot_parses(tgt));
   CHECK(memcmp(slot_mem(booted), booted_copy, SENSEI_G9_SLOT_SIZE) == 0); /* the slot that runs: not touched */
-  CHECK((booted ? info.slot_a : info.slot_b).valid);                      /* done: the slot is an image */
+  CHECK((booted ? info.slot_a : info.slot_b).valid);                      /* sealed: the slot is an image */
   CHECK(ota.writes_outside == 0 && mram.reprogram == 0 && mram.bad_align == 0);
 
-  /* a repeated finish and a repeated begin(resume) are answered, nothing changes */
+  /* a repeated seal, finish and begin(resume) are answered, nothing changes */
+  {
+    sensei_Gap9OtaInfo fin = info;
+
+    CHECK(seal_with(&fin, &info) == sensei_Gap9OtaResult_GAP9_OTA_OK && info.sealed);
+  }
   CHECK(g9ota_finish(&ota, &info) == sensei_Gap9OtaResult_GAP9_OTA_OK &&
-        info.stage == sensei_Gap9OtaStage_GAP9_OTA_STAGE_VERIFIED);
+        info.stage == sensei_Gap9OtaStage_GAP9_OTA_STAGE_VERIFIED && info.sealed);
   b.resume = true;
   CHECK(g9ota_begin(&ota, &b, &info) == sensei_Gap9OtaResult_GAP9_OTA_OK &&
         info.stage == sensei_Gap9OtaStage_GAP9_OTA_STAGE_VERIFIED);
@@ -254,6 +293,13 @@ static void test_rules(void) {
         info.fail == sensei_Gap9OtaFail_GAP9_OTA_FAIL_STATE);
   CHECK(g9ota_finish(&ota, &info) == sensei_Gap9OtaResult_GAP9_OTA_INVALID &&
         info.fail == sensei_Gap9OtaFail_GAP9_OTA_FAIL_STATE);
+  {
+    sensei_Gap9OtaSeal sl = sensei_Gap9OtaSeal_init_zero;
+
+    /* nothing finished: no seal */
+    CHECK(g9ota_seal(&ota, &sl, &info) == sensei_Gap9OtaResult_GAP9_OTA_INVALID &&
+          info.fail == sensei_Gap9OtaFail_GAP9_OTA_FAIL_STATE);
+  }
   b.size = 0;
   CHECK(g9ota_begin(&ota, &b, &info) == sensei_Gap9OtaResult_GAP9_OTA_INVALID &&
         info.fail == sensei_Gap9OtaFail_GAP9_OTA_FAIL_SIZE);
@@ -488,6 +534,8 @@ static void test_header_last(void) {
   CHECK(memcmp(slot_mem(1) + 16, image + 16, n - 16) == 0 && !slot_parses(1));
   CHECK(last > 0);
   CHECK(g9ota_finish(&ota, &info) == sensei_Gap9OtaResult_GAP9_OTA_OK);
+  CHECK(!slot_parses(1)); /* checked, not sealed */
+  CHECK(seal_with(&info, &info) == sensei_Gap9OtaResult_GAP9_OTA_OK);
   CHECK(slot_parses(1) && memcmp(slot_mem(1), image, n) == 0);
   CHECK(mram.reprogram == 0 && ota.writes_outside == 0);
 
@@ -501,7 +549,7 @@ static void test_header_last(void) {
   b.resume = true;
   CHECK(g9ota_begin(&ota, &b, &info) == sensei_Gap9OtaResult_GAP9_OTA_OK && info.offset == n);
   CHECK(!slot_parses(1));
-  CHECK(g9ota_finish(&ota, &info) == sensei_Gap9OtaResult_GAP9_OTA_OK);
+  CHECK(finish_seal(&info) == sensei_Gap9OtaResult_GAP9_OTA_OK);
   CHECK(slot_parses(1) && memcmp(slot_mem(1), image, n) == 0);
 
   /* an abort leaves a slot that does not parse */
@@ -590,7 +638,9 @@ static void test_verify(void) {
   CHECK(g9ota_verify(&ota, 0, &v) == sensei_Gap9OtaResult_GAP9_OTA_INVALID &&
         v.fail == sensei_Gap9OtaFail_GAP9_OTA_FAIL_STATE);
   CHECK(g9ota_finish(&ota, &info) == sensei_Gap9OtaResult_GAP9_OTA_OK);
-  CHECK(g9ota_verify(&ota, 0, &v) == sensei_Gap9OtaResult_GAP9_OTA_OK); /* the running slot, while VERIFIED */
+  CHECK(g9ota_verify(&ota, 0, &v) == sensei_Gap9OtaResult_GAP9_OTA_OK);      /* the running slot, while VERIFIED */
+  CHECK(g9ota_verify(&ota, 1, &v) == sensei_Gap9OtaResult_GAP9_OTA_INVALID); /* checked, not sealed: not an image */
+  CHECK(seal_with(&info, &v) == sensei_Gap9OtaResult_GAP9_OTA_OK);
   CHECK(g9ota_verify(&ota, 1, &v) == sensei_Gap9OtaResult_GAP9_OTA_OK &&
         memcmp(v.image_hash.bytes, info.image_hash.bytes, 32) == 0);
   CHECK(g9ota_status(&ota, &v) == sensei_Gap9OtaResult_GAP9_OTA_OK &&
@@ -759,7 +809,7 @@ static void test_done_record(void) {
   boot(0);
   CHECK(g9ota_begin(&ota, &b, &info) == sensei_Gap9OtaResult_GAP9_OTA_OK);
   CHECK(send_from(image, n, 0, 1024, &info) == sensei_Gap9OtaResult_GAP9_OTA_OK);
-  CHECK(g9ota_finish(&ota, &info) == sensei_Gap9OtaResult_GAP9_OTA_OK);
+  CHECK(finish_seal(&info) == sensei_Gap9OtaResult_GAP9_OTA_OK);
 
   /* GAP9 loses power, the node did not accept the image: abort drops it */
   boot(0);
@@ -775,7 +825,7 @@ static void test_done_record(void) {
   b.resume = false;
   CHECK(g9ota_begin(&ota, &b, &info) == sensei_Gap9OtaResult_GAP9_OTA_OK);
   CHECK(send_from(image, n, 0, 1024, &info) == sensei_Gap9OtaResult_GAP9_OTA_OK);
-  CHECK(g9ota_finish(&ota, &info) == sensei_Gap9OtaResult_GAP9_OTA_OK);
+  CHECK(finish_seal(&info) == sensei_Gap9OtaResult_GAP9_OTA_OK);
   boot(1); /* the new image runs */
   g9ota_boot_note(&ota);
   boot(0); /* revert: the old image runs again */
@@ -783,6 +833,117 @@ static void test_done_record(void) {
   CHECK(slot_parses(1) && memcmp(slot_mem(1), image, n) == 0);
   CHECK(g9ota_abort(&ota, &info) == sensei_Gap9OtaResult_GAP9_OTA_OK && slot_parses(1));
   CHECK(info.slot_b.valid && memcmp(slot_mem(1), image, n) == 0 && mram.reprogram == 0);
+}
+
+/* ---- deferred sealing: only `seal` writes the magic ---- */
+
+/* What the SSBL starts: the first slot (the line first) that parses. -1: none. */
+static int ssbl_choice(int first) {
+  return slot_parses((uint8_t)first) ? first : (slot_parses((uint8_t)(1 - first)) ? 1 - first : -1);
+}
+
+static void test_deferred_seal(void) {
+  struct img_opt o = {.payload = 30000, .major = 1, .minor = 1, .kind = FAKE_KIND, .sign = true, .seed = 81};
+  size_t n = build_image(image, &o);
+  sensei_Gap9OtaInfo info, fin;
+  sensei_Gap9OtaBegin b = begin_req(image, n, false);
+  uint8_t keep[SENSEI_G9_SLOT_SIZE];
+
+  /* A lost abort: the image is checked, the node does not accept it (bad signature) and its abort is lost; GAP9 loses
+   * power. Later the confirmed slot A goes bad. The SSBL falls back to slot B: it must not find the unchecked image. */
+  fresh_mram();
+  install_running(0, 1, 0, 0);
+  boot(0);
+  CHECK(g9ota_begin(&ota, &b, &info) == sensei_Gap9OtaResult_GAP9_OTA_OK);
+  CHECK(send_from(image, n, 0, 1024, &info) == sensei_Gap9OtaResult_GAP9_OTA_OK);
+  CHECK(g9ota_finish(&ota, &fin) == sensei_Gap9OtaResult_GAP9_OTA_OK && fin.image_hash.size == 32);
+  CHECK(ssbl_choice(1) == 0 && !slot_parses(1));
+  boot(0); /* power cycle: no abort ever came */
+  g9ota_boot_note(&ota);
+  mram.mem[SENSEI_G9_SLOT_A_OFF + 3] ^= 0x80;          /* the confirmed slot is bad now */
+  CHECK(ssbl_choice(0) == -1 && ssbl_choice(1) == -1); /* nothing bootable: not the unchecked image */
+  /* the unchecked image is only the bytes without the magic word: it is not a slot to the SSBL, and the writer does
+   * not report it either */
+  CHECK(g9ota_status(&ota, &info) == sensei_Gap9OtaResult_GAP9_OTA_OK && !info.slot_b.valid && !info.slot_a.valid);
+
+  /* A restart after finish: begin(resume) answers VERIFIED with the proof; the magic is still not there. */
+  fresh_mram();
+  install_running(0, 1, 0, 0);
+  boot(0);
+  b.resume = false;
+  CHECK(g9ota_begin(&ota, &b, &info) == sensei_Gap9OtaResult_GAP9_OTA_OK);
+  CHECK(send_from(image, n, 0, 1024, &info) == sensei_Gap9OtaResult_GAP9_OTA_OK);
+  CHECK(g9ota_finish(&ota, &fin) == sensei_Gap9OtaResult_GAP9_OTA_OK);
+  boot(0);
+  b.resume = true;
+  CHECK(g9ota_begin(&ota, &b, &info) == sensei_Gap9OtaResult_GAP9_OTA_OK &&
+        info.stage == sensei_Gap9OtaStage_GAP9_OTA_STAGE_VERIFIED && !info.sealed && info.offset == n);
+  CHECK(info.image_hash.size == 32 && memcmp(info.image_hash.bytes, fin.image_hash.bytes, 32) == 0);
+  CHECK(info.signature.size == 64 && memcmp(info.signature.bytes, fin.signature.bytes, 64) == 0);
+  CHECK(!slot_parses(1) && !info.slot_b.valid);
+  CHECK(seal_with(&info, &info) == sensei_Gap9OtaResult_GAP9_OTA_OK && info.sealed && slot_parses(1) &&
+        info.slot_b.valid);
+  /* a restart after the seal: the same answer, sealed, still a valid slot */
+  boot(0);
+  CHECK(g9ota_begin(&ota, &b, &info) == sensei_Gap9OtaResult_GAP9_OTA_OK &&
+        info.stage == sensei_Gap9OtaStage_GAP9_OTA_STAGE_VERIFIED && info.sealed && info.slot_b.valid);
+  CHECK(memcmp(info.image_hash.bytes, fin.image_hash.bytes, 32) == 0);
+  /* the resume after a finish whose image went bad meanwhile: FAILED, the slot is dropped */
+  boot(0);
+  mram.mem[SENSEI_G9_SLOT_B_OFF + 9000] ^= 1;
+  CHECK(g9ota_begin(&ota, &b, &info) == sensei_Gap9OtaResult_GAP9_OTA_FAILED && !slot_parses(1));
+
+  /* An abort after a restart drops a checked, unsealed image (nothing was sealed, nothing to erase but the record). */
+  fresh_mram();
+  install_running(0, 1, 0, 0);
+  boot(0);
+  b.resume = false;
+  CHECK(g9ota_begin(&ota, &b, &info) == sensei_Gap9OtaResult_GAP9_OTA_OK);
+  CHECK(send_from(image, n, 0, 1024, &info) == sensei_Gap9OtaResult_GAP9_OTA_OK);
+  CHECK(g9ota_finish(&ota, &fin) == sensei_Gap9OtaResult_GAP9_OTA_OK);
+  boot(0);
+  CHECK(g9ota_abort(&ota, &info) == sensei_Gap9OtaResult_GAP9_OTA_OK &&
+        info.stage == sensei_Gap9OtaStage_GAP9_OTA_STAGE_IDLE);
+  b.resume = true;
+  CHECK(g9ota_begin(&ota, &b, &info) == sensei_Gap9OtaResult_GAP9_OTA_OK && info.offset == 0); /* nothing to resume */
+
+  /* A seal after an abort, or without a finish in this session, is refused. */
+  CHECK(seal_with(&fin, &info) == sensei_Gap9OtaResult_GAP9_OTA_INVALID && !slot_parses(1));
+  boot(0);
+  CHECK(seal_with(&fin, &info) == sensei_Gap9OtaResult_GAP9_OTA_INVALID && !slot_parses(1));
+
+  /* The seal of another transfer's hash: finish of image 1, then a new begin and a finish of image 2 (a different
+   * hash): the old hash does not seal it. */
+  {
+    struct img_opt o2 = o;
+    static uint8_t image2[SENSEI_G9_SLOT_SIZE];
+    size_t n2;
+    sensei_Gap9OtaBegin b2;
+    sensei_Gap9OtaInfo fin2;
+
+    o2.seed = 82;
+    n2 = build_image(image2, &o2);
+    b2 = begin_req(image2, n2, false);
+    fresh_mram();
+    install_running(0, 1, 0, 0);
+    boot(0);
+    CHECK(g9ota_begin(&ota, &b2, &info) == sensei_Gap9OtaResult_GAP9_OTA_OK);
+    CHECK(send_from(image2, n2, 0, 1024, &info) == sensei_Gap9OtaResult_GAP9_OTA_OK);
+    CHECK(g9ota_finish(&ota, &fin2) == sensei_Gap9OtaResult_GAP9_OTA_OK);
+    CHECK(seal_with(&fin, &info) == sensei_Gap9OtaResult_GAP9_OTA_INVALID && !slot_parses(1)); /* fin: image 1 */
+    CHECK(seal_with(&fin2, &info) == sensei_Gap9OtaResult_GAP9_OTA_OK && slot_parses(1));
+  }
+
+  /* The running slot is never touched by any of it. */
+  fresh_mram();
+  install_running(0, 1, 0, 0);
+  memcpy(keep, slot_mem(0), sizeof(keep));
+  boot(0);
+  b.resume = false;
+  CHECK(g9ota_begin(&ota, &b, &info) == sensei_Gap9OtaResult_GAP9_OTA_OK);
+  CHECK(send_from(image, n, 0, 1024, &info) == sensei_Gap9OtaResult_GAP9_OTA_OK);
+  CHECK(finish_seal(&info) == sensei_Gap9OtaResult_GAP9_OTA_OK);
+  CHECK(memcmp(slot_mem(0), keep, sizeof(keep)) == 0 && ota.writes_outside == 0 && mram.reprogram == 0);
 }
 
 /* ---- power cut at every write ---- */
@@ -828,11 +989,11 @@ static bool cut_run(const uint8_t *img, size_t n, uint8_t booted, long cut, long
       ok &= from <= (uint32_t)n;
       r = send_from(img, n, from, step, &info);
       if (r == sensei_Gap9OtaResult_GAP9_OTA_OK) {
-        r = g9ota_finish(&ota, &info);
+        r = finish_seal(&info);
       }
     }
     if (r == sensei_Gap9OtaResult_GAP9_OTA_OK && !mram.dead) {
-      ok &= info.stage == sensei_Gap9OtaStage_GAP9_OTA_STAGE_VERIFIED;
+      ok &= info.stage == sensei_Gap9OtaStage_GAP9_OTA_STAGE_VERIFIED && info.sealed;
       break;
     }
     if (r == sensei_Gap9OtaResult_GAP9_OTA_FAILED && !mram.dead && info.fail == sensei_Gap9OtaFail_GAP9_OTA_FAIL_HASH &&
@@ -906,7 +1067,7 @@ static void prefill_log(uint8_t booted, unsigned room) {
     o.seed++;
     (void)g9ota_begin(&ota, &b, &info);
     (void)send_from(image, n, 0, 1024, &info);
-    (void)g9ota_finish(&ota, &info);
+    (void)finish_seal(&info);
   }
 }
 
@@ -995,7 +1156,7 @@ static void test_log_wrap(void) {
       b.resume = true;
       CHECK(g9ota_begin(&ota, &b, &info) == sensei_Gap9OtaResult_GAP9_OTA_OK && info.offset == at);
     }
-    CHECK(g9ota_finish(&ota, &info) == sensei_Gap9OtaResult_GAP9_OTA_OK);
+    CHECK(finish_seal(&info) == sensei_Gap9OtaResult_GAP9_OTA_OK);
     CHECK(memcmp(slot_mem(1), image, n) == 0);
     wrap_checks++;
   }
@@ -1023,7 +1184,7 @@ static int feed_file(const char *path, uint8_t booted) {
   boot(booted);
   b = begin_req(buf, n, false);
   if (g9ota_begin(&ota, &b, &info) != sensei_Gap9OtaResult_GAP9_OTA_OK || send_from(buf, n, 0, 1024, &info) != 0 ||
-      g9ota_finish(&ota, &info) != sensei_Gap9OtaResult_GAP9_OTA_OK) {
+      finish_seal(&info) != sensei_Gap9OtaResult_GAP9_OTA_OK) {
     printf("%s: refused: stage %d fail %d\n", path, (int)info.stage, (int)info.fail);
     return 1;
   }
@@ -1062,6 +1223,7 @@ int main(int argc, char **argv) {
   test_arming();
   test_layout();
   test_done_record();
+  test_deferred_seal();
   test_log_wrap();
   test_power_cuts(0, 3 * G9OTA_SECTOR + 4000, 188, 3, 0);
   test_power_cuts(1, 2 * G9OTA_SECTOR + 77, 1024, 3, 0);

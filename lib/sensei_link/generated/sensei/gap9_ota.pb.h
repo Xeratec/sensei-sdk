@@ -30,7 +30,8 @@ typedef enum _sensei_Gap9OtaResult {
 typedef enum _sensei_Gap9OtaStage {
     sensei_Gap9OtaStage_GAP9_OTA_STAGE_IDLE = 0, /* no transfer open */
     sensei_Gap9OtaStage_GAP9_OTA_STAGE_RECEIVING = 1, /* `offset` is the next byte wanted */
-    sensei_Gap9OtaStage_GAP9_OTA_STAGE_VERIFIED = 2, /* every byte is in and checked (hash, header, kind); the nRF5340 checks the signature */
+    sensei_Gap9OtaStage_GAP9_OTA_STAGE_VERIFIED = 2, /* every byte is in and checked (hash, header, kind), the slot is not sealed (it has */
+    /* no MCUboot magic, the SSBL never sees it); the nRF5340 checks the signature, then seals */
     sensei_Gap9OtaStage_GAP9_OTA_STAGE_APPLYING = 3, /* nRF5340 only: the new slot runs on trial and is being checked */
     sensei_Gap9OtaStage_GAP9_OTA_STAGE_FAILED = 4 /* see `fail`; abort or begin starts again */
 } sensei_Gap9OtaStage;
@@ -85,6 +86,14 @@ typedef struct _sensei_Gap9OtaData {
     sensei_Gap9OtaData_data_t data; /* <= Gap9OtaInfo.chunk_max (1024 B) */
 } sensei_Gap9OtaData;
 
+/* nRF5340 to GAP9: write the MCUboot magic of the finished transfer (stage VERIFIED), the last write of an image. Sent
+ only after the nRF5340 checked the signature over `image_hash`. Before it the slot never parses, so an image that the
+ nRF5340 did not accept (a bad signature, a lost abort) can never be started. GAP9 refuses a hash that is not the one
+ of its answer to finish. Repeating it is harmless. */
+typedef struct _sensei_Gap9OtaSeal {
+    pb_byte_t image_hash[32]; /* 32 B: the image_hash of the Gap9OtaInfo that the nRF5340 checked */
+} sensei_Gap9OtaSeal;
+
 /* nRF5340 to GAP9: the state of the transfer, the slots and the booted slot. With `verify`, also check the image in
  `slot` as finish does (without a transfer; the answer is Gap9OtaInfo with image_hash, signature and key_hash, or
  `fail`): the nRF5340 checks the signature of a slot that it did not receive itself (revert, lost settings). A GAP9
@@ -118,6 +127,7 @@ typedef struct _sensei_Gap9OtaInfo {
     sensei_Gap9OtaInfo_image_hash_t image_hash;
     sensei_Gap9OtaInfo_signature_t signature;
     sensei_Gap9OtaInfo_key_hash_t key_hash;
+    bool sealed; /* the slot of the transfer has its magic (seal done): the SSBL may start it */
 } sensei_Gap9OtaInfo;
 
 typedef PB_BYTES_ARRAY_T(188) sensei_Gap9OtaChunk_data_t;
@@ -178,6 +188,7 @@ extern "C" {
 
 
 
+
 #define sensei_Gap9OtaInfo_result_ENUMTYPE sensei_Gap9OtaResult
 #define sensei_Gap9OtaInfo_stage_ENUMTYPE sensei_Gap9OtaStage
 #define sensei_Gap9OtaInfo_fail_ENUMTYPE sensei_Gap9OtaFail
@@ -194,16 +205,18 @@ extern "C" {
 #define sensei_Gap9Slot_init_default             {0, false, sensei_Version_init_default, 0}
 #define sensei_Gap9OtaBegin_init_default         {0, {0}, false, sensei_Version_init_default, 0}
 #define sensei_Gap9OtaData_init_default          {0, {0, {0}}}
+#define sensei_Gap9OtaSeal_init_default          {{0}}
 #define sensei_Gap9OtaStatus_init_default        {0, 0}
-#define sensei_Gap9OtaInfo_init_default          {_sensei_Gap9OtaResult_MIN, _sensei_Gap9OtaStage_MIN, _sensei_Gap9OtaFail_MIN, 0, 0, 0, 0, 0, 0, false, sensei_Gap9Slot_init_default, false, sensei_Gap9Slot_init_default, {0, {0}}, {0, {0}}, {0, {0}}}
+#define sensei_Gap9OtaInfo_init_default          {_sensei_Gap9OtaResult_MIN, _sensei_Gap9OtaStage_MIN, _sensei_Gap9OtaFail_MIN, 0, 0, 0, 0, 0, 0, false, sensei_Gap9Slot_init_default, false, sensei_Gap9Slot_init_default, {0, {0}}, {0, {0}}, {0, {0}}, 0}
 #define sensei_Gap9OtaChunk_init_default         {0, {0, {0}}}
 #define sensei_Gap9OtaCommand_init_default       {_sensei_Gap9OtaAction_MIN}
 #define sensei_Gap9OtaReply_init_default         {_sensei_Gap9OtaResult_MIN, _sensei_Gap9OtaStage_MIN, _sensei_Gap9OtaFail_MIN, 0, 0, 0, 0, 0, 0, false, sensei_Gap9Slot_init_default, false, sensei_Gap9Slot_init_default, 0}
 #define sensei_Gap9Slot_init_zero                {0, false, sensei_Version_init_zero, 0}
 #define sensei_Gap9OtaBegin_init_zero            {0, {0}, false, sensei_Version_init_zero, 0}
 #define sensei_Gap9OtaData_init_zero             {0, {0, {0}}}
+#define sensei_Gap9OtaSeal_init_zero             {{0}}
 #define sensei_Gap9OtaStatus_init_zero           {0, 0}
-#define sensei_Gap9OtaInfo_init_zero             {_sensei_Gap9OtaResult_MIN, _sensei_Gap9OtaStage_MIN, _sensei_Gap9OtaFail_MIN, 0, 0, 0, 0, 0, 0, false, sensei_Gap9Slot_init_zero, false, sensei_Gap9Slot_init_zero, {0, {0}}, {0, {0}}, {0, {0}}}
+#define sensei_Gap9OtaInfo_init_zero             {_sensei_Gap9OtaResult_MIN, _sensei_Gap9OtaStage_MIN, _sensei_Gap9OtaFail_MIN, 0, 0, 0, 0, 0, 0, false, sensei_Gap9Slot_init_zero, false, sensei_Gap9Slot_init_zero, {0, {0}}, {0, {0}}, {0, {0}}, 0}
 #define sensei_Gap9OtaChunk_init_zero            {0, {0, {0}}}
 #define sensei_Gap9OtaCommand_init_zero          {_sensei_Gap9OtaAction_MIN}
 #define sensei_Gap9OtaReply_init_zero            {_sensei_Gap9OtaResult_MIN, _sensei_Gap9OtaStage_MIN, _sensei_Gap9OtaFail_MIN, 0, 0, 0, 0, 0, 0, false, sensei_Gap9Slot_init_zero, false, sensei_Gap9Slot_init_zero, 0}
@@ -218,6 +231,7 @@ extern "C" {
 #define sensei_Gap9OtaBegin_resume_tag           4
 #define sensei_Gap9OtaData_offset_tag            1
 #define sensei_Gap9OtaData_data_tag              2
+#define sensei_Gap9OtaSeal_image_hash_tag        1
 #define sensei_Gap9OtaStatus_verify_tag          1
 #define sensei_Gap9OtaStatus_slot_tag            2
 #define sensei_Gap9OtaInfo_result_tag            1
@@ -234,6 +248,7 @@ extern "C" {
 #define sensei_Gap9OtaInfo_image_hash_tag        12
 #define sensei_Gap9OtaInfo_signature_tag         13
 #define sensei_Gap9OtaInfo_key_hash_tag          14
+#define sensei_Gap9OtaInfo_sealed_tag            15
 #define sensei_Gap9OtaChunk_offset_tag           1
 #define sensei_Gap9OtaChunk_data_tag             2
 #define sensei_Gap9OtaCommand_action_tag         1
@@ -274,6 +289,11 @@ X(a, STATIC,   SINGULAR, BYTES,    data,              2)
 #define sensei_Gap9OtaData_CALLBACK NULL
 #define sensei_Gap9OtaData_DEFAULT NULL
 
+#define sensei_Gap9OtaSeal_FIELDLIST(X, a) \
+X(a, STATIC,   SINGULAR, FIXED_LENGTH_BYTES, image_hash,        1)
+#define sensei_Gap9OtaSeal_CALLBACK NULL
+#define sensei_Gap9OtaSeal_DEFAULT NULL
+
 #define sensei_Gap9OtaStatus_FIELDLIST(X, a) \
 X(a, STATIC,   SINGULAR, BOOL,     verify,            1) \
 X(a, STATIC,   SINGULAR, UINT32,   slot,              2)
@@ -294,7 +314,8 @@ X(a, STATIC,   OPTIONAL, MESSAGE,  slot_a,           10) \
 X(a, STATIC,   OPTIONAL, MESSAGE,  slot_b,           11) \
 X(a, STATIC,   SINGULAR, BYTES,    image_hash,       12) \
 X(a, STATIC,   SINGULAR, BYTES,    signature,        13) \
-X(a, STATIC,   SINGULAR, BYTES,    key_hash,         14)
+X(a, STATIC,   SINGULAR, BYTES,    key_hash,         14) \
+X(a, STATIC,   SINGULAR, BOOL,     sealed,           15)
 #define sensei_Gap9OtaInfo_CALLBACK NULL
 #define sensei_Gap9OtaInfo_DEFAULT NULL
 #define sensei_Gap9OtaInfo_slot_a_MSGTYPE sensei_Gap9Slot
@@ -332,6 +353,7 @@ X(a, STATIC,   SINGULAR, UINT32,   slot_size,        12)
 extern const pb_msgdesc_t sensei_Gap9Slot_msg;
 extern const pb_msgdesc_t sensei_Gap9OtaBegin_msg;
 extern const pb_msgdesc_t sensei_Gap9OtaData_msg;
+extern const pb_msgdesc_t sensei_Gap9OtaSeal_msg;
 extern const pb_msgdesc_t sensei_Gap9OtaStatus_msg;
 extern const pb_msgdesc_t sensei_Gap9OtaInfo_msg;
 extern const pb_msgdesc_t sensei_Gap9OtaChunk_msg;
@@ -342,6 +364,7 @@ extern const pb_msgdesc_t sensei_Gap9OtaReply_msg;
 #define sensei_Gap9Slot_fields &sensei_Gap9Slot_msg
 #define sensei_Gap9OtaBegin_fields &sensei_Gap9OtaBegin_msg
 #define sensei_Gap9OtaData_fields &sensei_Gap9OtaData_msg
+#define sensei_Gap9OtaSeal_fields &sensei_Gap9OtaSeal_msg
 #define sensei_Gap9OtaStatus_fields &sensei_Gap9OtaStatus_msg
 #define sensei_Gap9OtaInfo_fields &sensei_Gap9OtaInfo_msg
 #define sensei_Gap9OtaChunk_fields &sensei_Gap9OtaChunk_msg
@@ -354,8 +377,9 @@ extern const pb_msgdesc_t sensei_Gap9OtaReply_msg;
 #define sensei_Gap9OtaChunk_size                 197
 #define sensei_Gap9OtaCommand_size               2
 #define sensei_Gap9OtaData_size                  1033
-#define sensei_Gap9OtaInfo_size                  244
+#define sensei_Gap9OtaInfo_size                  246
 #define sensei_Gap9OtaReply_size                 116
+#define sensei_Gap9OtaSeal_size                  34
 #define sensei_Gap9OtaStatus_size                8
 #define sensei_Gap9Slot_size                     32
 

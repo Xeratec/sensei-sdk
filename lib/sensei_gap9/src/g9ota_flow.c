@@ -18,6 +18,7 @@ enum step {
   ST_STATUS,
   ST_FINISH,
   ST_ABORT,
+  ST_SEAL,          /* the signature checked: GAP9 writes the magic of the slot */
   ST_VERIFY_ABORT,  /* abort after a signature that did not check: the reply says why */
   ST_REVERT_STATUS, /* revert: look at the other slot first */
   ST_REVERT_VERIFY, /* revert: GAP9 checks the other slot, the node its signature */
@@ -359,6 +360,11 @@ static void job_verify(struct g9ota_flow *f, uint8_t slot) {
 
 static void job_abort(struct g9ota_flow *f) { req_clear(f, G9OTA_OP_ABORT); }
 
+static void job_seal(struct g9ota_flow *f, const uint8_t hash[32]) {
+  req_clear(f, G9OTA_OP_SEAL);
+  memcpy(f->req.u.seal.image_hash, hash, 32);
+}
+
 /* The answer to a finish, or to a begin with resume that finds the transfer finished. */
 static void on_finish(struct g9ota_flow *f, const sensei_Gap9OtaInfo *info) {
   sensei_Gap9OtaFail why = sensei_Gap9OtaFail_GAP9_OTA_FAIL_NONE;
@@ -377,23 +383,13 @@ static void on_finish(struct g9ota_flow *f, const sensei_Gap9OtaInfo *info) {
     return;
   }
   if (check_proof(f, info, &id, &why, &detail) == 0) {
-    uint8_t target = (uint8_t)(1u - (info->booted_slot & 1u));
-
-    /* The version rule (not older than what runs) is GAP9's: it compares the headers of the two
-     * slots, which the signature covers. */
-    f->known[target] = id;
-    if (persist_try(f) != 0) { /* not stored: not started later; the host asks again */
-      f->known[target] = 0;
-      f->view.detail = -EIO;
-      f->view.result = sensei_Gap9OtaResult_GAP9_OTA_FAILED;
-      f->view.fail = sensei_Gap9OtaFail_GAP9_OTA_FAIL_FLASH;
-      send_view(f);
-      return;
-    }
-    f->verified = true;
-    f->verified_slot = target;
-    f->verified_id = id;
-    send_view(f);
+    /* The signature is good: GAP9 writes the magic, so that the slot can start. Until then the slot is no image to the
+     * SSBL, whatever happens to this session (a reset, a lost abort). The version rule (not older than what runs) is
+     * GAP9's: it compares the headers of the two slots, which the signature covers. */
+    f->seal_slot = (uint8_t)(1u - (info->booted_slot & 1u));
+    f->seal_id = id;
+    job_seal(f, info->image_hash.bytes);
+    submit(f, ST_SEAL);
     return;
   }
   /* Not an image that this node takes: drop it on GAP9 (its slot is invalidated), then say why.
@@ -475,6 +471,34 @@ static void on_job(int err, const sensei_Gap9OtaInfo *info, void *user) {
     }
     ingest(f, info);
     on_finish(f, info);
+    break;
+  case ST_SEAL:
+    if (err != 0) {
+      send_error(f, err); /* the host asks again: finish is repeated, GAP9 still holds the checked image */
+      break;
+    }
+    ingest(f, info);
+    if (info->result != sensei_Gap9OtaResult_GAP9_OTA_OK || !info->sealed) {
+      if (info->result == sensei_Gap9OtaResult_GAP9_OTA_OK) { /* an answer that is not a seal */
+        f->view.result = sensei_Gap9OtaResult_GAP9_OTA_FAILED;
+        f->view.fail = sensei_Gap9OtaFail_GAP9_OTA_FAIL_STATE;
+      }
+      send_view(f);
+      break;
+    }
+    f->known[f->seal_slot] = f->seal_id;
+    if (persist_try(f) != 0) { /* not stored: not started later; the host asks again */
+      f->known[f->seal_slot] = 0;
+      f->view.detail = -EIO;
+      f->view.result = sensei_Gap9OtaResult_GAP9_OTA_FAILED;
+      f->view.fail = sensei_Gap9OtaFail_GAP9_OTA_FAIL_FLASH;
+      send_view(f);
+      break;
+    }
+    f->verified = true;
+    f->verified_slot = f->seal_slot;
+    f->verified_id = f->seal_id;
+    send_view(f);
     break;
   case ST_ABORT:
     if (err != 0) {

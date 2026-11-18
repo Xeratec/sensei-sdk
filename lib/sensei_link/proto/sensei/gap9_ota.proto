@@ -9,7 +9,8 @@
 // numbered 0 (A) and 1 (B).
 //
 // Two links use these messages:
-//  - nRF5340 to GAP9 (jobs): Gap9OtaBegin, Gap9OtaData, Gap9OtaStatus, answered by Gap9OtaInfo. The app puts them
+//  - nRF5340 to GAP9 (jobs): Gap9OtaBegin, Gap9OtaData, Gap9OtaStatus, Gap9OtaSeal, answered by Gap9OtaInfo. The app
+//  puts them
 //    into its own job and result messages (the SENSEI IEQ node: Gap9Job and Gap9Result of gap9.proto).
 //  - host to nRF5340: Gap9OtaBegin, Gap9OtaChunk, Gap9OtaCommand, answered by Gap9OtaReply. The app puts them into its
 //    own host messages (the node: HostToNode and NodeToHost of host.proto).
@@ -32,9 +33,11 @@ enum Gap9OtaResult {
 enum Gap9OtaStage {
   GAP9_OTA_STAGE_IDLE = 0;      // no transfer open
   GAP9_OTA_STAGE_RECEIVING = 1; // `offset` is the next byte wanted
-  GAP9_OTA_STAGE_VERIFIED = 2;  // every byte is in and checked (hash, header, kind); the nRF5340 checks the signature
-  GAP9_OTA_STAGE_APPLYING = 3;  // nRF5340 only: the new slot runs on trial and is being checked
-  GAP9_OTA_STAGE_FAILED = 4;    // see `fail`; abort or begin starts again
+  GAP9_OTA_STAGE_VERIFIED =
+      2; // every byte is in and checked (hash, header, kind), the slot is not sealed (it has
+         // no MCUboot magic, the SSBL never sees it); the nRF5340 checks the signature, then seals
+  GAP9_OTA_STAGE_APPLYING = 3; // nRF5340 only: the new slot runs on trial and is being checked
+  GAP9_OTA_STAGE_FAILED = 4;   // see `fail`; abort or begin starts again
 }
 
 enum Gap9OtaFail {
@@ -75,6 +78,14 @@ message Gap9OtaData {
   bytes data = 2; // <= Gap9OtaInfo.chunk_max (1024 B)
 }
 
+// nRF5340 to GAP9: write the MCUboot magic of the finished transfer (stage VERIFIED), the last write of an image. Sent
+// only after the nRF5340 checked the signature over `image_hash`. Before it the slot never parses, so an image that the
+// nRF5340 did not accept (a bad signature, a lost abort) can never be started. GAP9 refuses a hash that is not the one
+// of its answer to finish. Repeating it is harmless.
+message Gap9OtaSeal {
+  bytes image_hash = 1; // 32 B: the image_hash of the Gap9OtaInfo that the nRF5340 checked
+}
+
 // nRF5340 to GAP9: the state of the transfer, the slots and the booted slot. With `verify`, also check the image in
 // `slot` as finish does (without a transfer; the answer is Gap9OtaInfo with image_hash, signature and key_hash, or
 // `fail`): the nRF5340 checks the signature of a slot that it did not receive itself (revert, lost settings). A GAP9
@@ -103,6 +114,7 @@ message Gap9OtaInfo {
   bytes image_hash = 12;
   bytes signature = 13;
   bytes key_hash = 14;
+  bool sealed = 15; // the slot of the transfer has its magic (seal done): the SSBL may start it
 }
 
 // Host to nRF5340: bytes of the image. Flow: Gap9OtaBegin, Gap9OtaChunk until the end, GAP9_OTA_ACTION_FINISH,

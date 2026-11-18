@@ -28,7 +28,7 @@ Untested on hardware. Tested on the host (`make test-host`, `make test-python`) 
 
 ## What the app brings
 
-- **GAP9 app:** the job that carries the five update requests (`G9OTA_OP_*` of `struct g9ota_req`, answered with a
+- **GAP9 app:** the job that carries the six update requests (`G9OTA_OP_*` of `struct g9ota_req`, answered with a
   `Gap9OtaInfo`) in the app's own job message, with
   `g9ota_dispatch()`. The MRAM backend: `g9ota_mram_init(kind, NULL)` at start-up; link with
   `SENSEI_GAP9_OTA_LINK_OPTIONS` (the wrapper of `pi_fs_conf_init`). `kind` is the board id of the images (at most 48
@@ -83,7 +83,7 @@ the A/B layout holds a small placeholder of that name, never read.
 | Link | Messages |
 |---|---|
 | Host to nRF5340 | `Gap9OtaBegin` (size, SHA-256, version, resume), `Gap9OtaChunk` (up to 188 B), `Gap9OtaCommand` (status, finish, apply, abort, revert). Reply: `Gap9OtaReply` (verdict, stage, fail, offset, chunk size, booted and confirmed slot, both slots with version and image id), or an error of the app |
-| nRF5340 to GAP9 | `Gap9OtaBegin`, `Gap9OtaData` (up to 1024 B), `Gap9OtaStatus` (with `verify` and a slot it checks that slot like `finish` does, without a transfer), finish and abort; answer `Gap9OtaInfo` |
+| nRF5340 to GAP9 | `Gap9OtaBegin`, `Gap9OtaData` (up to 1024 B), `Gap9OtaStatus` (with `verify` and a slot it checks that slot like `finish` does, without a transfer), finish, `Gap9OtaSeal` (the image hash that the nRF5340 checked) and abort; answer `Gap9OtaInfo` |
 
 The chunk size 188 B is for a host message of 212 B (a receive buffer of 256 B). The verdict of GAP9 is in
 `Gap9OtaInfo.result`; the job status of the app is OK whenever the job was handled.
@@ -102,12 +102,14 @@ The chunk size 188 B is for a host message of 212 B (a receive buffer of 256 B).
 4. `finish`: GAP9 reads the slot back and checks, in this order, the SHA-256 of the file, the header and container, the
    kind TLV, the image hash against the bytes, the app descriptor (as the SSBL checks it: no section over the SSBL, the
    hand-off record or the end of L2, no XIP, at most 32 sections), a signature TLV of the right shape and the version.
-   Then it writes the first 16 bytes of the file, which hold the MCUboot magic. They were left out while the image came
-   in (the checkpoint records keep them), so a slot that is not complete never parses and the SSBL never sees half an
-   image. A failed check erases the first sector. Then the nRF5340 checks the signature over the image hash with its key
-   (`FAIL_SIGNATURE`, detail 1: another key, 2: the signature does not check) and aborts the transfer on GAP9 if it fails
-   (repeated twice if the abort gets no answer). The flow keeps the image id of each slot that it verified or confirmed
-   in the settings.
+   It answers VERIFIED with the hash and the signature and records the transfer as checked. A failed check erases the
+   first sector. Then the nRF5340 checks the signature over the image hash with its key (`FAIL_SIGNATURE`, detail 1:
+   another key, 2: the signature does not check). If it fails, the nRF5340 aborts the transfer on GAP9 (repeated twice
+   if the abort gets no answer). If it passes, the nRF5340 sends `seal` with that hash, and only now GAP9 writes the
+   first 16 bytes of the file, which hold the MCUboot magic. They are left out while the image comes in (the checkpoint
+   records keep them), so a slot that is not sealed never parses and the SSBL never sees it: not half an image, and not
+   a complete one that the nRF5340 did not accept (a bad signature, an abort that got lost, a reset of the nRF5340).
+   The flow keeps the image id of each slot that it verified or confirmed in the settings, after the seal.
 5. `apply` (only for a transfer checked in this session): the nRF5340 stores the trial (settings key
    `sensei_gap9/trial`), answers at once (stage APPLYING), power cycles GAP9 with the slot line at the new slot and
    decides with `sensei_gap9_trial_step()` (`gap9_trial.h`): a HELLO with the right protocol (a boot without one is
@@ -124,10 +126,11 @@ The chunk size 188 B is for a host message of 212 B (a receive buffer of 256 B).
 
 **Resume.** A request without an answer (link down, GAP9 power cycled) is repeated, then the host asks `status` and
 `begin` with `resume`. GAP9 answers the offset of its last checkpoint, a multiple of 8 KiB; a chunk below the wanted offset
-is acknowledged and changes nothing. A `begin` with `resume` after a finished transfer is answered VERIFIED with the
-proof; the nRF5340 checks the signature again from the answer, so `apply` works without sending anything. A power cut at
-any write leaves either the old state or the new one (the host tests cut the power at every write of an update, and a
-second time during the resume).
+is acknowledged and changes nothing. A `begin` with `resume` after a finished transfer (checked, sealed or not) makes
+GAP9 check the slot again and answer VERIFIED with the proof (`sealed` says whether the magic is in); the nRF5340 checks
+the signature again from the answer and seals, so `apply` works without sending the image again. A transfer that fails
+that check is dropped. A power cut at any write, the seal included, leaves either the old state or the new one (the host
+tests cut the power at every write of an update, and a second time during the resume).
 
 **Lost settings.** If the nRF5340 has no stored slot (first start, erased settings), it holds GAP9, starts slot A and
 confirms the first slot that answers with a HELLO and a status, passes the check of its signature and the app's checks;
@@ -140,6 +143,14 @@ The signature is checked by the nRF5340, not by GAP9 or the SSBL. The public key
 at build time) and cannot be changed over the air. Use a key that differs from the keys of the nRF5340 image and of
 other boards.
 
+## Compatibility
+
+Deferred sealing changed the job protocol: the nRF5340 sends the `seal` job, and the GAP9 writer no longer writes the
+magic in `finish`. An app takes the change with a new major version of its job protocol (the SENSEI IEQ node: 2): a new
+nRF5340 refuses an old GAP9 application (HELLO with the old major, `-EPROTO`, GAP9 powered off) and an old nRF5340 refuses
+a new one, so the two never talk with different rules. An old writer sealed in `finish`, before the nRF5340 checked the
+signature; it must not stay in the field. A node that has such an image takes the new one over JTAG once.
+
 ## Not covered
 
 The SSBL and FSBL (JTAG only), a GAP9 firmware with another job protocol major (it needs a new nRF5340 image first), no
@@ -148,7 +159,7 @@ was not confirmed (the probe confirms what answers). A board that has no A/B lay
 
 ## Tests
 
-`tests/test_g9ota.c` (the writer on a RAM MRAM: transfer, resume, a power cut at every write, the running slot never
-written, the checks of `finish`, the address guard), `tests/test_g9ota_flow.c` (the flow against a fake link whose GAP9
+`tests/test_g9ota.c` (the writer on a RAM MRAM: transfer, deferred seal, resume, a power cut at every write, the seal
+included, the running slot never written, the checks of `finish`, the address guard), `tests/test_g9ota_flow.c` (the flow against a fake link whose GAP9
 runs the real writer: transfer, signature, trial, revert, reset in a trial, lost settings), `tests/test_gap9_trial.c`,
 `GAP9/ssbl/tools/test_pack_slot.py` (the builder, and an imgtool image through the writer; CI fails if these skip).

@@ -26,14 +26,21 @@
  * that allows only the other slot and the checkpoint sectors.
  * - A fresh `begin` erases the header sector of the slot. The first MRAM word of the file (16
  * bytes, with the MCUboot magic) is left out while the image comes in (the checkpoint records keep
- * it) and written at the end of `finish`: a slot that is not complete never parses, whatever is in
+ * it) and written by `seal`, the last step: a slot that is not sealed never parses, whatever is in
  * the rest of it.
  * - `finish` reads the slot back and checks, in this order: SHA-256 of the whole file (as in
  * `begin`), the MCUboot header and the container, the kind TLV, the image hash TLV against the
  * bytes, the app descriptor (as the SSBL checks it), the signature TLV (present, shape), the
- * version against the running one; then it writes the magic. It returns the hash, the signature as
- * r || s and the key hash for the nRF5340, which owns the public key. A slot is "valid" for
- * `g9ota_slot_info` only if its structure parses and no transfer into it is open.
+ * version against the running one; then it records the transfer as checked (state CHECKED) and
+ * returns the hash, the signature as r || s and the key hash for the nRF5340, which owns the public
+ * key. It does not write the magic.
+ * - `seal` (deferred sealing) writes the magic. The nRF5340 sends it after it checked the signature
+ * over the hash of the answer to `finish`; GAP9 does not check the signature. So an image that the
+ * nRF5340 did not accept (a bad signature, a lost abort, a node that was reset) has no magic and
+ * the SSBL never starts it, not even as the fallback of a bad confirmed slot. A slot is "valid" for
+ * `g9ota_slot_info` only if its structure parses (sealed) and no transfer into it is open.
+ * - `begin` with `resume` for a transfer that was checked answers like `finish` (VERIFIED, with the
+ * proof; `sealed` tells whether the magic is in): the checks are made again.
  * - Applying is not a write: the nRF5340 starts the slot with the slot line. Nothing here changes
  * on `apply`.
  */
@@ -92,7 +99,9 @@ struct g9ota_ckpt {
   uint8_t hdr0[16]; /* the first 16 bytes of the file, once its first sector is in (see g9ota.c) */
 };
 
-enum { G9OTA_CK_OPEN = 1, G9OTA_CK_DONE = 2, G9OTA_CK_CLEARED = 3 };
+/* OPEN: bytes are coming. CHECKED: every byte is in and finish checked it, the magic is not written (the slot is not an
+ * image yet; a resume re-checks and answers VERIFIED). DONE: sealed. CLEARED: nothing is open. */
+enum { G9OTA_CK_OPEN = 1, G9OTA_CK_DONE = 2, G9OTA_CK_CLEARED = 3, G9OTA_CK_CHECKED = 4 };
 
 struct g9ota {
   const struct g9ota_flash *fl;
@@ -106,7 +115,7 @@ struct g9ota {
   int detail;
   uint32_t size;
   uint8_t sha[32];
-  uint8_t hdr0[16]; /* the first 16 bytes of the file: not programmed until `finish` (seal_header) */
+  uint8_t hdr0[16]; /* the first 16 bytes of the file: not programmed until `seal` (seal_header) */
   uint32_t offset;  /* next byte wanted */
   uint32_t flushed; /* bytes that are in the slot (a multiple of G9OTA_SECTOR, or size at the end) */
   uint32_t nbuf;    /* bytes in buf: offset - flushed */
@@ -123,6 +132,7 @@ struct g9ota {
   uint8_t signature[64];
   uint8_t key_hash[32];
   bool have_key_hash;
+  bool sealed; /* the magic is written */
 
   bool timed;
   bool opened;
@@ -175,6 +185,9 @@ void g9ota_boot_note(struct g9ota *o);
 sensei_Gap9OtaResult g9ota_begin(struct g9ota *o, const sensei_Gap9OtaBegin *req, sensei_Gap9OtaInfo *info);
 sensei_Gap9OtaResult g9ota_chunk(struct g9ota *o, const sensei_Gap9OtaData *req, sensei_Gap9OtaInfo *info);
 sensei_Gap9OtaResult g9ota_finish(struct g9ota *o, sensei_Gap9OtaInfo *info);
+/** Write the MCUboot magic of the finished transfer (stage VERIFIED): the nRF5340 sends it after it checked the
+ * signature. `req->image_hash` must be the hash that `finish` answered, else INVALID. Repeating it is answered OK. */
+sensei_Gap9OtaResult g9ota_seal(struct g9ota *o, const sensei_Gap9OtaSeal *req, sensei_Gap9OtaInfo *info);
 sensei_Gap9OtaResult g9ota_abort(struct g9ota *o, sensei_Gap9OtaInfo *info);
 /** Look at a slot as `finish` does (container, kind, image hash TLV against the bytes, app
  * descriptor, signature shape) without a transfer, and answer the hash, signature and key hash for
@@ -184,7 +197,7 @@ sensei_Gap9OtaResult g9ota_abort(struct g9ota *o, sensei_Gap9OtaInfo *info);
 sensei_Gap9OtaResult g9ota_verify(struct g9ota *o, uint8_t slot, sensei_Gap9OtaInfo *info);
 sensei_Gap9OtaResult g9ota_status(struct g9ota *o, sensei_Gap9OtaInfo *info);
 
-/** One request of the nRF5340 to the writer: the five update jobs. The app takes it out of its own job
+/** One request of the nRF5340 to the writer: the six update jobs. The app takes it out of its own job
  * message (the nRF5340 puts it in), and answers with the Gap9OtaInfo. */
 enum g9ota_op {
   G9OTA_OP_BEGIN,
@@ -192,6 +205,7 @@ enum g9ota_op {
   G9OTA_OP_STATUS, /* also the verify of a slot */
   G9OTA_OP_FINISH,
   G9OTA_OP_ABORT,
+  G9OTA_OP_SEAL,
 };
 
 struct g9ota_req {
@@ -200,6 +214,7 @@ struct g9ota_req {
     sensei_Gap9OtaBegin begin;
     sensei_Gap9OtaData chunk;
     sensei_Gap9OtaStatus status;
+    sensei_Gap9OtaSeal seal;
   } u;
 };
 

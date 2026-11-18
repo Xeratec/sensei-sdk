@@ -32,6 +32,7 @@ static struct {
   bool hello_bad; /* the HELLO has another major version */
   bool selftest_ok;
   int selftest_fails; /* the next self-tests fail, then they pass */
+  bool seal_timeout;  /* the next seal job times out (GAP9 loses power) */
   bool lie_slot;      /* the app reports the slot of the slot line, not the one the SSBL started (no
                          hand-off) */
   bool job_timeout;   /* the next job times out */
@@ -58,7 +59,7 @@ static struct {
   int rb_err;
   sensei_Version rb_hello;
   /* what the flow did */
-  int holds, releases, reboots, jobs, detects;
+  int holds, releases, reboots, jobs, detects, seals;
   uint8_t reboot_slots[16];
   bool held;
   int hold_rc;
@@ -148,6 +149,16 @@ static int f_job(const struct g9ota_req *req, g9ota_job_cb cb, void *user) {
       break;
     case G9OTA_OP_ABORT:
       (void)g9ota_abort(&g.ota, r);
+      break;
+    case G9OTA_OP_SEAL:
+      g.seals++;
+      if (g.seal_timeout) {
+        g.seal_timeout = false;
+        g.on = false;
+        g.job_err = -ETIMEDOUT;
+        break;
+      }
+      (void)g9ota_seal(&g.ota, &req->u.seal, r);
       break;
     }
   }
@@ -575,8 +586,9 @@ static void run_trial_failure(const char *what, void (*knob)(void), sensei_Gap9O
   CHECK(do_cmd(sensei_Gap9OtaAction_GAP9_OTA_ACTION_STATUS) == 0);
   CHECK(R()->stage == sensei_Gap9OtaStage_GAP9_OTA_STAGE_FAILED && R()->fail == want_fail);
   CHECK(R()->confirmed_slot == 0 && R()->booted_slot == 0);
-  /* a new begin clears the failure */
-  CHECK(do_begin(image, img_n, true) == 0 && R()->stage != sensei_Gap9OtaStage_GAP9_OTA_STAGE_FAILED);
+  /* a new begin clears the failure (a resume of a finished image checks it again, the image may be gone) */
+  g.clock_ms += 20000;
+  CHECK(do_begin(image, img_n, false) == 0 && R()->stage != sensei_Gap9OtaStage_GAP9_OTA_STAGE_FAILED);
 }
 
 static void k_nohello(void) { g.no_hello = 2; }
@@ -923,8 +935,15 @@ static void test_unverified_slot(void) {
   CHECK(do_cmd(sensei_Gap9OtaAction_GAP9_OTA_ACTION_FINISH) == 0);
   CHECK(R()->fail == sensei_Gap9OtaFail_GAP9_OTA_FAIL_SIGNATURE && g.abort_timeouts == 0 && !g.held);
   CHECK(do_cmd(sensei_Gap9OtaAction_GAP9_OTA_ACTION_STATUS) == 0);
-  CHECK(R()->slot_b.valid); /* GAP9 says it is an image: only the node knows better */
-  g.bad_id = new_id();      /* the signature of exactly this image does not check */
+  CHECK(!R()->slot_b.valid); /* deferred sealing: no seal was sent, the image has no magic: no slot for the SSBL */
+  /* the same bytes get in another way (a factory flash, a writer of an older firmware): a complete image that GAP9
+   * calls valid and only the node knows to be bad */
+  memcpy(g.mram.mem + SENSEI_G9_SLOT_B_OFF, image, img_n);
+  memset(g.mram.mem + SENSEI_G9_CKPT_OFF, 0xFF, 2 * G9OTA_SECTOR);
+  g9ota_init(&g.ota, &fake_ops, &g.mram, &lay, g.booted);
+  CHECK(do_cmd(sensei_Gap9OtaAction_GAP9_OTA_ACTION_STATUS) == 0);
+  CHECK(R()->slot_b.valid);
+  g.bad_id = new_id(); /* the signature of exactly this image does not check */
   g.verify_rc = 0;
   g.verifies = 0;
   CHECK(do_cmd(sensei_Gap9OtaAction_GAP9_OTA_ACTION_REVERT) == 0);
@@ -1066,7 +1085,7 @@ static void test_resume_after_verified(void) {
   upload();
   session_gone();
   CHECK(do_begin(image, img_n, true) == 0);
-  CHECK(R()->stage == sensei_Gap9OtaStage_GAP9_OTA_STAGE_RECEIVING && R()->offset == img_n);
+  CHECK(R()->stage == sensei_Gap9OtaStage_GAP9_OTA_STAGE_VERIFIED && flow.verified); /* checked, signature, seal */
   CHECK(do_cmd(sensei_Gap9OtaAction_GAP9_OTA_ACTION_FINISH) == 0 && flow.verified);
   CHECK(do_cmd(sensei_Gap9OtaAction_GAP9_OTA_ACTION_APPLY) == 0);
   pump_all();
@@ -1259,6 +1278,76 @@ static void test_node_rate_limit(void) {
   CHECK(do_begin(image, img_n, false) == 0 && R()->result == sensei_Gap9OtaResult_GAP9_OTA_OK);
 }
 
+/* Deferred sealing: the nRF5340 checks the signature before the slot gets its magic. */
+static int raw_rd(void *c, uint32_t off, void *buf, size_t len) {
+  memcpy(buf, (const uint8_t *)c + off, len);
+  return 0;
+}
+
+static bool raw_parses(uint8_t slot) {
+  struct sensei_g9_slot_info si;
+  const uint8_t *p = g.mram.mem + (slot ? SENSEI_G9_SLOT_B_OFF : SENSEI_G9_SLOT_A_OFF);
+
+  return sensei_g9_slot_parse(raw_rd, (void *)p, SENSEI_G9_SLOT_SIZE, &si) == 0;
+}
+
+static void test_deferred_seal(void) {
+  struct sensei_gap9_trial t = closed(0);
+
+  /* a good image: one seal, after the signature check; the slot parses only then */
+  setup(&t, 0, 1, 3);
+  make_new(1, 4, 30000);
+  CHECK(do_begin(image, img_n, false) == 0);
+  CHECK(send_all(image, img_n, 0) == img_n);
+  CHECK(!raw_parses(1));
+  CHECK(do_cmd(sensei_Gap9OtaAction_GAP9_OTA_ACTION_FINISH) == 0 && flow.verified);
+  CHECK(g.seals == 1 && R()->stage == sensei_Gap9OtaStage_GAP9_OTA_STAGE_VERIFIED && raw_parses(1));
+  CHECK(flow.known[1] != 0);
+  CHECK(do_cmd(sensei_Gap9OtaAction_GAP9_OTA_ACTION_APPLY) == 0);
+  pump_all();
+  CHECK(flow.trial.confirmed == 1);
+
+  /* a bad signature never seals; the abort is lost; the confirmed slot then goes bad: no slot starts, in particular
+   * not the unchecked image */
+  setup(&t, 0, 1, 3);
+  g.verify_rc = -EBADMSG;
+  make_new(1, 4, 30000);
+  CHECK(do_begin(image, img_n, false) == 0);
+  CHECK(send_all(image, img_n, 0) == img_n);
+  g.abort_timeouts = 1 + G9OTA_FLOW_ABORT_RETRIES;
+  CHECK(do_cmd(sensei_Gap9OtaAction_GAP9_OTA_ACTION_FINISH) == 0);
+  CHECK(R()->fail == sensei_Gap9OtaFail_GAP9_OTA_FAIL_SIGNATURE && g.abort_timeouts == 0);
+  CHECK(g.seals == 0 && !flow.verified && flow.known[1] == 0);
+  CHECK(!raw_parses(1)); /* complete image bytes, no magic */
+  CHECK(memcmp(g.mram.mem + SENSEI_G9_SLOT_B_OFF + 16, image + 16, img_n - 16) == 0);
+  g.mram.mem[SENSEI_G9_SLOT_A_OFF + 3] ^= 0x80; /* the confirmed slot goes bad */
+  CHECK(!raw_parses(0) && !raw_parses(1));
+  /* GAP9 restarts: it does not offer the image either, and a resume does not seal it (the node must check first) */
+  gboot(0);
+  CHECK(do_cmd(sensei_Gap9OtaAction_GAP9_OTA_ACTION_STATUS) == 0 && !R()->slot_b.valid);
+  g.verify_rc = -EBADMSG;
+  CHECK(do_begin(image, img_n, true) == 0);
+  CHECK(g.seals == 0 && !raw_parses(1) && !flow.verified);
+
+  /* the seal gets no answer (GAP9 lost power): the host asks again; the checked image is still there, the seal is
+   * repeated after the signature check */
+  setup(&t, 0, 1, 3);
+  make_new(1, 4, 30000);
+  CHECK(do_begin(image, img_n, false) == 0);
+  CHECK(send_all(image, img_n, 0) == img_n);
+  g.seal_timeout = true;
+  CHECK(do_cmd(sensei_Gap9OtaAction_GAP9_OTA_ACTION_FINISH) == 0);
+  CHECK(last_err() == -ETIMEDOUT && !flow.verified && !raw_parses(1));
+  CHECK(do_cmd(sensei_Gap9OtaAction_GAP9_OTA_ACTION_APPLY) == 0 &&
+        R()->result == sensei_Gap9OtaResult_GAP9_OTA_INVALID);
+  session_gone();
+  CHECK(do_begin(image, img_n, true) == 0);
+  CHECK(R()->stage == sensei_Gap9OtaStage_GAP9_OTA_STAGE_VERIFIED && flow.verified && g.seals == 2 && raw_parses(1));
+  CHECK(do_cmd(sensei_Gap9OtaAction_GAP9_OTA_ACTION_APPLY) == 0);
+  pump_all();
+  CHECK(flow.trial.confirmed == 1);
+}
+
 int main(void) {
   test_update_and_trial(0);
   test_update_and_trial(1);
@@ -1282,5 +1371,6 @@ int main(void) {
   test_reboot_busy();
   test_persist_retry();
   test_node_rate_limit();
+  test_deferred_seal();
   DONE();
 }

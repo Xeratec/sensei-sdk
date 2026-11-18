@@ -21,9 +21,11 @@
  * `apply`, `abort`, 120 s without a request or 45 min after the start. The transfer itself is checkpointed on GAP9
  * and survives the end of the session (resume).
  * - `finish`: GAP9 reads the slot back and checks it, then the nRF5340 checks the signature (ECDSA P-256 over the
- * image hash that GAP9 matched against the bytes) with the key the app was built with. A bad signature aborts the
- * transfer (the abort is repeated if it gets no answer). The same check is made on a `begin` with `resume` that GAP9
- * answers VERIFIED (the host came back after a finish).
+ * image hash that GAP9 matched against the bytes) with the key the app was built with. Only then it sends the seal
+ * job: GAP9 writes the MCUboot magic, and not before, so a slot of an image that the nRF5340 did not accept never
+ * parses (deferred sealing). A bad signature aborts the transfer (the abort is repeated if it gets no answer); if it
+ * is lost, the unsealed image is still no slot to the SSBL. The same check and seal are made on a `begin` with `resume`
+ * that GAP9 answers VERIFIED (the host came back after a finish).
  * - The flow keeps, in the app's settings, the image id of each slot that it verified (signature) or confirmed. A
  * slot is started on trial only with such an id: `revert` and the lost-settings probe ask GAP9 to verify a slot
  * (status with verify: the same checks as `finish`, hash and signature returned) when the id is not known, and check
@@ -153,6 +155,8 @@ struct g9ota_flow {
   uint8_t boot_wait_slot;
   unsigned boot_waits;
   uint8_t verify_slot; /* slot that a verify job looks at (revert, probe) */
+  uint8_t seal_slot;   /* slot and image id that the seal job in flight is for */
+  uint32_t seal_id;
 
   struct g9ota_req req; /* about 1 KB: the job in flight */
 };

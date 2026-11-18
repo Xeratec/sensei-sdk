@@ -1,0 +1,33 @@
+# SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+# SPDX-License-Identifier: Apache-2.0
+
+# Scenario of the OTA trial test (testcase.yaml). The module's own options (CONFIG_SENSEI_OTA_*) are set as in an app.
+
+choice SENSEI_TEST_SCENARIO
+	prompt "Scenario of the trial test"
+	default SENSEI_TEST_LATE_LINK
+
+config SENSEI_TEST_LATE_LINK
+	bool "The check passes first, an SMP request comes later; the first confirm write fails"
+
+config SENSEI_TEST_EARLY_LINK
+	bool "An SMP request comes before sensei_ota_init()"
+
+config SENSEI_TEST_NO_LINK
+	bool "The check passes, no SMP request ever comes"
+
+config SENSEI_TEST_UNHEALTHY
+	bool "An SMP request comes, the check never passes"
+
+config SENSEI_TEST_HOST_CONFIRM
+	bool "The host confirms over SMP (use with SENSEI_OTA_CONFIRM=n)"
+
+endchoice
+
+# BOOTLOADER_MCUBOOT (which SENSEI_OTA needs) selects USE_DT_CODE_PARTITION, and native_sim has no flash load offset
+# to allow that. Nothing on native_sim reads the offset; the partitions are the ones of its flash simulator.
+config HAS_FLASH_LOAD_OFFSET
+	bool
+	default y
+
+source "Kconfig.zephyr"

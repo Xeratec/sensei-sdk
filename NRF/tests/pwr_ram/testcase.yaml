@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+# SPDX-License-Identifier: Apache-2.0
+---
+# sensei_pwr_ram_powerdown() of NRF/system/pwr: which RAM it reports as powered down.
+common:
+  platform_allow:
+    - native_sim/native/64
+  tags: sensei pwr
+tests:
+  sensei.pwr.ram:
+    # image RAM ends inside a 4 kB section: the next section is the first one to power down
+    extra_configs:
+      - CONFIG_SENSEI_TEST_IMAGE_END=0x20003210
+  sensei.pwr.ram.full:
+    # image RAM reaches the end of the chosen RAM: nothing to power down
+    extra_configs:
+      - CONFIG_SENSEI_TEST_IMAGE_END=0x2003f001

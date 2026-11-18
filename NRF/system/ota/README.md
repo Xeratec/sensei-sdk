@@ -81,8 +81,16 @@ the board TLV `0xa0`, a protected TLV (covered by the signature) that names the 
 app of this SDK checks it before it accepts an image; the host tools of SENSEI IEQ check it for both boards. MCUboot itself
 ignores it.
 
+## Tests
+
+- Host (`tests/`, `make test-host`): the trial decision, the image TLVs, the recovery reset rule.
+- Zephyr, native_sim (`NRF/tests/ota_reset`, `NRF/tests/ota`, see `NRF/tests/README.md`): the reset hook in the mcumgr
+  callback chain; the trial supervision (check after the delay, SMP request needed to confirm, retry of a failed
+  confirm write, reset at the end of the trial, confirm by the host) with MCUboot's image state and the reset as fakes.
+
 ## Not covered
 
+- The MCUboot swap and the trailer flags: the tests fake `boot_is_img_confirmed()` and `boot_write_img_confirmed()`.
 - The network core of the nRF5340: the NCS update path needs the b0n bootloader and the partition manager.
 - Images for other processors: the nRF9151 of the LPWAN shield has its own MCUboot and is updated through the client of
   `lib/sensei_lpwan` (`sensei_lpwan_dfu_submit()`); the shield app uses the pure trial rule `sensei_ota_trial.h` of this folder.

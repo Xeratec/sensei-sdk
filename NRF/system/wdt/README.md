@@ -24,4 +24,8 @@ static bool app_healthy(void) { return scheduler_progress(); }
 sensei_wdt_start(CONFIG_SENSEI_WDT_TIMEOUT_S, app_healthy, NULL);
 ```
 
+Test: `NRF/tests/wdt` (native_sim, a test watchdog with FFF fakes): not-ready device, failed install or setup, timeout in
+ms and options, first feed at once and then every period on the channel that install returned, no feed while `healthy()`
+is false. A second `sensei_wdt_start()` is not supported: it would initialise the running work item again.
+
 Untested on hardware.

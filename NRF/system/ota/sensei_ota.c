@@ -87,7 +87,7 @@ uint32_t sensei_ota_image_id(void) {
   const struct flash_area *fa;
   uint32_t id;
 
-  if (flash_area_open(FIXED_PARTITION_ID(slot0_partition), &fa) != 0) {
+  if (flash_area_open(PARTITION_ID(slot0_partition), &fa) != 0) {
     return 0;
   }
   id = sensei_image_id(slot0_read, (void *)fa);

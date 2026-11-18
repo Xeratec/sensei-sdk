@@ -1,0 +1,8 @@
+# SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+# SPDX-License-Identifier: Apache-2.0
+
+config SENSEI_TEST_IMAGE_END
+	hex "End of the image RAM (_image_ram_end)"
+	default 0x20003210
+
+source "Kconfig.zephyr"

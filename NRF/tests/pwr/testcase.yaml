@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+# SPDX-License-Identifier: Apache-2.0
+---
+# NRF/system/pwr with the real MAX77654 driver and bsp on an I2C emulator of the PMIC and the ADC emulator.
+common:
+  platform_allow:
+    - native_sim/native/64
+  tags: sensei pwr
+tests:
+  sensei.pwr:
+    # Li-SOCl2 battery (the default), rails on at boot
+    timeout: 120
+  sensei.pwr.liion:
+    timeout: 120
+    extra_configs:
+      - CONFIG_SENSEI_PWR_BATTERY_LIION=y
+  sensei.pwr.boot_fail:
+    extra_configs:
+      - CONFIG_SENSEI_TEST_BOOT_FAIL=y
+  sensei.pwr.no_boot_rails:
+    extra_configs:
+      - CONFIG_SENSEI_TEST_NO_RAILS=y
+      - CONFIG_SENSEI_PWR_BOOT_RAILS=n

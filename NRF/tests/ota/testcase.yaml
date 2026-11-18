@@ -1,0 +1,30 @@
+# SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+# SPDX-License-Identifier: Apache-2.0
+---
+# The trial supervision of NRF/system/ota (sensei_ota.c) in the scenarios of the link rule. Each one needs a fresh boot:
+# an image is confirmed once, and a reset ends the run.
+common:
+  platform_allow:
+    - native_sim/native/64
+  tags: sensei ota
+tests:
+  sensei.ota.trial:
+    # the check passes before the first SMP request; the first confirm write fails; image id from the flash
+    timeout: 60
+  sensei.ota.trial.early_link:
+    extra_configs:
+      - CONFIG_SENSEI_TEST_EARLY_LINK=y
+  sensei.ota.trial.no_link:
+    extra_configs:
+      - CONFIG_SENSEI_TEST_NO_LINK=y
+  sensei.ota.trial.link_not_needed:
+    extra_configs:
+      - CONFIG_SENSEI_TEST_NO_LINK=y
+      - CONFIG_SENSEI_OTA_CONFIRM_NEEDS_LINK=n
+  sensei.ota.trial.unhealthy:
+    extra_configs:
+      - CONFIG_SENSEI_TEST_UNHEALTHY=y
+  sensei.ota.trial.host_confirm:
+    extra_configs:
+      - CONFIG_SENSEI_TEST_HOST_CONFIRM=y
+      - CONFIG_SENSEI_OTA_CONFIRM=n

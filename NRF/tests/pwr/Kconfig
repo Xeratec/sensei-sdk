@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+# SPDX-License-Identifier: Apache-2.0
+
+# Scenario of the power test (testcase.yaml). The module's own options (CONFIG_SENSEI_PWR_*) are set as in an app.
+
+choice SENSEI_TEST_SCENARIO
+	prompt "Scenario of the power test"
+	default SENSEI_TEST_NORMAL
+
+config SENSEI_TEST_NORMAL
+	bool "The PMIC answers at boot: boot hook, init, start, events, battery, button"
+
+config SENSEI_TEST_BOOT_FAIL
+	bool "The PMIC does not answer at boot: the boot hook fails and pwr_init() tries again"
+
+config SENSEI_TEST_NO_RAILS
+	bool "Boot hook without the rails (SENSEI_PWR_BOOT_RAILS=n)"
+
+endchoice
+
+source "Kconfig.zephyr"

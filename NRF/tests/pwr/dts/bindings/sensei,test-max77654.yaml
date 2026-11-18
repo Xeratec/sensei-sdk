@@ -1,0 +1,8 @@
+# Copyright (c) 2026 ETH Zurich and University of Bologna
+# SPDX-License-Identifier: Apache-2.0
+
+description: MAX77654 PMIC stand-in of the SENSEI power test (NRF/tests/pwr). The I2C emulator is in the test.
+
+compatible: "sensei,test-max77654"
+
+include: i2c-device.yaml

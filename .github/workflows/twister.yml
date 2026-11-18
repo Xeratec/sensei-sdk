@@ -62,13 +62,22 @@ jobs:
           python -m pip install --quiet
           -r ws/zephyr/scripts/requirements-base.txt
           -r ws/zephyr/scripts/requirements-build-test.txt
-          tabulate natsort
+          tabulate natsort "gcovr>=8.3,<9"
 
+      # --coverage: gcov data of every native_sim test, one report of the SDK sources (no threshold)
       - name: Run Twister
         env:
           SENSEI_NCS_WORKSPACE: ${{ github.workspace }}/ws
           TWISTER_OUT: ${{ runner.temp }}/twister
-        run: ws/sensei-sdk/scripts/twister.sh --host
+        run: ws/sensei-sdk/scripts/twister.sh --host --coverage
+
+      - name: Coverage summary
+        if: ${{ always() }}
+        run: |
+          f="${{ runner.temp }}/twister/twister-out/coverage/coverage-summary.txt"
+          if [ -f "$f" ]; then
+            { echo '### Coverage of the SDK sources (native_sim)'; echo '```'; cat "$f"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Upload test reports
         if: ${{ always() }}
@@ -78,4 +87,13 @@ jobs:
           path: |
             ${{ runner.temp }}/twister/twister-out/twister.xml
             ${{ runner.temp }}/twister/twister-out/twister.json
+          if-no-files-found: ignore
+
+      - name: Upload coverage report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: twister-coverage
+          path: ${{ runner.temp }}/twister/twister-out/coverage
+          retention-days: 14
           if-no-files-found: ignore

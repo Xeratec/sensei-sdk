@@ -83,3 +83,12 @@ Key-down is the nEN falling edge (interrupt flag read from the PMIC), key-up is 
 key-down is ignored, and a new key-down replaces an older one (its key-up was missed). The key-up is handled only
 after a good flag read. A press longer than 2 s (`THREAD_PWR_SOFT_RESET_LATENCY_MS`) switches the rails off and
 reboots.
+
+## Tests
+
+Zephyr tests on native_sim (`NRF/tests/pwr`, `pwr_check`, `pwr_ram`; see `NRF/tests/README.md`). `pwr` runs this module
+with the real MAX77654 driver and BSP on an I2C emulator of the PMIC, the GPIO emulator and the ADC emulator: boot hook
+(order, wait after the reset, rails, settle time, retry in `pwr_init()`), charger and thresholds per battery choice,
+events and status, battery levels, failed PMIC reads, the periodic work, power-off and the button. `pwr_check` runs
+`sensei_pwr_check_idle()` on test devices, `pwr_ram` the size that `sensei_pwr_ram_powerdown()` reports.
+Not tested: the real PMIC (the emulator follows the driver's register map), `pwr_ram_boot.c` and the RAM switches.

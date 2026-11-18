@@ -1,0 +1,15 @@
+/*
+ * SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/* native_sim has no watchdog: a test driver (src/main.c) records the calls of sensei_wdt.c. */
+/ {
+	aliases {
+		watchdog0 = &test_wdt;
+	};
+
+	test_wdt: test-wdt {
+		compatible = "sensei,test-wdt";
+	};
+};

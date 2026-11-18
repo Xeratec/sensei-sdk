@@ -1,0 +1,60 @@
+/*
+ * SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/* What NRF/system/pwr expects from the board (nrf5340_senseiv1_shared.dtsi), on the GPIO emulator of native_sim: the
+ * power switches and the PMIC lines, and the PMIC itself on the emulated I2C bus "i2ca" (sensei_sim.overlay). */
+
+#include <zephyr/dt-bindings/gpio/gpio.h>
+
+/ {
+	sensei_pwr: sensei_pwr {
+		compatible = "gpio-leds";
+		gpio_gap9_pwr: gpio_gap9_pwr {
+			gpios = <&gpio0 0 GPIO_ACTIVE_HIGH>;
+		};
+		gpio_led_pwr: gpio_led_pwr {
+			gpios = <&gpio0 1 GPIO_ACTIVE_HIGH>;
+		};
+	};
+	sensei_comm: sensei_comm {
+		compatible = "gpio-leds";
+		gpio_gap9_i2c_ctrl: gpio_gap9_i2c_ctrl {
+			gpios = <&gpio0 2 GPIO_ACTIVE_HIGH>;
+		};
+		gpio_gap9_spi_ctrl: gpio_gap9_spi_ctrl {
+			gpios = <&gpio0 3 GPIO_ACTIVE_HIGH>;
+		};
+		gpio_gap9_shared_ctrl: gpio_gap9_shared_ctrl {
+			gpios = <&gpio0 4 GPIO_ACTIVE_HIGH>;
+		};
+	};
+	sensei_irq: sensei_irq {
+		compatible = "gpio-keys";
+		gpio_pmic_irq: gpio_pmic_irq {
+			gpios = <&gpio0 5 GPIO_ACTIVE_LOW>;
+		};
+		gpio_soft_nrst: gpio_soft_nrst {
+			gpios = <&gpio0 6 GPIO_ACTIVE_LOW>;
+		};
+	};
+};
+
+&i2c0 {
+	pmic: max77654@48 {
+		compatible = "sensei,test-max77654";
+		reg = <0x48>;
+	};
+};
+
+/* the battery voltage reaches the SAADC through the PMIC AMUX: 3600 mV full scale as on the board */
+&adc0 {
+	ref-internal-mv = <3600>;
+};
+
+&adc0 {
+	channel@0 {
+		zephyr,vref-mv = <3600>;
+	};
+};

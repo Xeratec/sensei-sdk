@@ -94,7 +94,8 @@ config SENSEI_OTA_CONFIRM_DELAY_S
 	int "Run time before the image is confirmed, s"
 	default 30
 	range 5 3600
-	depends on SENSEI_OTA_CONFIRM
+	help
+	  Without SENSEI_OTA_CONFIRM the value is not used, but sensei_ota.c reads it, so it stays defined.
 
 config SENSEI_OTA_TRIAL_TIMEOUT_S
 	int "Trial time, s"

@@ -185,8 +185,9 @@ message GnssFixResult {
   sint32 alt_m = 5;      // above the ellipsoid as the modem reports it, m
   uint32 acc_m = 6;      // horizontal accuracy estimate of the modem, m (0: unknown)
   uint32 sats = 7;       // satellites used in the fix
-  fixed32 unix_time = 8; // UTC of the fix, Unix s (0: not known)
+  fixed32 unix_time = 8; // UTC of the fix, Unix s, rounded with the milliseconds of the receiver (0: not known)
   uint32 ttff_ms = 9;    // from the start of the receiver to the fix; without a fix the time it ran
+  uint32 age_ms = 10;    // the shield got the fix this long before it sent the result, ms (0 for an older shield)
 }
 
 message LpwanSleep {

@@ -200,8 +200,9 @@ typedef struct _sensei_GnssFixResult {
     int32_t alt_m; /* above the ellipsoid as the modem reports it, m */
     uint32_t acc_m; /* horizontal accuracy estimate of the modem, m (0: unknown) */
     uint32_t sats; /* satellites used in the fix */
-    uint32_t unix_time; /* UTC of the fix, Unix s (0: not known) */
+    uint32_t unix_time; /* UTC of the fix, Unix s, rounded with the milliseconds of the receiver (0: not known) */
     uint32_t ttff_ms; /* from the start of the receiver to the fix; without a fix the time it ran */
+    uint32_t age_ms; /* the shield got the fix this long before it sent the result, ms (0 for an older shield) */
 } sensei_GnssFixResult;
 
 typedef struct _sensei_LpwanSleep {
@@ -483,7 +484,7 @@ extern "C" {
 #define sensei_DfuChunk_init_default             {0, {0, {0}}, 0}
 #define sensei_DfuStatus_init_default            {_sensei_DfuState_MIN, _sensei_DfuTarget_MIN, 0, 0, 0, _sensei_DfuFail_MIN, 0}
 #define sensei_GnssFixRequest_init_default       {0}
-#define sensei_GnssFixResult_init_default        {0, _sensei_GnssFixStatus_MIN, 0, 0, 0, 0, 0, 0, 0}
+#define sensei_GnssFixResult_init_default        {0, _sensei_GnssFixStatus_MIN, 0, 0, 0, 0, 0, 0, 0, 0}
 #define sensei_LpwanSleep_init_default           {0}
 #define sensei_LpwanRequest_init_default         {0, 0, {sensei_Empty_init_default}}
 #define sensei_LpwanVersion_init_default         {false, sensei_Version_init_default, "", 0, 0, 0, 0, "", 0}
@@ -506,7 +507,7 @@ extern "C" {
 #define sensei_DfuChunk_init_zero                {0, {0, {0}}, 0}
 #define sensei_DfuStatus_init_zero               {_sensei_DfuState_MIN, _sensei_DfuTarget_MIN, 0, 0, 0, _sensei_DfuFail_MIN, 0}
 #define sensei_GnssFixRequest_init_zero          {0}
-#define sensei_GnssFixResult_init_zero           {0, _sensei_GnssFixStatus_MIN, 0, 0, 0, 0, 0, 0, 0}
+#define sensei_GnssFixResult_init_zero           {0, _sensei_GnssFixStatus_MIN, 0, 0, 0, 0, 0, 0, 0, 0}
 #define sensei_LpwanSleep_init_zero              {0}
 #define sensei_LpwanRequest_init_zero            {0, 0, {sensei_Empty_init_zero}}
 #define sensei_LpwanVersion_init_zero            {false, sensei_Version_init_zero, "", 0, 0, 0, 0, "", 0}
@@ -570,6 +571,7 @@ extern "C" {
 #define sensei_GnssFixResult_sats_tag            7
 #define sensei_GnssFixResult_unix_time_tag       8
 #define sensei_GnssFixResult_ttff_ms_tag         9
+#define sensei_GnssFixResult_age_ms_tag          10
 #define sensei_LpwanSleep_deep_tag               1
 #define sensei_LpwanRequest_seq_tag              1
 #define sensei_LpwanRequest_get_version_tag      2
@@ -750,7 +752,8 @@ X(a, STATIC,   SINGULAR, SINT32,   alt_m,             5) \
 X(a, STATIC,   SINGULAR, UINT32,   acc_m,             6) \
 X(a, STATIC,   SINGULAR, UINT32,   sats,              7) \
 X(a, STATIC,   SINGULAR, FIXED32,  unix_time,         8) \
-X(a, STATIC,   SINGULAR, UINT32,   ttff_ms,           9)
+X(a, STATIC,   SINGULAR, UINT32,   ttff_ms,           9) \
+X(a, STATIC,   SINGULAR, UINT32,   age_ms,           10)
 #define sensei_GnssFixResult_CALLBACK NULL
 #define sensei_GnssFixResult_DEFAULT NULL
 
@@ -996,7 +999,7 @@ extern const pb_msgdesc_t sensei_LpwanEvent_msg;
 #define sensei_DfuStatus_size                    30
 #define sensei_DownlinkRx_size                   1035
 #define sensei_GnssFixRequest_size               6
-#define sensei_GnssFixResult_size                49
+#define sensei_GnssFixResult_size                55
 #define sensei_LoraConfigure_size                20
 #define sensei_LoraProvision_size                38
 #define sensei_LpwanError_size                   52

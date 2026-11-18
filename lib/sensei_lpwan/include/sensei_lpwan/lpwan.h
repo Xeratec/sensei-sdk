@@ -316,9 +316,11 @@ int sensei_lpwan_shield_diag(struct sensei_lpwan_shield_diag *out);
 
 /**
  * GNSS of the shield's nRF9151: one position fix on request. The shield is powered if it is off. The rules of a fix
- * next to LTE are in sensei_lpwan/lpwan_gnss.h: LoRa is not touched; with LTE the client keeps LTE out of the way until
- * the fix has ended (sensei_lpwan_radio_ready(LTE) is false, an LTE send gives -EAGAIN, on_up(RADIO_BLE) follows), and
- * a fix is not started while an LTE connect or send is in flight.
+ * next to LTE are in sensei_lpwan/lpwan_gnss.h: LoRa is not touched; an LTE send goes through while a fix runs (LTE
+ * connected); an LTE connect waits for the end of the fix (sensei_lpwan_radio_ready(LTE) is false until then, an LTE
+ * send without a connection gives -EAGAIN, on_up(RADIO_BLE) follows); an LTE release (disconnect) asked during the fix
+ * runs when it has ended, before on_up; a fix is not started while an LTE connect or send is in flight; an update of
+ * the shield is refused (-EBUSY) while a fix is pending.
  *
  * done(err, res, user) runs on hooks.wq. err 0: the shield answered, res->status tells how the fix ended (GNSS_FIX_OK
  * with the position, TIMEOUT, BLOCKED, CANCELLED, FAILED). Else res->status is the verdict of the client:
@@ -328,6 +330,8 @@ int sensei_lpwan_shield_diag(struct sensei_lpwan_shield_diag *out);
  *                the link, GAP9 has the bus: GNSS_FIX_BUSY. Try again later.
  *   -ETIMEDOUT   no result within the time and the margin: the client asked the shield to cancel.
  *   -ENOTCONN    the shield lost its power or the link while the fix ran. -EIO, -EPROTONOSUPPORT: the link failed.
+ * res->unix_time (0: not known) is moved to the time of the call: the shield's time of the fix plus the age of the fix
+ * (res->age_ms) plus the time since the client read the result. It is good to about a second.
  * The callback runs after the pending flag is cleared: it may start the next fix.
  */
 typedef void (*sensei_lpwan_gnss_done_fn)(int err, const sensei_GnssFixResult *res, void *user);
@@ -346,6 +350,10 @@ bool sensei_lpwan_gnss_busy(void);
 /** Whether the shield has the GNSS, from its last version read: 1 yes, 0 no, -ENODATA not read yet (the shield is
  *  off: ask for a fix, the answer is -ENOTSUP if there is none). */
 int sensei_lpwan_gnss_supported(void);
+
+/** Number of good version reads of the shield since boot (every bring-up of the shield reads it). A caller that gave
+ *  up on the shield compares it with the number it saw: a change means the shield answered again. */
+uint32_t sensei_lpwan_version_reads(void);
 
 /** One-line state for the shell and status messages. */
 const char *sensei_lpwan_state_str(void);

@@ -44,11 +44,11 @@ The SENSEI IEQ node builds it with `make nrf9151` and `make nrf9151-release` (`f
 
 | Build | Flash (non-secure image) | RAM | MCUboot | TF-M |
 |---|---|---|---|---|
-| Release | 113.1 kB | 59 kB | 27.4 kB of 64 kB | 64.3 kB |
-| Debug (RTT log, modem trace) | 173.9 kB | 69 kB | 27.4 kB of 64 kB | 64.3 kB |
+| Release | 113.8 kB | 59 kB | 27.4 kB of 64 kB | 64.3 kB |
+| Debug (RTT log, modem trace) | 174.9 kB | 69 kB | 27.4 kB of 64 kB | 64.3 kB |
 
 The non-secure slot is 196.6 kB (188 kB usable) with MCUboot; 212 kB without. Kconfig: `LPWAN_SHIELD_LTE`, `LPWAN_SHIELD_LORA`,
-`LPWAN_SHIELD_GNSS` (all default y). Turn one off to save flash; the GNSS costs 4.9 kB in Release and 5.7 kB in Debug (before it: 108.2 kB and 168.2 kB).
+`LPWAN_SHIELD_GNSS` (all default y). Turn one off to save flash; the GNSS costs 5.6 kB in Release and 6.7 kB in Debug (before it: 108.2 kB and 168.2 kB).
 
 ## Simulated shield (native_sim)
 
@@ -192,16 +192,27 @@ API. Not tested on hardware.
   app, or `LPWAN_SHIELD_GNSS=n`) answers `LPWAN_UNSUPPORTED`: the client takes that, and a missing `gnss` in the version, as "not supported" and
   nothing else changes.
 - **Modem.** The system mode is LTE-M or NB-IoT **with GPS** (`LTE_LC_SYSTEM_MODE_LTEM_GPS`, `_NBIOT_GPS`), set at the connect and, for a fix
-  without LTE (a LoRa-only node), by the fix itself (`lte_gnss_prepare()` starts the modem library). The normal functional mode activates the
-  GNSS that is in the system mode, so the connect takes it back at once (`LTE_LC_FUNC_MODE_DEACTIVATE_GNSS`): GNSS is active only for an
-  attempt: a worker thread sets functional mode 31, starts a single fix (`fix_interval` 0, `fix_retry` = the timeout), waits for a valid PVT
-  frame, the timeout or a cancel, stops, sets mode 30 and queues the event. It works with LTE off.
+  without LTE (a LoRa-only node), by the fix itself (`lte_gnss_begin()` starts the modem library and, if the modem has no GNSS in its system mode
+  and is off or offline, sets it). The normal functional mode activates the GNSS that is in the system mode, so the connect takes it back at once
+  (`LTE_LC_FUNC_MODE_DEACTIVATE_GNSS`): GNSS is active only for an attempt: a worker thread sets functional mode 31, starts a single fix
+  (`fix_interval` 0, `fix_retry` = the timeout, no NMEA strings), waits for a valid PVT frame, the timeout or a cancel, stops and ends the fix
+  (`lte_gnss_end()`): functional mode 30 with LTE on, **0 (power off) when LTE is not wanted**, so that the modem saves what the GNSS learned
+  (ephemerides, time, last position) before the node cuts the shield's supply. Then it queues the event. It works with LTE off. The functional
+  mode changes of a fix and of the LTE worker (release, deep sleep) take one lock; a release or deep sleep that comes while a fix has GNSS active
+  deactivates only LTE (mode 20), and the end of the fix does the rest. The fix time stamps the PVT frame: the result carries `age_ms` and the
+  UTC of the fix rounded with the receiver's milliseconds. **Warm and cold start.** A power cycle of the shield between two fixes is a warm start
+  (the modem keeps its data in its flash); a cold start needs `nrf_modem_gnss_nv_data_delete()`, which is a debug feature. There is no shell on
+  the shield: change `gnss.c` for a test. Untested on hardware: that mode 0 before the cut keeps the data (node repo `firmware/docs/TESTING.md`, T15.15).
 - **Fix and LTE.** The modem runs GNSS only while LTE is idle (PSM, eDRX gaps, LTE off); there is no priority mode. If it keeps GNSS blocked
   (`BLOCKED` event, or the PVT flags say that the windows were missed or too short, typical with PSM and eDRX both off) until the timeout, the
-  result is `blocked`. The rule for a fix and an LTE message (`lib/sensei_lpwan/include/sensei_lpwan/lpwan_gnss.h`, host-tested): a send never
-  waits for a fix (the modem gives LTE priority); the functional mode changes (connect, disconnect, configure, evaluation, deep sleep) and the
-  fix exclude each other. A fix is refused (`LPWAN_BUSY`) while LTE connects, sends or disconnects; while one runs the shield refuses those
-  requests with `LPWAN_BUSY`, and the nRF5340 client keeps LTE out of the way until the result. LoRa is not touched.
+  result is `blocked`. The rule for a fix and an LTE message (`lib/sensei_lpwan/include/sensei_lpwan/lpwan_gnss.h`, host-tested, the order of the
+  checks is `lpwan_admit_request()`, which `service.c` calls): an LTE send goes through during a fix (the modem gives LTE priority); what changes the
+  functional mode (LTE connect, release, configure, deep sleep) and the start of a shield update exclude the fix. A fix is refused
+  (`LPWAN_BUSY`) while LTE connects, sends or disconnects; while one runs the shield refuses those requests with `LPWAN_BUSY` (the connect would
+  set mode 1 and then 30, which ends the fix), and the nRF5340 client keeps an LTE connect and a release back until the result. `gnss_cancel` is
+  also allowed during an update. LoRa is not touched, but a `sleep` request is refused for any radio.
+  A fix and LTE evaluation or sends run side by side. Priority mode (`nrf_modem_gnss_prio_mode_enable()`, GNSS over LTE idle procedures, for
+  repeated `NOT_ENOUGH_WINDOW_TIME`) is not used: a follow-up if fixes end "blocked" in the field.
 - **Antenna.** The active antenna is supplied through the modem's COEX0 pin (net `EN_3V3_GNSS_ANT`, load switch U5, see HARDWARE.md). The
   shield selects the NCS library `modem_antenna` (`CONFIG_MODEM_ANTENNA`), which sends `AT%XCOEX0=1,1,1565,1586` at every start of the modem
   library: COEX0 is high while GNSS is active in 1565 to 1586 MHz. No `AT%XMAGPIO` (the shield has no antenna tuner on those pins). **Untested on
@@ -209,7 +220,8 @@ API. Not tested on hardware.
   not set.
 - **Not done.** No A-GNSS and no nRF Cloud (no account): the receiver starts from what the modem keeps (ephemeris, almanac, last position). Assistance
   data over the node's own link is a follow-up, as is a charge-counter state for `gnss_on_ms` in the node.
-- **Simulation.** The simulated shield has a fake `nrf_modem_gnss` (sim/README.md): a fix after a time, a timeout, blocked, or an error.
+- **Simulation.** The simulated shield has a fake `nrf_modem_gnss` and keeps the functional mode of the modem (sim/README.md): a PVT frame every
+  second, a fix after a time, a timeout, blocked (and unblocked), or an error; a fix is refused when GNSS is not active.
 
 ## LoRaWAN (`src/lora.c`)
 

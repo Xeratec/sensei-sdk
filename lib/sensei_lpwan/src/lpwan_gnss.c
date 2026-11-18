@@ -33,16 +33,48 @@ bool lpwan_gnss_refuses(const sensei_LpwanRequest *req, const lpwan_sm_t *sm) {
   switch (req->which_body) {
   case sensei_LpwanRequest_lte_configure_tag:
   case sensei_LpwanRequest_lte_connect_tag:
-  case sensei_LpwanRequest_lte_eval_tag:
   case sensei_LpwanRequest_sleep_tag:
+  case sensei_LpwanRequest_dfu_begin_tag: /* the apply restarts the modem library under a running fix */
     return true;
   case sensei_LpwanRequest_lte_disconnect_tag:
     return sm->tech == LPWAN_TECH_LTE; /* a LoRa leave does not touch the modem */
-  case sensei_LpwanRequest_send_tag:
-    return lpwan_tech_of_radio(req->send.radio) == LPWAN_TECH_LTE;
   default:
-    return false;
+    return false; /* LTE sends, the evaluation and everything else go on */
   }
+}
+
+static bool is_dfu_request(const sensei_LpwanRequest *req) {
+  return req->which_body >= sensei_LpwanRequest_dfu_begin_tag && req->which_body <= sensei_LpwanRequest_dfu_confirm_tag;
+}
+
+bool lpwan_allowed_during_dfu(const sensei_LpwanRequest *req) {
+  switch (req->which_body) {
+  case sensei_LpwanRequest_get_version_tag:
+  case sensei_LpwanRequest_get_status_tag:
+  case sensei_LpwanRequest_diag_ack_tag:
+  case sensei_LpwanRequest_lte_disconnect_tag:
+  case sensei_LpwanRequest_gnss_cancel_tag:
+    return true;
+  default:
+    return is_dfu_request(req);
+  }
+}
+
+sensei_LpwanResult lpwan_admit_request(lpwan_sm_t *sm, const sensei_LpwanRequest *req, bool dfu_holds_link,
+                                       bool fix_running) {
+  if (dfu_holds_link && !lpwan_allowed_during_dfu(req)) {
+    return sensei_LpwanResult_LPWAN_BUSY;
+  }
+  if (req->which_body == sensei_LpwanRequest_gnss_fix_tag) {
+    sensei_LpwanResult adm = lpwan_gnss_admit(sm, fix_running);
+
+    if (adm != sensei_LpwanResult_LPWAN_OK) {
+      return adm;
+    }
+  } else if (fix_running && lpwan_gnss_refuses(req, sm)) {
+    return sensei_LpwanResult_LPWAN_BUSY;
+  }
+  return lpwan_sm_admit(sm, req);
 }
 
 sensei_GnssFixStatus lpwan_gnss_end_status(bool fix, bool cancelled, bool error, bool blocked_at_end) {
@@ -79,6 +111,25 @@ uint32_t lpwan_gnss_utc_to_unix(uint16_t year, uint8_t month, uint8_t day, uint8
     days++;
   }
   return days * 86400u + (uint32_t)hour * 3600u + (uint32_t)minute * 60u + second;
+}
+
+uint32_t lpwan_gnss_utc_to_unix_ms(uint16_t year, uint8_t month, uint8_t day, uint8_t hour, uint8_t minute,
+                                   uint8_t second, uint16_t ms) {
+  uint32_t t = lpwan_gnss_utc_to_unix(year, month, day, hour, minute, second);
+
+  if (t == 0 || ms > 999) {
+    return 0;
+  }
+  return t + (ms >= 500 ? 1u : 0u);
+}
+
+uint32_t lpwan_gnss_time_now(uint32_t unix_time, uint32_t age_ms, uint32_t delay_ms) {
+  uint64_t t = (uint64_t)unix_time + ((uint64_t)age_ms + delay_ms + 500u) / 1000u;
+
+  if (unix_time == 0) {
+    return 0;
+  }
+  return t > UINT32_MAX ? UINT32_MAX : (uint32_t)t;
 }
 
 uint32_t lpwan_gnss_acc_m(float acc) {

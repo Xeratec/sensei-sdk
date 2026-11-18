@@ -25,7 +25,7 @@ nRF5340 (master)                          nRF9151 (slave)
 | `include/sensei_lpwan/lpwan_link.h` | transfer scheme, flags, shared state machine API |
 | `src/` | protocol cores without OS: `link_slave.c` (nRF9151), `lpwan_master.c` (nRF5340), `lpwan_sm.c` (both), `lpwan_timers.c` (3GPP PSM and eDRX timer coding), `lpwan_lora.c` (LoRa payload limit, airtime, send time estimate, what a send gets before it is queued, the send tracking of both sides), `lpwan_dfu.c` (rules of the shield update: offsets, resume, SHA-256, checkpoints, MCUboot header and kind checks, repeats, an abort that undoes the marking, rate limit and link hold; flash and modem behind an ops table), `lpwan_upd.c` (what the client remembers about the update: when a swap may be running, the trial of a new image, the end of a session; pure), `lpwan_sim.c` (stream framing of the simulated shield link), `lpwan_gnss.c` (GNSS of the shield: timeout rule, admission of a fix next to LTE, which requests wait for a fix, how an attempt ended, UTC to Unix time and the conversions of the modem's values; pure), `lpwan_rai.c` (LTE uplink policy: the RAI flag of a chunk, the send sequence of RAI option, send and wait for the answer behind an ops table, the answer of the server, the connection evaluation classes and the decision when to ask; pure) |
 | `zephyr/` | nRF5340 client: `lpwan_client.c` (thread, shield power, shared SPI_A bus, radios, the update session), `lpwan_shell.c`, `sim/` (simulated shield link, native_sim) |
-| `tests/` | host tests: master against slave through a simulated SPI with faults, state machine, timer coding, LoRa limits and airtime, a model of the LR1121 (duty cycle, NbTrans, repeats) with the shield and the client around it, `test_lpwan_dfu` (a shield update on a RAM flash, with gaps, resume after a restart, bad images, repeats, abort, the modem path, and over the SPI link with damaged frames), `test_lpwan_dfu_fuzz` (random chunking, lost replies, restarts and power loss in the middle of a flash operation), `test_lpwan_upd` (swap wait, trial, session rules), `test_lpwan_rai` (RAI flag and sequence on a fake socket, ack or downlink as the answer, evaluation classes and decision), `test_lpwan_counters` (RRC connected time, attaches, PSM entries and how they travel in `LpwanStatus`), `test_lpwan_gnss` (the GNSS rules, and `gnss_fix`, `gnss_cancel`, `gnss_result`, `LpwanVersion.gnss` and the GNSS counters between the master and a model of the shield, also an older shield, and the event slot of the result); the `on_power` hook is checked on native_sim by `NRF/tests/lpwan_power` |
+| `tests/` | host tests: master against slave through a simulated SPI with faults, state machine, timer coding, LoRa limits and airtime, a model of the LR1121 (duty cycle, NbTrans, repeats) with the shield and the client around it, `test_lpwan_dfu` (a shield update on a RAM flash, with gaps, resume after a restart, bad images, repeats, abort, the modem path, and over the SPI link with damaged frames), `test_lpwan_dfu_fuzz` (random chunking, lost replies, restarts and power loss in the middle of a flash operation), `test_lpwan_upd` (swap wait, trial, session rules), `test_lpwan_rai` (RAI flag and sequence on a fake socket, ack or downlink as the answer, evaluation classes and decision), `test_lpwan_counters` (RRC connected time, attaches, PSM entries and how they travel in `LpwanStatus`), `test_lpwan_gnss` (the GNSS rules, the order of the shield's admission checks (the same function as `service.c`), the time of a fix, and `gnss_fix`, `gnss_cancel`, `gnss_result`, `LpwanVersion.gnss` and the GNSS counters between the master and a model of the shield, also an older shield, and the event slot of the result); the `on_power` hook is checked on native_sim by `NRF/tests/lpwan_power`; the GNSS fix of the client (gating, deferred release, deadline with cancel, power loss, a result during the request, update refused) against a scripted shield by `NRF/tests/lpwan_gnss` |
 
 ## Client API (nRF5340, `sensei_lpwan/lpwan.h`)
 
@@ -124,13 +124,20 @@ start the next fix.
 
 The rule for a fix and LTE, in `sensei_lpwan/lpwan_gnss.h` (host tested), the same on both sides:
 
-- The modem gives LTE priority and runs GNSS only while LTE is idle (PSM, eDRX gaps, LTE off). A send does not wait for a fix; a fix takes
-  longer and may end "blocked".
-- The changes of the modem's functional mode and the fix exclude each other. The shield refuses a fix (`LPWAN_BUSY`) while LTE connects,
-  sends or disconnects, and refuses LTE connect, disconnect, configure, evaluation, deep sleep and LTE sends while a fix runs.
-- The client keeps LTE out of the way from the call to the callback: `sensei_lpwan_radio_ready(LTE)` is false, an LTE send gives `-EAGAIN`, an
-  LTE connect waits, and `on_up(RADIO_BLE)` comes after the callback. An LTE message waits at most the timeout of the fix. LoRa is not held.
+- The modem gives LTE priority and runs GNSS only while LTE is idle (PSM, eDRX gaps, LTE off). A fix takes longer and may end "blocked", but it
+  never delays a send.
+- An LTE send goes through while a fix runs (LTE connected): the shield takes it, the client does not hold it back.
+- What changes the functional mode of the modem and the fix exclude each other: LTE connect, LTE release (disconnect, deep sleep), LTE configure,
+  and the shield update (`dfu_begin`). The shield refuses a fix (`LPWAN_BUSY`) while LTE connects, sends or disconnects, and refuses those
+  requests (`LPWAN_BUSY`) while a fix runs. Why: the connect sets functional mode 1 (the NCS library) and then 30, which ends a running fix.
+- The client therefore keeps a connect and a release back while a fix runs. An LTE connect waits: `sensei_lpwan_radio_ready(LTE)` is false and no
+  request reaches the shield; `on_up(RADIO_BLE)` comes after the callback, and the app asks again. An LTE send without a connection gives
+  `-EAGAIN`. A disconnect (or a change to another radio) asked during the fix is remembered and runs when the fix has ended, before `on_up`. An
+  LTE message that has no connection waits at most the timeout of the fix plus 20 s. A shield update is refused with `-EBUSY` while a fix is
+  pending; a cancel is always possible. LoRa is not held.
 - The shield is not powered down while a fix runs; a power cut or a lost link ends it (`-ENOTCONN`).
+- `res->unix_time` is moved to the time of the callback: the shield's UTC of the fix (rounded with the receiver's milliseconds) plus
+  `res->age_ms` (how old the fix was when the shield sent the result) plus the time since the client read the result.
 
 `sensei lpwan gnss [timeout_s]` (shell) asks for a fix and prints the result. `sensei_lpwan_shield_diag()` has the shield's GNSS counters
 (`gnss_attempts`, `gnss_fixes`, `gnss_on_ms`). Untested on hardware.

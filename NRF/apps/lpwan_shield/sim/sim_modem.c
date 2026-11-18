@@ -42,6 +42,10 @@ static lte_lc_evt_handler_t handler;
 static struct k_work_delayable reg_work;
 static K_MUTEX_DEFINE(lock);
 static bool lib_up;
+static bool lte_on;  /* functional mode: LTE active */
+static bool gnss_on; /* functional mode: GNSS active */
+static int func_off; /* 0 or 4: the mode of the modem while both are off */
+static enum lte_lc_system_mode sys_mode = LTE_LC_SYSTEM_MODE_LTEM;
 static bool want_reg;      /* connect asked, no offline since */
 static bool registered;    /* what the modem told the app */
 static bool cover = true;  /* the network is there */
@@ -115,16 +119,93 @@ int nrf_modem_lib_shutdown(void) {
 
 void lte_lc_register_handler(lte_lc_evt_handler_t h) { handler = h; }
 
+static bool mode_has_gnss(enum lte_lc_system_mode m) {
+  return m == LTE_LC_SYSTEM_MODE_GPS || m == LTE_LC_SYSTEM_MODE_LTEM_GPS || m == LTE_LC_SYSTEM_MODE_NBIOT_GPS ||
+         m == LTE_LC_SYSTEM_MODE_LTEM_NBIOT_GPS;
+}
+
+/* The system mode can be set only with the modem off or offline (as on the real one). */
 int lte_lc_system_mode_set(enum lte_lc_system_mode mode, enum lte_lc_system_mode_preference pref) {
   ARG_UNUSED(pref);
+  if (lte_on || gnss_on) {
+    LOG_WRN("modem: system mode refused, the modem is on");
+    return -EFAULT;
+  }
+  sys_mode = mode;
   LOG_INF("modem: system mode %s%s",
           mode == LTE_LC_SYSTEM_MODE_NBIOT || mode == LTE_LC_SYSTEM_MODE_NBIOT_GPS ? "NB-IoT" : "LTE-M",
-          mode == LTE_LC_SYSTEM_MODE_NBIOT_GPS || mode == LTE_LC_SYSTEM_MODE_LTEM_GPS ? " with GNSS" : "");
+          mode_has_gnss(mode) ? " with GNSS" : "");
   return 0;
 }
 
+int lte_lc_system_mode_get(enum lte_lc_system_mode *mode, enum lte_lc_system_mode_preference *pref) {
+  *mode = sys_mode;
+  *pref = LTE_LC_SYSTEM_MODE_PREFER_AUTO;
+  return 0;
+}
+
+bool sim_modem_gnss_active(void) { return gnss_on; }
+
+static int go_off(void);
+
+int lte_lc_func_mode_get(enum lte_lc_func_mode *mode) {
+  if (lte_on && gnss_on) {
+    *mode = LTE_LC_FUNC_MODE_NORMAL;
+  } else if (lte_on) {
+    *mode = mode_has_gnss(sys_mode) ? LTE_LC_FUNC_MODE_ACTIVATE_LTE : LTE_LC_FUNC_MODE_NORMAL;
+  } else if (gnss_on) {
+    *mode = LTE_LC_FUNC_MODE_ACTIVATE_GNSS;
+  } else {
+    *mode = func_off == 4 ? LTE_LC_FUNC_MODE_OFFLINE : LTE_LC_FUNC_MODE_POWER_OFF;
+  }
+  return 0;
+}
+
+/* The functional modes that the shield uses: 0, 4 (both off), 1 (LTE, and GNSS if it is in the system mode), 20, 21
+ * (LTE off, on), 30, 31 (GNSS off, on). */
 int lte_lc_func_mode_set(enum lte_lc_func_mode mode) {
+  bool gnss_was = gnss_on;
+
+  switch (mode) {
+  case LTE_LC_FUNC_MODE_POWER_OFF:
+  case LTE_LC_FUNC_MODE_OFFLINE:
+    func_off = mode == LTE_LC_FUNC_MODE_OFFLINE ? 4 : 0;
+    gnss_on = false;
+    lte_on = false;
+    (void)go_off();
+    break;
+  case LTE_LC_FUNC_MODE_NORMAL:
+    lte_on = true;
+    gnss_on = mode_has_gnss(sys_mode);
+    break;
+  case LTE_LC_FUNC_MODE_ACTIVATE_LTE:
+    lte_on = true;
+    break;
+  case LTE_LC_FUNC_MODE_DEACTIVATE_LTE:
+    lte_on = false;
+    (void)go_off();
+    break;
+  case LTE_LC_FUNC_MODE_ACTIVATE_GNSS:
+    if (!mode_has_gnss(sys_mode)) {
+      LOG_WRN("modem: functional mode 31 refused, no GNSS in the system mode");
+      return -EFAULT;
+    }
+    gnss_on = true;
+    break;
+  case LTE_LC_FUNC_MODE_DEACTIVATE_GNSS:
+    gnss_on = false;
+    break;
+  default:
+    return -EINVAL;
+  }
   LOG_INF("modem: functional mode %d", (int)mode);
+#ifdef CONFIG_LPWAN_SHIELD_GNSS
+  if (gnss_was && !gnss_on) {
+    sim_gnss_deactivated();
+  }
+#else
+  ARG_UNUSED(gnss_was);
+#endif
   return 0;
 }
 
@@ -165,6 +246,7 @@ int lte_lc_connect_async(lte_lc_evt_handler_t h) {
   k_mutex_lock(&lock, K_FOREVER);
   want_reg = true;
   k_mutex_unlock(&lock);
+  (void)lte_lc_func_mode_set(LTE_LC_FUNC_MODE_NORMAL); /* the library sets functional mode 1 */
   (void)k_work_reschedule(&reg_work, K_MSEC(REG_DELAY_MS));
   return 0;
 }
@@ -185,9 +267,9 @@ static int go_off(void) {
   return 0;
 }
 
-int lte_lc_offline(void) { return go_off(); }
+int lte_lc_offline(void) { return lte_lc_func_mode_set(LTE_LC_FUNC_MODE_OFFLINE); }
 
-int lte_lc_power_off(void) { return go_off(); }
+int lte_lc_power_off(void) { return lte_lc_func_mode_set(LTE_LC_FUNC_MODE_POWER_OFF); }
 
 int lte_lc_conn_eval_params_get(struct lte_lc_conn_eval_params *p) {
   if (!registered) {
@@ -297,6 +379,9 @@ void sim_modem_command(int argc, char **argv) {
                            .rrc_mode = argv[1][0] != '0' ? LTE_LC_RRC_MODE_CONNECTED : LTE_LC_RRC_MODE_IDLE};
 
     emit(&e);
+#ifdef CONFIG_LPWAN_SHIELD_GNSS
+    sim_gnss_rrc(argv[1][0] != '0');
+#endif
   } else if (argc >= 2 && strcmp(argv[0], "energy") == 0) {
     energy = atoi(argv[1]);
   } else if (argc >= 1 && strcmp(argv[0], "fault") == 0) {

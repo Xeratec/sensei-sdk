@@ -69,35 +69,120 @@ static void test_refuses(void) {
   lpwan_sm_t lora = {.state = LPWAN_ST_CONNECTED, .tech = LPWAN_TECH_LORA};
   lpwan_sm_t none = {.state = LPWAN_ST_IDLE, .tech = LPWAN_TECH_NONE};
 
-  /* what changes the functional mode of the modem or sends over LTE waits for the fix */
+  /* what changes the functional mode of the modem waits for the fix */
   rq.which_body = sensei_LpwanRequest_lte_connect_tag;
   CHECK(lpwan_gnss_refuses(&rq, &none));
   rq.which_body = sensei_LpwanRequest_lte_configure_tag;
   CHECK(lpwan_gnss_refuses(&rq, &none));
-  rq.which_body = sensei_LpwanRequest_lte_eval_tag;
-  CHECK(lpwan_gnss_refuses(&rq, &lte));
   rq.which_body = sensei_LpwanRequest_sleep_tag;
   CHECK(lpwan_gnss_refuses(&rq, &none));
+  CHECK(lpwan_gnss_refuses(&rq, &lora)); /* a sleep of any radio */
   rq.which_body = sensei_LpwanRequest_lte_disconnect_tag;
   CHECK(lpwan_gnss_refuses(&rq, &lte));
   CHECK(!lpwan_gnss_refuses(&rq, &lora)); /* a LoRa leave does not touch the modem */
   CHECK(!lpwan_gnss_refuses(&rq, &none));
+  rq.which_body = sensei_LpwanRequest_dfu_begin_tag; /* the apply restarts the modem library */
+  CHECK(lpwan_gnss_refuses(&rq, &none));
+  /* LTE sends and the evaluation go on: the modem gives LTE priority */
   rq.which_body = sensei_LpwanRequest_send_tag;
   rq.send.radio = sensei_Radio_RADIO_LTEM;
-  CHECK(lpwan_gnss_refuses(&rq, &lte));
+  CHECK(!lpwan_gnss_refuses(&rq, &lte));
   rq.send.radio = sensei_Radio_RADIO_NBIOT;
-  CHECK(lpwan_gnss_refuses(&rq, &lte));
+  CHECK(!lpwan_gnss_refuses(&rq, &lte));
   rq.send.radio = sensei_Radio_RADIO_LORA;
-  CHECK(!lpwan_gnss_refuses(&rq, &lora)); /* LoRa goes on */
+  CHECK(!lpwan_gnss_refuses(&rq, &lora));
+  rq.which_body = sensei_LpwanRequest_lte_eval_tag;
+  CHECK(!lpwan_gnss_refuses(&rq, &lte));
   /* the rest goes on */
   rq.which_body = sensei_LpwanRequest_get_status_tag;
   CHECK(!lpwan_gnss_refuses(&rq, &lte));
   rq.which_body = sensei_LpwanRequest_lora_join_tag;
   CHECK(!lpwan_gnss_refuses(&rq, &none));
+  rq.which_body = sensei_LpwanRequest_dfu_chunk_tag;
+  CHECK(!lpwan_gnss_refuses(&rq, &none));
   rq.which_body = sensei_LpwanRequest_gnss_cancel_tag;
   CHECK(!lpwan_gnss_refuses(&rq, &lte));
   rq.which_body = sensei_LpwanRequest_gnss_fix_tag;
   CHECK(!lpwan_gnss_refuses(&rq, &lte)); /* the admission says BUSY itself */
+}
+
+static void test_allowed_during_dfu(void) {
+  static const pb_size_t ok[] = {sensei_LpwanRequest_get_version_tag, sensei_LpwanRequest_get_status_tag,
+                                 sensei_LpwanRequest_diag_ack_tag,    sensei_LpwanRequest_lte_disconnect_tag,
+                                 sensei_LpwanRequest_gnss_cancel_tag, sensei_LpwanRequest_dfu_begin_tag,
+                                 sensei_LpwanRequest_dfu_chunk_tag,   sensei_LpwanRequest_dfu_confirm_tag};
+  static const pb_size_t no[] = {sensei_LpwanRequest_gnss_fix_tag, sensei_LpwanRequest_lte_connect_tag,
+                                 sensei_LpwanRequest_send_tag, sensei_LpwanRequest_sleep_tag,
+                                 sensei_LpwanRequest_lte_configure_tag};
+  sensei_LpwanRequest rq = sensei_LpwanRequest_init_zero;
+
+  for (unsigned i = 0; i < sizeof(ok) / sizeof(ok[0]); i++) {
+    rq.which_body = ok[i];
+    CHECK(lpwan_allowed_during_dfu(&rq));
+  }
+  for (unsigned i = 0; i < sizeof(no) / sizeof(no[0]); i++) {
+    rq.which_body = no[i];
+    CHECK(!lpwan_allowed_during_dfu(&rq));
+  }
+}
+
+/* The order of the checks of the shield (service.c calls lpwan_admit_request()): an update, then the fix rules, then
+ * the state machine. The state machine does not move on a refusal. */
+static void test_admit_request(void) {
+  sensei_LpwanRequest rq = sensei_LpwanRequest_init_zero;
+  lpwan_sm_t sm;
+
+  /* a fix request: refused while an update holds the link, while a fix runs, while LTE is busy */
+  lpwan_sm_init(&sm);
+  rq.which_body = sensei_LpwanRequest_gnss_fix_tag;
+  CHECK(lpwan_admit_request(&sm, &rq, false, false) == sensei_LpwanResult_LPWAN_OK);
+  CHECK(lpwan_admit_request(&sm, &rq, true, false) == sensei_LpwanResult_LPWAN_BUSY);
+  CHECK(lpwan_admit_request(&sm, &rq, false, true) == sensei_LpwanResult_LPWAN_BUSY);
+  sm = (lpwan_sm_t){.state = LPWAN_ST_SENDING, .tech = LPWAN_TECH_LTE};
+  CHECK(lpwan_admit_request(&sm, &rq, false, false) == sensei_LpwanResult_LPWAN_BUSY);
+  sm.tech = LPWAN_TECH_LORA;
+  CHECK(lpwan_admit_request(&sm, &rq, false, false) == sensei_LpwanResult_LPWAN_OK);
+
+  /* the update: no fix meanwhile, the cancel goes through, and no update starts under a fix */
+  lpwan_sm_init(&sm);
+  rq.which_body = sensei_LpwanRequest_gnss_cancel_tag;
+  CHECK(lpwan_admit_request(&sm, &rq, true, true) == sensei_LpwanResult_LPWAN_OK);
+  rq.which_body = sensei_LpwanRequest_dfu_begin_tag;
+  CHECK(lpwan_admit_request(&sm, &rq, false, true) == sensei_LpwanResult_LPWAN_BUSY);
+  CHECK(lpwan_admit_request(&sm, &rq, false, false) == sensei_LpwanResult_LPWAN_OK);
+
+  /* a fix runs: LTE connect, configure and sleep are refused and the state machine stays put */
+  lpwan_sm_init(&sm);
+  rq.which_body = sensei_LpwanRequest_lte_connect_tag;
+  CHECK(lpwan_admit_request(&sm, &rq, false, true) == sensei_LpwanResult_LPWAN_BUSY);
+  CHECK(sm.state == LPWAN_ST_IDLE && sm.tech == LPWAN_TECH_NONE);
+  rq.which_body = sensei_LpwanRequest_lte_configure_tag;
+  CHECK(lpwan_admit_request(&sm, &rq, false, true) == sensei_LpwanResult_LPWAN_BUSY);
+  rq.which_body = sensei_LpwanRequest_sleep_tag;
+  CHECK(lpwan_admit_request(&sm, &rq, false, true) == sensei_LpwanResult_LPWAN_BUSY);
+  /* the same requests without a fix go through the state machine */
+  rq.which_body = sensei_LpwanRequest_lte_connect_tag;
+  CHECK(lpwan_admit_request(&sm, &rq, false, false) == sensei_LpwanResult_LPWAN_OK);
+  CHECK(sm.state == LPWAN_ST_CONNECTING && sm.tech == LPWAN_TECH_LTE);
+
+  /* LTE connected, a fix runs: the send goes through (the state machine takes it), the release is refused */
+  sm = (lpwan_sm_t){.state = LPWAN_ST_CONNECTED, .tech = LPWAN_TECH_LTE};
+  memset(&rq, 0, sizeof(rq));
+  rq.which_body = sensei_LpwanRequest_send_tag;
+  rq.send.radio = sensei_Radio_RADIO_LTEM;
+  rq.send.payload.size = 4;
+  CHECK(lpwan_admit_request(&sm, &rq, false, true) == sensei_LpwanResult_LPWAN_OK);
+  CHECK(sm.state == LPWAN_ST_SENDING);
+  sm = (lpwan_sm_t){.state = LPWAN_ST_CONNECTED, .tech = LPWAN_TECH_LTE};
+  memset(&rq, 0, sizeof(rq));
+  rq.which_body = sensei_LpwanRequest_lte_disconnect_tag;
+  CHECK(lpwan_admit_request(&sm, &rq, false, true) == sensei_LpwanResult_LPWAN_BUSY);
+  CHECK(sm.state == LPWAN_ST_CONNECTED);
+  CHECK(lpwan_admit_request(&sm, &rq, true, false) == sensei_LpwanResult_LPWAN_OK); /* allowed during an update */
+  CHECK(sm.state == LPWAN_ST_DISCONNECTING);
+  /* LoRa leave and LoRa sends are not touched by a fix */
+  sm = (lpwan_sm_t){.state = LPWAN_ST_CONNECTED, .tech = LPWAN_TECH_LORA};
+  CHECK(lpwan_admit_request(&sm, &rq, false, true) == sensei_LpwanResult_LPWAN_OK);
 }
 
 static void test_end_status(void) {
@@ -169,6 +254,7 @@ static uint32_t clock_ms;
 static bool old_shield; /* an app without the GNSS: it does not know the tags */
 static bool shield_has_gnss = true;
 static bool fix_running;
+static bool dfu_holds; /* a shield update holds the link */
 static uint32_t fix_seq;
 static uint32_t fix_timeout_s;
 static int fix_starts;
@@ -202,10 +288,8 @@ static void on_request(struct link_slave *s, const sensei_LpwanRequest *req, voi
   r.seq = req->seq;
   if (old_shield && is_gnss) {
     r.result = sensei_LpwanResult_LPWAN_UNSUPPORTED; /* what an app before the GNSS answers to a tag it does not know */
-  } else if (fix_running && lpwan_gnss_refuses(req, &slave_sm)) {
-    r.result = sensei_LpwanResult_LPWAN_BUSY; /* before the admission: it would move the state machine */
   } else {
-    r.result = lpwan_sm_admit(&slave_sm, req);
+    r.result = lpwan_admit_request(&slave_sm, req, dfu_holds, fix_running); /* service.c calls the same function */
   }
   if (r.result == sensei_LpwanResult_LPWAN_OK) {
     if (req->which_body == sensei_LpwanRequest_get_version_tag) {
@@ -227,7 +311,7 @@ static void on_request(struct link_slave *s, const sensei_LpwanRequest *req, voi
         r.result = sensei_LpwanResult_LPWAN_UNSUPPORTED;
       } else if (!lpwan_gnss_timeout(req->gnss_fix.timeout_s, &t)) {
         r.result = sensei_LpwanResult_LPWAN_INVALID;
-      } else if ((r.result = lpwan_gnss_admit(&slave_sm, fix_running)) == sensei_LpwanResult_LPWAN_OK) {
+      } else {
         fix_running = true;
         fix_seq = req->seq;
         fix_timeout_s = t;
@@ -288,6 +372,7 @@ static void reset_sim(void) {
   old_shield = false;
   shield_has_gnss = true;
   fix_running = false;
+  dfu_holds = false;
   fix_seq = fix_timeout_s = 0;
   fix_starts = result_events = other_events = 0;
   memset(&events_result, 0, sizeof(events_result));
@@ -316,6 +401,7 @@ static int end_fix(sensei_GnssFixStatus status) {
     ev.gnss_result.sats = 9;
     ev.gnss_result.unix_time = 1780272000u;
     ev.gnss_result.ttff_ms = 31500;
+    ev.gnss_result.age_ms = 1250;
   }
   return link_slave_push_event(&slv, &ev);
 }
@@ -349,7 +435,8 @@ static void test_fix_roundtrip(void) {
   /* one at a time */
   req_fix(30, &rs);
   CHECK(rs.result == sensei_LpwanResult_LPWAN_BUSY && fix_starts == 1);
-  /* LTE connect and LTE configure wait for the fix, LoRa does not */
+  /* LTE connect and LTE configure wait for the fix, LoRa does not (the same function as the shield,
+   * lpwan_admit_request) */
   memset(&rq, 0, sizeof(rq));
   rq.which_body = sensei_LpwanRequest_lte_connect_tag;
   CHECK(do_req(&rq, &rs) == 0 && rs.result == sensei_LpwanResult_LPWAN_BUSY);
@@ -364,7 +451,7 @@ static void test_fix_roundtrip(void) {
   CHECK(events_result.seq == fix_seq && events_result.status == sensei_GnssFixStatus_GNSS_FIX_OK);
   CHECK(events_result.lat_e7 == 473764000 && events_result.lon_e7 == -85476000 && events_result.alt_m == 523);
   CHECK(events_result.acc_m == 7 && events_result.sats == 9 && events_result.unix_time == 1780272000u);
-  CHECK(events_result.ttff_ms == 31500);
+  CHECK(events_result.ttff_ms == 31500 && events_result.age_ms == 1250);
   /* the next fix may start */
   req_fix(10, &rs);
   CHECK(rs.result == sensei_LpwanResult_LPWAN_OK && fix_starts == 2 && fix_timeout_s == 10);
@@ -407,13 +494,58 @@ static void test_fix_failures(void) {
   slave_sm.state = LPWAN_ST_CONNECTED; /* idle and registered: the modem time-shares */
   req_fix(20, &rs);
   CHECK(rs.result == sensei_LpwanResult_LPWAN_OK && fix_running);
-  /* an LTE send during the fix: the shield refuses it, the client keeps it back */
+  /* an LTE send during the fix goes through: the modem gives LTE priority */
   memset(&rq, 0, sizeof(rq));
   rq.which_body = sensei_LpwanRequest_send_tag;
   rq.send.radio = sensei_Radio_RADIO_LTEM;
   rq.send.payload.size = 4;
+  CHECK(do_req(&rq, &rs) == 0 && rs.result == sensei_LpwanResult_LPWAN_OK);
+  CHECK(slave_sm.state == LPWAN_ST_SENDING && fix_running);
+  /* the release is refused until the fix has ended */
+  slave_sm.state = LPWAN_ST_CONNECTED;
+  memset(&rq, 0, sizeof(rq));
+  rq.which_body = sensei_LpwanRequest_lte_disconnect_tag;
+  CHECK(do_req(&rq, &rs) == 0 && rs.result == sensei_LpwanResult_LPWAN_BUSY && slave_sm.state == LPWAN_ST_CONNECTED);
+  CHECK(end_fix(sensei_GnssFixStatus_GNSS_FIX_TIMEOUT) == 0);
+  CHECK(do_req(&rq, &rs) == 0 && rs.result == sensei_LpwanResult_LPWAN_OK && slave_sm.state == LPWAN_ST_DISCONNECTING);
+}
+
+static void test_dfu_and_fix(void) {
+  sensei_LpwanResponse rs;
+  sensei_LpwanRequest rq = sensei_LpwanRequest_init_zero;
+
+  /* an update does not start under a fix; the fix can still be cancelled while an update holds the link */
+  reset_sim();
+  req_fix(30, &rs);
+  CHECK(rs.result == sensei_LpwanResult_LPWAN_OK && fix_running);
+  rq.which_body = sensei_LpwanRequest_dfu_begin_tag;
   CHECK(do_req(&rq, &rs) == 0 && rs.result == sensei_LpwanResult_LPWAN_BUSY);
-  CHECK(slave_sm.state == LPWAN_ST_CONNECTED);
+  dfu_holds = true;
+  memset(&rq, 0, sizeof(rq));
+  rq.which_body = sensei_LpwanRequest_gnss_cancel_tag;
+  CHECK(do_req(&rq, &rs) == 0 && rs.result == sensei_LpwanResult_LPWAN_OK);
+  req_fix(30, &rs); /* no new fix during the update */
+  CHECK(rs.result == sensei_LpwanResult_LPWAN_BUSY && fix_starts == 1);
+}
+
+static void test_time(void) {
+  /* the receiver's milliseconds round the second */
+  CHECK(lpwan_gnss_utc_to_unix_ms(2026, 6, 1, 0, 0, 0, 0) == 1780272000u);
+  CHECK(lpwan_gnss_utc_to_unix_ms(2026, 6, 1, 0, 0, 0, 499) == 1780272000u);
+  CHECK(lpwan_gnss_utc_to_unix_ms(2026, 6, 1, 0, 0, 0, 500) == 1780272001u);
+  CHECK(lpwan_gnss_utc_to_unix_ms(2026, 6, 1, 23, 59, 59, 999) == 1780358400u); /* into the next day */
+  CHECK(lpwan_gnss_utc_to_unix_ms(2026, 6, 1, 0, 0, 0, 1000) == 0);
+  CHECK(lpwan_gnss_utc_to_unix_ms(0, 0, 0, 0, 0, 0, 0) == 0); /* no time: stays 0, however long the ms */
+  CHECK(lpwan_gnss_utc_to_unix_ms(0, 0, 0, 0, 0, 0, 900) == 0);
+  /* the time of the fix moved to now: the age at the shield, the delay at the client */
+  CHECK(lpwan_gnss_time_now(1780272000u, 0, 0) == 1780272000u);
+  CHECK(lpwan_gnss_time_now(1780272000u, 1250, 0) == 1780272001u);
+  CHECK(lpwan_gnss_time_now(1780272000u, 1250, 300) == 1780272002u); /* 1.55 s */
+  CHECK(lpwan_gnss_time_now(1780272000u, 400, 99) == 1780272000u);
+  CHECK(lpwan_gnss_time_now(1780272000u, 400, 100) == 1780272001u);
+  CHECK(lpwan_gnss_time_now(1780272000u, 3600000u, 0) == 1780272000u + 3600u);
+  CHECK(lpwan_gnss_time_now(0, 5000, 5000) == 0);                     /* not known: not made up */
+  CHECK(lpwan_gnss_time_now(UINT32_MAX - 1, 10000, 0) == UINT32_MAX); /* no wrap */
 }
 
 static void test_old_shield(void) {
@@ -468,12 +600,16 @@ int main(void) {
   test_timeout();
   test_admit();
   test_refuses();
+  test_allowed_during_dfu();
+  test_admit_request();
   test_end_status();
   test_utc();
   test_utc_invalid();
   test_convert();
   test_fix_roundtrip();
   test_fix_failures();
+  test_dfu_and_fix();
+  test_time();
   test_old_shield();
   test_result_keeps_its_slot();
   printf("%s\n", check_failures ? "FAILED" : "ok");

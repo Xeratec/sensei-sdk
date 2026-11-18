@@ -317,13 +317,7 @@ static sensei_LpwanResult run(const sensei_LpwanRequest *req, struct send_answer
     return backend_off();
   case sensei_LpwanRequest_gnss_fix_tag:
 #ifdef CONFIG_LPWAN_SHIELD_GNSS
-  {
-    k_mutex_lock(&sm_lock, K_FOREVER);
-    sensei_LpwanResult adm = lpwan_gnss_admit(&sm, gnss_active());
-
-    k_mutex_unlock(&sm_lock);
-    return adm == sensei_LpwanResult_LPWAN_OK ? gnss_start(req->seq, req->gnss_fix.timeout_s) : adm;
-  }
+    return gnss_start(req->seq, req->gnss_fix.timeout_s); /* admitted by lpwan_admit_request() */
 #else
     return backend_off();
 #endif
@@ -389,18 +383,6 @@ static bool is_dfu_request(const sensei_LpwanRequest *req) {
   return req->which_body >= sensei_LpwanRequest_dfu_begin_tag && req->which_body <= sensei_LpwanRequest_dfu_confirm_tag;
 }
 
-static bool allowed_during_dfu(const sensei_LpwanRequest *req) {
-  switch (req->which_body) {
-  case sensei_LpwanRequest_get_version_tag:
-  case sensei_LpwanRequest_get_status_tag:
-  case sensei_LpwanRequest_diag_ack_tag:
-  case sensei_LpwanRequest_lte_disconnect_tag:
-    return true;
-  default:
-    return is_dfu_request(req);
-  }
-}
-
 static void on_request(struct link_slave *s, const sensei_LpwanRequest *req, void *user) {
   sensei_LpwanResponse rsp = sensei_LpwanResponse_init_zero;
   sensei_LpwanResult res;
@@ -415,18 +397,13 @@ static void on_request(struct link_slave *s, const sensei_LpwanRequest *req, voi
   lpwan_sm_t before = sm;
   lpwan_sm_t admitted;
 
-  /* An update holds the link: no radio work meanwhile (the flash, the modem and the CPU are busy). */
-  if (dfu_holds_link() && !allowed_during_dfu(req)) {
-    res = sensei_LpwanResult_LPWAN_BUSY;
+  /* An update holds the link (no radio work meanwhile: the flash, the modem and the CPU are busy); a fix and what
+   * changes the modem's functional mode exclude each other. The order of the checks is lpwan_admit_request(). */
 #ifdef CONFIG_LPWAN_SHIELD_GNSS
-  } else if (gnss_active() && lpwan_gnss_refuses(req, &sm)) {
-    /* A fix and the LTE connect, disconnect, send and configure exclude each other (lpwan_gnss.h). Before the
-     * admission, which would move the state machine. */
-    res = sensei_LpwanResult_LPWAN_BUSY;
+  res = lpwan_admit_request(&sm, req, dfu_holds_link(), gnss_active());
+#else
+  res = lpwan_admit_request(&sm, req, dfu_holds_link(), false);
 #endif
-  } else {
-    res = lpwan_sm_admit(&sm, req);
-  }
   admitted = sm;
   if (res == sensei_LpwanResult_LPWAN_OK) {
     k_mutex_unlock(&sm_lock);

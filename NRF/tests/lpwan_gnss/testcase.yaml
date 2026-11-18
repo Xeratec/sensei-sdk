@@ -1,0 +1,11 @@
+# SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+# SPDX-License-Identifier: Apache-2.0
+---
+# GNSS fix of the LPWAN client (lib/sensei_lpwan) against a scripted shield in the test: LTE gating, deferred release,
+# deadline with cancel, power loss during a fix, a result that comes during the request, update refused.
+tests:
+  sensei.lpwan.gnss:
+    platform_allow:
+      - native_sim/native/64
+    tags: sensei lpwan
+    timeout: 180

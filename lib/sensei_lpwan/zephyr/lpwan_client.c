@@ -314,6 +314,7 @@ static int version_err;
 static struct k_spinlock ver_lock;
 static sensei_LpwanVersion shield_ver;
 static bool shield_ver_valid;
+static atomic_t ver_reads; /* good version reads since boot */
 
 /* Diagnostics of the shield from its last status (sensei_lpwan_shield_diag()): asked after each version read, so
  * the node learns about a reset of the shield. The shield reports a fatal error only once: it is kept here. */
@@ -330,14 +331,17 @@ static int64_t eval_info_at;
 static sensei_RaiSupport rai_seen;
 #define EVAL_TIMEOUT_MS 30000u /* the shield evaluates for seconds at most */
 
-/* GNSS fix of the shield (lpwan_gnss.h). gnss_pending: from the call to the callback, it keeps LTE out of the way (the
- * rule is in lpwan_gnss.h). gnss_open: the thread works on it, from the start of do_gnss() to gnss_finish(). */
+/* GNSS fix of the shield (lpwan_gnss.h). gnss_pending: from the call to the callback (a shield update waits for it).
+ * gnss_open: the thread works on it, from the start of do_gnss() to gnss_finish(): an LTE connect and an LTE release
+ * wait for it (the rule is in lpwan_gnss.h). */
 static atomic_t gnss_pending;
 static atomic_t gnss_cancel_flag; /* cancel asked before the request went out */
 static bool gnss_open;            /* thread owned */
-static int64_t gnss_deadline;     /* result not later than this (thread owned), 0: the request has not gone out */
-static uint32_t gnss_seq;         /* seq of the gnss_fix request, the result event carries it */
-static uint32_t gnss_timeout;     /* s, as requested */
+static bool release_deferred;     /* a disconnect came during the fix: it runs when the fix has ended (thread owned) */
+static int64_t gnss_rx_ms;    /* uptime when the thread read the result event (thread owned, read by gnss_done_fn) */
+static int64_t gnss_deadline; /* result not later than this (thread owned), 0: the request has not gone out */
+static uint32_t gnss_seq;     /* seq of the gnss_fix request, the result event carries it */
+static uint32_t gnss_timeout; /* s, as requested */
 static sensei_lpwan_gnss_done_fn gnss_done;
 static void *gnss_user;
 static sensei_GnssFixResult gnss_res;
@@ -600,6 +604,12 @@ static void gnss_finish(int err, sensei_GnssFixStatus status, const sensei_GnssF
   }
   gnss_open = false;
   gnss_deadline = 0;
+  if (release_deferred) {
+    release_deferred = false;
+    if (err != -ENOTCONN) {                                      /* with the power gone there is nothing to release */
+      (void)post(CMD_DISCONNECT, sensei_Radio_RADIO_BLE, false); /* queued before on_up: it runs first */
+    }
+  }
   memset(&gnss_res, 0, sizeof(gnss_res));
   if (res != NULL) {
     gnss_res = *res;
@@ -620,6 +630,11 @@ static void gnss_done_fn(struct k_work *w) {
   int err = gnss_err;
 
   ARG_UNUSED(w);
+  if (r.unix_time != 0) {
+    /* The shield's time is the time of the fix. Move it to now: the age of the fix when the shield sent the result, and
+     * the time since this client read the result. */
+    r.unix_time = lpwan_gnss_time_now(r.unix_time, r.age_ms, (uint32_t)MAX(k_uptime_get() - gnss_rx_ms, 0));
+  }
   gnss_done = NULL;
   atomic_set(&gnss_pending, 0); /* before the callback: it may ask for the next fix */
   if (cb != NULL) {
@@ -636,6 +651,7 @@ static void gnss_event(const sensei_GnssFixResult *r) {
     return;
   }
   LOG_INF("GNSS: %s, %u satellites, %u ms", lpwan_gnss_status_name(r->status), (unsigned)r->sats, (unsigned)r->ttff_ms);
+  gnss_rx_ms = k_uptime_get();
   gnss_finish(0, r->status, r);
 }
 
@@ -926,6 +942,7 @@ static int read_version(sensei_LpwanVersion *out) {
     shield_ver = rs.version;
     shield_ver_valid = true;
     k_spin_unlock(&ver_lock, k);
+    (void)atomic_inc(&ver_reads);
     snprintf(fw_str, sizeof(fw_str), "%u.%u.%u", (unsigned)rs.version.firmware.major,
              (unsigned)rs.version.firmware.minor, (unsigned)rs.version.firmware.patch);
     snprintf(modem_str, sizeof(modem_str), "%.23s", rs.version.modem);
@@ -1186,12 +1203,15 @@ static void do_connect(sensei_Radio radio) {
   if (atomic_get(&dfu_active)) {
     return; /* the update holds the link; on_up comes when it ends */
   }
-  if (want == LPWAN_TECH_LTE && atomic_get(&gnss_pending)) {
-    return; /* a fix and an LTE connect exclude each other; on_up comes when the fix is over */
-  }
   if (sm.state == LPWAN_ST_CONNECTED && sm.tech == want &&
       (want != LPWAN_TECH_LTE || lte_nb == (radio == sensei_Radio_RADIO_NBIOT))) {
+    if (want == LPWAN_TECH_LTE) {
+      release_deferred = false; /* the newer wish: LTE stays */
+    }
     return; /* already there */
+  }
+  if (gnss_open && (want == LPWAN_TECH_LTE || sm.tech == LPWAN_TECH_LTE)) {
+    return; /* a fix and an LTE connect or release exclude each other; on_up comes when the fix is over */
   }
   if (sm.tech == LPWAN_TECH_BLE) {
     LOG_WRN("BLE holds the radio time");
@@ -1307,8 +1327,9 @@ static void do_send(void) {
     finish_send(-EAGAIN); /* on_up comes when the session ends */
     return;
   }
-  if (lpwan_tech_of_radio(send_radio) == LPWAN_TECH_LTE && atomic_get(&gnss_pending)) {
-    finish_send(-EAGAIN); /* a fix runs (a send that came before it was already asked for): on_up comes after it */
+  if (lpwan_tech_of_radio(send_radio) == LPWAN_TECH_LTE && gnss_open &&
+      !(sm.state == LPWAN_ST_CONNECTED && sm.tech == LPWAN_TECH_LTE)) {
+    finish_send(-EAGAIN); /* a fix runs and LTE is not connected: the connect waits for the fix, on_up comes after it */
     return;
   }
   if (lpwan_tech_of_radio(send_radio) == LPWAN_TECH_LTE &&
@@ -1453,6 +1474,10 @@ static void do_disconnect(void) {
   if (!link_up) {
     return;
   }
+  if (gnss_open && sm.tech == LPWAN_TECH_LTE) {
+    release_deferred = true; /* the shield refuses it during a fix: gnss_finish() posts it again */
+    return;
+  }
   if (simple_request(sensei_LpwanRequest_lte_disconnect_tag) == 0) {
     (void)lpwan_master_fetch_events(&master, 8);
   }
@@ -1508,8 +1533,8 @@ static void dfu_session_end(const char *why) {
 static int dfu_session_begin(void) {
   int err;
 
-  if (atomic_get(&sending) || connecting) {
-    return -EBUSY;
+  if (atomic_get(&sending) || connecting || atomic_get(&gnss_pending)) {
+    return -EBUSY; /* the apply restarts the modem library: not under a fix */
   }
   if (!bus_claim_wait(BUS_DFU, LPWAN_UPD_BUS_HOLD_MS, LPWAN_BUS_WAIT_MS)) {
     return -EBUSY; /* GAP9 owns the bus */
@@ -1966,9 +1991,6 @@ bool sensei_lpwan_radio_ready(sensei_Radio r) {
     return false; /* an update of the shield holds the link: on_up comes when it ends */
   }
 
-  if (want == LPWAN_TECH_LTE && atomic_get(&gnss_pending)) {
-    return false; /* a fix runs: LTE stays out of the way, on_up(RADIO_BLE) comes after it */
-  }
   if (r == sensei_Radio_RADIO_LORA && sensei_lpwan_lora_retry_after_ms() != 0) {
     return false; /* refused for the duty cycle: do not wake the shield, on_up comes when it may be tried again */
   }
@@ -2001,9 +2023,6 @@ int sensei_lpwan_radio_send_ex(sensei_Radio r, const uint8_t *chunk, size_t len,
   }
   if (atomic_get(&dfu_active)) {
     return -EAGAIN; /* the app waits for on_up (RADIO_BLE) at the end of the session: no failure */
-  }
-  if (lpwan_tech_of_radio(r) == LPWAN_TECH_LTE && atomic_get(&gnss_pending)) {
-    return -EAGAIN; /* a fix runs: on_up (RADIO_BLE) comes when it is over, no failure */
   }
   if (r == sensei_Radio_RADIO_LORA) {
     const struct sensei_lpwan_config st = cfg_get();
@@ -2190,6 +2209,8 @@ int sensei_lpwan_gnss_cancel(void) {
 }
 
 bool sensei_lpwan_gnss_busy(void) { return atomic_get(&gnss_pending) != 0; }
+
+uint32_t sensei_lpwan_version_reads(void) { return (uint32_t)atomic_get(&ver_reads); }
 
 int sensei_lpwan_gnss_supported(void) {
   k_spinlock_key_t k = k_spin_lock(&ver_lock);

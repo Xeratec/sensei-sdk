@@ -10,11 +10,11 @@
  * @file gnss.c
  * @brief One GNSS fix on request, with the nRF modem library (nrf_modem_gnss).
  *
- * A worker thread runs an attempt: it starts the modem library if needed (lte_gnss_prepare: antenna, system mode),
- * activates GNSS (functional mode 31), starts a single fix, waits for a valid fix, the timeout or a cancel, stops,
- * deactivates GNSS (functional mode 30) and queues the result event. GNSS is active only for the attempt. The modem
- * runs GNSS only while LTE is idle; a fix that the modem kept blocked until the end is reported as such. Untested on
- * hardware.
+ * A worker thread runs an attempt: it starts the modem library if needed, makes sure GNSS is in the system mode and
+ * activates it (functional mode 31, lte_gnss_begin: antenna, system mode), starts a single fix, waits for a valid fix,
+ * the timeout or a cancel, stops, deactivates GNSS (lte_gnss_end: functional mode 30 with LTE on, else 0) and queues
+ * the result event. GNSS is active only for the attempt. The modem runs GNSS only while LTE is idle; a fix that the
+ * modem kept blocked until the end is reported as such. Untested on hardware.
  */
 
 #include <errno.h>
@@ -49,6 +49,7 @@ static uint32_t req_seq, req_timeout_s;
 static struct k_spinlock pvt_lock;
 static struct nrf_modem_gnss_pvt_data_frame pvt;
 static atomic_t pvt_new;
+static int64_t pvt_ms; /* uptime when the handler read the PVT frame, under pvt_lock */
 
 /* LpwanStatus counters since the shield started */
 static uint32_t n_attempts, n_fixes, on_ms;
@@ -64,6 +65,7 @@ static void gnss_handler(int event) {
       k_spinlock_key_t k = k_spin_lock(&pvt_lock);
 
       pvt = f;
+      pvt_ms = k_uptime_get();
       k_spin_unlock(&pvt_lock, k);
       atomic_set(&no_window, (f.flags & (NRF_MODEM_GNSS_PVT_FLAG_DEADLINE_MISSED |
                                          NRF_MODEM_GNSS_PVT_FLAG_NOT_ENOUGH_WINDOW_TIME)) != 0);
@@ -99,13 +101,13 @@ static void fill_fix(sensei_GnssFixResult *r, const struct nrf_modem_gnss_pvt_da
   r->alt_m = (int32_t)(f->altitude >= 0 ? f->altitude + 0.5f : f->altitude - 0.5f);
   r->acc_m = lpwan_gnss_acc_m(f->accuracy);
   r->sats = sats;
-  r->unix_time = lpwan_gnss_utc_to_unix(f->datetime.year, f->datetime.month, f->datetime.day, f->datetime.hour,
-                                        f->datetime.minute, f->datetime.seconds);
+  r->unix_time = lpwan_gnss_utc_to_unix_ms(f->datetime.year, f->datetime.month, f->datetime.day, f->datetime.hour,
+                                           f->datetime.minute, f->datetime.seconds, f->datetime.ms);
 }
 
 /* One attempt. Returns the result to report. */
 static void run_fix(sensei_GnssFixResult *res) {
-  int64_t t_on = 0, t_start;
+  int64_t t_on = 0, t_start, fix_at = 0;
   bool fix = false, error = false, started = false;
   int64_t end;
   int err;
@@ -119,20 +121,15 @@ static void run_fix(sensei_GnssFixResult *res) {
   t_start = k_uptime_get();
   end = t_start + (int64_t)req_timeout_s * 1000;
 
-  err = lte_gnss_prepare();
+  err = lte_gnss_begin();
   if (err) {
     LOG_ERR("GNSS: modem not ready (%d)", err);
     error = true;
     goto done;
   }
-  err = lte_lc_func_mode_set(LTE_LC_FUNC_MODE_ACTIVATE_GNSS);
-  if (err) {
-    LOG_ERR("GNSS: activate failed (%d)", err);
-    error = true;
-    goto done;
-  }
   t_on = k_uptime_get();
   err = nrf_modem_gnss_event_handler_set(gnss_handler);
+  err |= nrf_modem_gnss_nmea_mask_set(0);    /* no NMEA strings: nobody reads them */
   err |= nrf_modem_gnss_fix_interval_set(0); /* single fix */
   err |= nrf_modem_gnss_fix_retry_set((uint16_t)req_timeout_s);
   if (err == 0) {
@@ -156,12 +153,15 @@ static void run_fix(sensei_GnssFixResult *res) {
     if (atomic_cas(&pvt_new, 1, 0)) {
       struct nrf_modem_gnss_pvt_data_frame f;
       k_spinlock_key_t k = k_spin_lock(&pvt_lock);
+      int64_t f_ms;
 
       f = pvt;
+      f_ms = pvt_ms;
       k_spin_unlock(&pvt_lock, k);
       if (f.flags & NRF_MODEM_GNSS_PVT_FLAG_FIX_VALID) {
         fill_fix(res, &f);
-        res->ttff_ms = (uint32_t)(k_uptime_get() - t_start);
+        res->ttff_ms = (uint32_t)(f_ms - t_start);
+        fix_at = f_ms;
         fix = true;
       }
     }
@@ -171,8 +171,11 @@ done:
     (void)nrf_modem_gnss_stop();
   }
   if (t_on != 0) {
-    (void)lte_lc_func_mode_set(LTE_LC_FUNC_MODE_DEACTIVATE_GNSS);
+    lte_gnss_end();
     on_ms += (uint32_t)(k_uptime_get() - t_on);
+  }
+  if (fix) {
+    res->age_ms = (uint32_t)(k_uptime_get() - fix_at); /* includes the time that lte_gnss_end() took */
   }
   if (!fix) {
     res->ttff_ms = (uint32_t)(k_uptime_get() - t_start);

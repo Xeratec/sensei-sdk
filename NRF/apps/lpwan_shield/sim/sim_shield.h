@@ -47,6 +47,12 @@ void sim_lr_command(int argc, char **argv);
 void sim_modem_command(int argc, char **argv);
 void sim_gnss_command(int argc, char **argv);
 
+/** The fake modem (sim_modem.c) and the fake GNSS (sim_gnss.c) tell each other: GNSS is active in the functional mode;
+ *  a functional mode change took GNSS away; the RRC state changed (the modem gives LTE priority). */
+bool sim_modem_gnss_active(void);
+void sim_gnss_deactivated(void);
+void sim_gnss_rrc(bool connected);
+
 /** The option -gnss="<words of the gnss command>": the scenario that survives a restart of the shield. NULL: none. */
 const char *sim_opt_gnss(void);
 

@@ -291,6 +291,8 @@ static int f_nocheck(g9ota_check_cb cb, void *user) {
 
 static const struct g9ota_ops ops_nocheck = {f_job,     f_hold, f_reboot,  f_set_slot, f_verify,
                                              f_persist, f_now,  f_nocheck, f_wake};
+/* trial_check and wake are optional */
+static const struct g9ota_ops ops_null = {f_job, f_hold, f_reboot, f_set_slot, f_verify, f_persist, f_now, NULL, NULL};
 static const struct g9ota_ops *cur_ops = &ops;
 
 static struct g9ota_flow flow;
@@ -484,7 +486,7 @@ static void upload(void) {
   make_new(1, 4, 30000);
   CHECK(do_begin(image, img_n, false) == 0 && R()->result == sensei_Gap9OtaResult_GAP9_OTA_OK);
   CHECK(R()->stage == sensei_Gap9OtaStage_GAP9_OTA_STAGE_RECEIVING && R()->offset == 0 && R()->chunk_max == 188);
-  CHECK(wakes > 0); /* a session wants the housekeeping timer */
+  CHECK(cur_ops->wake == NULL || wakes > 0); /* a session wants the housekeeping timer */
   CHECK(send_all(image, img_n, 0) == img_n);
   CHECK(do_cmd(sensei_Gap9OtaAction_GAP9_OTA_ACTION_FINISH) == 0);
 }
@@ -1145,6 +1147,34 @@ static void test_no_trial_check(void) {
   cur_ops = &ops;
 }
 
+/* trial_check and wake NULL: no checks, no timer call; a missing required operation stops the init. */
+static void test_null_ops(void) {
+  struct sensei_gap9_trial t = closed(0);
+  struct g9ota_ops bad;
+  struct g9ota_flow tmp;
+
+  cur_ops = &ops_null;
+  setup(&t, 0, 1, 3);
+  g.selftest_ok = false;
+  upload();
+  g.jobs = 0;
+  CHECK(do_cmd(sensei_Gap9OtaAction_GAP9_OTA_ACTION_APPLY) == 0);
+  pump_all();
+  CHECK(flow.trial.confirmed == 1 && !flow.trial.open && g.jobs == 1 && wakes == 0);
+  cur_ops = &ops;
+
+  CHECK(g9ota_flow_init(&tmp, NULL, NULL) == -EINVAL);
+  for (int i = 0; i < 7; i++) { /* job, hold, reboot, set_slot, verify, persist, now_ms */
+    void **fn;
+
+    bad = ops;
+    fn = (void **)&bad + i;
+    *fn = NULL;
+    CHECK(g9ota_flow_init(&tmp, &bad, NULL) == -EINVAL);
+  }
+  CHECK(g9ota_flow_init(&tmp, &ops_null, NULL) == 0);
+}
+
 /* Q12: the LPWAN client has SPI_A when the trial wants to reboot GAP9: wait, do not revert. */
 static void test_reboot_busy(void) {
   struct sensei_gap9_trial t = closed(0);
@@ -1248,6 +1278,7 @@ int main(void) {
   test_bad_job();
   test_trial_detect();
   test_no_trial_check();
+  test_null_ops();
   test_reboot_busy();
   test_persist_retry();
   test_node_rate_limit();

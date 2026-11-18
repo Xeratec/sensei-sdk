@@ -130,6 +130,10 @@ config SENSEI_GAP9_OTA
 	  gap9_ota_zephyr.h). GAP9 writes the slot with lib/sensei_gap9/src/g9ota.c. The app brings the public key,
 	  the job format and its checks. Rules: lib/sensei_gap9/OTA.md.
 
+	  The signature check is ECDSA P-256 under PSA: the app must size the mbed TLS heap (CONFIG_MBEDTLS_ENABLE_HEAP=y,
+	  CONFIG_MBEDTLS_HEAP_SIZE=16384 or more) and have a work queue stack for it. The flow keeps one instance: one
+	  update flow per app.
+
 config SENSEI_GAP9_THREAD_PRIORITY
 	int "GAP9 link thread priority"
 	default 4

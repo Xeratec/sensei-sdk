@@ -83,7 +83,9 @@ typedef void (*g9ota_reboot_cb)(int err, const sensei_Version *hello, void *user
 typedef void (*g9ota_reply_fn)(void *rctx, int err, const sensei_Gap9OtaReply *reply);
 
 /** The world of the flow. The callbacks run on the same thread as the requests (the app work queue); the app keeps its
- * state in globals. */
+ * state in globals: the operations have no context pointer, so an app runs one flow (the Zephyr glue keeps one).
+ * `job`, `hold`, `reboot`, `set_slot`, `verify`, `persist` and `now_ms` are required (g9ota_flow_init() returns
+ * -EINVAL without them); `trial_check` and `wake` may be NULL. */
 struct g9ota_ops {
   /** Queue a job (copied; the request is valid during the call only); `cb` gets the answer or an error. */
   int (*job)(const struct g9ota_req *req, g9ota_job_cb cb, void *user);
@@ -101,11 +103,11 @@ struct g9ota_ops {
   uint32_t (*now_ms)(void);
   /** The app's own checks of the new image on trial, after the status job (self-test, a detect job ...). Start them
    * and call `cb` once with 0 (passed) or an error. Returns 0, or a negative errno if they cannot start (counts as
-   * failed). An app without checks calls `cb` with 0 at once. */
+   * failed). NULL: no checks. */
   int (*trial_check)(g9ota_check_cb cb, void *user);
   /** Called after a request that leaves the flow wanting g9ota_flow_poll() (see g9ota_flow_needs_poll): start the
    * housekeeping timer (a few seconds). The timer calls g9ota_flow_poll() and starts itself again while the flow
-   * wants it. */
+   * wants it. NULL: the app calls g9ota_flow_poll() by itself while g9ota_flow_needs_poll(). */
   void (*wake)(void);
 };
 
@@ -158,7 +160,8 @@ struct g9ota_flow {
 /**
  * Start the flow. `stored` is from the settings, NULL if there is none (first start or lost settings: GAP9 is asked
  * which slot answers, slot A first, and the slot is verified). A trial that was open at the reset ends with the
- * confirmed slot. Sets the slot line. Returns 0.
+ * confirmed slot. Sets the slot line. Returns 0, or -EINVAL when a required operation is missing (`f` is then not
+ * usable).
  */
 int g9ota_flow_init(struct g9ota_flow *f, const struct g9ota_ops *ops, const struct g9ota_store *stored);
 

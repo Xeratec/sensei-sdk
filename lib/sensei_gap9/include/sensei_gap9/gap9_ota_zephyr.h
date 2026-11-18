@@ -49,7 +49,8 @@ struct sensei_gap9_ota_cfg {
 };
 
 /** Load the stored trial state, set the slot line and start the flow. Call after gap9_link_init(). The configuration
- * must stay valid. */
+ * must stay valid. The glue keeps one flow: call this once, one flow per app. -EINVAL for a configuration without
+ * work queue, job function or key. */
 int sensei_gap9_ota_init(const struct sensei_gap9_ota_cfg *cfg);
 
 /** The flow, for the host requests: g9ota_flow_begin(), g9ota_flow_chunk() and g9ota_flow_command() (see g9ota_flow.h

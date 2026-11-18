@@ -113,13 +113,15 @@ static void poll_fn(struct k_work *w) {
 }
 
 int sensei_gap9_ota_init(const struct sensei_gap9_ota_cfg *c) {
-  if (c == NULL || c->wq == NULL || c->job == NULL) {
+  if (c == NULL || c->wq == NULL || c->job == NULL || c->pubkey == NULL || c->key_hash == NULL) {
     return -EINVAL;
   }
   cfg = c;
   k_work_init_delayable(&poll_work, poll_fn);
   (void)settings_load_subtree("sensei_gap9");
-  (void)g9ota_flow_init(&flow, &ops, stored_valid ? &stored.store : NULL);
+  if (g9ota_flow_init(&flow, &ops, stored_valid ? &stored.store : NULL) != 0) {
+    return -EINVAL;
+  }
   LOG_INF("GAP9 slot %c", 'A' + g9ota_flow_slot(&flow));
   if (g9ota_flow_needs_poll(&flow)) {
     op_wake();

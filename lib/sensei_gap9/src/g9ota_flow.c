@@ -414,13 +414,17 @@ static void on_check(int err, void *user) {
   trial_event(f, err == 0 ? SENSEI_GAP9_TRIAL_STATUS_OK : SENSEI_GAP9_TRIAL_STATUS_BAD);
 }
 
-/* The checks of the app on the new image. */
+/* The checks of the app on the new image (none: the status job was enough). */
 static void next_check(struct g9ota_flow *f) {
-  int rc = f->ops->trial_check(on_check, f);
+  int rc = 0;
 
-  if (rc != 0) {
-    on_check(rc, f);
+  if (f->ops->trial_check != NULL) {
+    rc = f->ops->trial_check(on_check, f);
+    if (rc == 0) {
+      return;
+    }
   }
+  on_check(rc, f);
 }
 
 static void on_job(int err, const sensei_Gap9OtaInfo *info, void *user) {
@@ -712,7 +716,7 @@ static int request(struct g9ota_flow *f, char kind, const void *msg, sensei_Gap9
   if (rc != 0) {
     f->busy = false;
   }
-  if (g9ota_flow_needs_poll(f)) {
+  if (g9ota_flow_needs_poll(f) && f->ops->wake != NULL) {
     f->ops->wake();
   }
   return rc;
@@ -734,6 +738,10 @@ int g9ota_flow_command(struct g9ota_flow *f, sensei_Gap9OtaAction action, g9ota_
 
 int g9ota_flow_init(struct g9ota_flow *f, const struct g9ota_ops *ops, const struct g9ota_store *stored) {
   memset(f, 0, sizeof(*f));
+  if (ops == NULL || ops->job == NULL || ops->hold == NULL || ops->reboot == NULL || ops->set_slot == NULL ||
+      ops->verify == NULL || ops->persist == NULL || ops->now_ms == NULL) {
+    return -EINVAL; /* a required operation is missing: `f` is not usable */
+  }
   f->ops = ops;
   f->state = G9OTA_F_IDLE;
   f->view.chunk_max = G9OTA_HOST_CHUNK_MAX;

@@ -18,6 +18,7 @@ Untested on hardware. Tested on the host (`make test-host`, `make test-python`) 
 | Part | Where | Runs on |
 |---|---|---|
 | Writer: one transfer into the other slot, checkpoints, checks | `src/g9ota.c`, `include/sensei_gap9/g9ota.h` | GAP9, host tests (no OS, no GAP SDK) |
+| Checkpoint record format, and the SSBL's look at it (a sealed slot that never started is no fallback) | `src/g9ota_ckpt.c`, `include/sensei_gap9/g9ota_ckpt.h` | GAP9 (writer and SSBL), host tests |
 | Recovery: the writer in the SSBL behind a job server | `src/g9rec.c`, `GAP9/ssbl/src/recovery*.c` | GAP9 (SSBL), host tests, GVSoC |
 | MRAM operations (shared with the SSBL); hand-off arming, slot detection and readfs of the slot (app only) | `gap9/g9ota_mram_ops.c`; `gap9/g9ota_mram.c`, `g9ota_mram.h` | GAP9 (GAP SDK) |
 | Flow: session, signature, trial boot, revert | `src/g9ota_flow.c`, `g9ota_flow.h` | nRF5340, host tests (no OS) |

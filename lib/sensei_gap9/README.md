@@ -23,6 +23,7 @@ numbers, status to errno, which job needs the camera bus), so any message schema
 | `zephyr/` | nRF5340 | `gap9_link.c` (thread, SPIS3, trigger line, slot line, power, shared SPI_A), `gap9_shell.c`, `gap9_link.overlay` |
 | `gap9/gap9_side.c`, `gap9_side.h` | GAP9 | SPI master, trigger line, hello, fetch, result, bus free (GAP SDK) |
 | `include/sensei_gap9/gap9_trial.h` | nRF5340 | the rule of the trial boot of a slot (pure function) |
+| `src/g9ota_ckpt.c`, `g9ota_ckpt.h` | GAP9 | checkpoint record of the writer, and the SSBL's look at it (a slot that was sealed and never started is no fallback) |
 | `src/g9ota.c`, `g9ota.h` | GAP9 | writer of the firmware update: one transfer into the other slot (no OS, no GAP SDK, host tested) |
 | `gap9/g9ota_mram.c`, `g9ota_mram.h` | GAP9 | MRAM backend of the writer, slot detection, readfs of the slot (GAP SDK) |
 | `src/g9ota_flow.c`, `g9ota_flow.h` | nRF5340 | update flow: session, signature, trial boot, revert (no OS, host tested) |

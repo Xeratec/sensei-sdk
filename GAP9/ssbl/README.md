@@ -59,7 +59,7 @@ for the slots only.
 The strap (`-DSENSEI_SSBL_STRAP=ON`): pad 57 read with a pull-down at start-up; high enters recovery although a slot boots
 (the nRF5340 drives P1.06 for `Gap9OtaBegin.force_recovery`). UNVERIFIED hardware: that the line is a free direct wire. Off by default.
 
-Size: the SSBL is 23.4 KiB compressed without recovery and 42.2 KiB with it (SDK 5.22.3, `-Os`, LTO); its section is 48 KiB.
+Size: the SSBL is 24.7 KiB compressed without recovery and 43.4 KiB with it (SDK 5.22.4, `-Os`, LTO, the end of the data in the section of a board build); its section is 48 KiB. The rule that a sealed slot is no fallback (`g9ota_ckpt.c`, the CRC) adds 528 B of code to the build without recovery and 288 B to the one with it (raw, before compression).
 Stack: 8 KiB main stack (the writer hashes and decodes messages on it), set in the three config files.
 
 ## Layout
@@ -68,7 +68,7 @@ Stack: 8 KiB main stack (the writer hashes and decodes messages on it), set in t
 
 | Offset | Size | What |
 |---|---|---|
-| 0x000000 | 0x10000 | boot area: FSBL, meta table, SSBL (section fixed to 48 KiB: 23.4 KiB without recovery, 42.2 KiB with it), partition and volume table (the volume table section is padded to 11536 B, the real table is a few hundred bytes), a 128 B `readfs_mram` placeholder |
+| 0x000000 | 0x10000 | boot area: FSBL, meta table, SSBL (section fixed to 48 KiB: 24.7 KiB without recovery, 43.4 KiB with it), partition and volume table (the volume table section is padded to 11536 B, the real table is a few hundred bytes), a 128 B `readfs_mram` placeholder |
 | 0x010000 | 0x04000 | checkpoint of the OTA writer |
 | 0x014000 | 0xF6000 | slot A |
 | 0x10A000 | 0xF6000 | slot B |
@@ -80,8 +80,8 @@ shrunk by the same amount so the slots do not move.
 
 The boot area is written by the factory flash only: the SSBL is never updated over the air (the FSBL cannot fall back to
 another SSBL). The sizes of the boot area sections are fixed in the layout so that the slots do not move; the GVSoC test
-checks the offsets. The SSBL section was 28 KiB (and the volume table pad 32016 B) before the recovery: a board that was
-flashed with that layout needs one JTAG flash of the boot area (`make flash-boot` of the node keeps the slots,
+checks the offsets. The SSBL section was 28 KiB (30 KiB with GAP SDK 5.22.4 without the recovery) and the volume table pad 32016 B (29968 B) before the
+recovery: a board that was flashed with such a layout needs one JTAG flash of the boot area (`make flash-boot` of the node keeps the slots,
 [`sensei_ab_boot.json`](../layouts/sensei_ab_boot.json) is the layout of the boot area alone, `-DSENSEI_SSBL_BOOT_ONLY=ON`). The slots
 and the checkpoint did not move.
 

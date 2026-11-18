@@ -118,6 +118,18 @@ config SENSEI_GAP9_SHELL
 	help
 	  Needs a shell root command "sensei" (SHELL_SUBCMD_SET_CREATE(<name>, (sensei)) in the app).
 
+config SENSEI_GAP9_OTA
+	bool "Update of the GAP9 application over the air (A/B slots in the GAP9 MRAM)"
+	depends on SENSEI_GAP9
+	select SETTINGS
+	select SENSEI_CRYPTO
+	select SENSEI_CRYPTO_ECDSA
+	help
+	  The nRF5340 side of the update: the session, the check of the image signature, the trial boot of the new
+	  slot with the checks of the app, the revert, and the trial state in the settings (g9ota_flow.h,
+	  gap9_ota_zephyr.h). GAP9 writes the slot with lib/sensei_gap9/src/g9ota.c. The app brings the public key,
+	  the job format and its checks. Rules: lib/sensei_gap9/OTA.md.
+
 config SENSEI_GAP9_THREAD_PRIORITY
 	int "GAP9 link thread priority"
 	default 4

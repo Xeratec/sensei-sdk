@@ -8,6 +8,9 @@
 # the GAP9 side in gap9/ with sensei_gap9.cmake):
 #   add_subdirectory(<sdk>/lib/sensei_gap9 sensei_gap9)
 #   target_link_libraries(<target> PRIVATE sensei_gap9_core)
+# and the update of the GAP9 application (OTA.md): the writer that runs on GAP9 and the flow of the nRF5340,
+# both without an OS:
+#   target_link_libraries(<target> PRIVATE sensei_gap9_ota)
 # Host tests: cmake -S <sdk>/lib/sensei_gap9/tests -B <builddir>
 
 cmake_minimum_required(VERSION 3.16)
@@ -20,3 +23,13 @@ endif()
 add_library(sensei_gap9_core STATIC ${CMAKE_CURRENT_LIST_DIR}/src/gap9_core.c)
 target_include_directories(sensei_gap9_core PUBLIC ${CMAKE_CURRENT_LIST_DIR}/include)
 target_link_libraries(sensei_gap9_core PUBLIC sensei_link)
+
+# Update of the GAP9 application: the writer of GAP9 (g9ota.c) and the flow of the nRF5340 (g9ota_flow.c). They need
+# the image helpers of NRF/system/ota (header only).
+add_library(sensei_gap9_ota STATIC
+  ${CMAKE_CURRENT_LIST_DIR}/src/g9ota.c
+  ${CMAKE_CURRENT_LIST_DIR}/src/g9ota_flow.c)
+target_include_directories(sensei_gap9_ota PUBLIC
+  ${CMAKE_CURRENT_LIST_DIR}/include
+  ${CMAKE_CURRENT_LIST_DIR}/../../NRF/system/ota)
+target_link_libraries(sensei_gap9_ota PUBLIC sensei_link)

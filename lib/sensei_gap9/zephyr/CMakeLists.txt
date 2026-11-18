@@ -12,6 +12,10 @@ zephyr_library_sources(
   ${SENSEI_GAP9_DIR}/src/gap9_core.c
   ${SENSEI_GAP9_DIR}/zephyr/gap9_link.c)
 zephyr_library_sources_ifdef(CONFIG_SENSEI_GAP9_SHELL ${SENSEI_GAP9_DIR}/zephyr/gap9_shell.c)
+# Update of the GAP9 application: the flow and the Zephyr glue (the image helpers are in NRF/system/ota)
+zephyr_library_sources_ifdef(CONFIG_SENSEI_GAP9_OTA
+  ${SENSEI_GAP9_DIR}/src/g9ota_flow.c
+  ${SENSEI_GAP9_DIR}/zephyr/gap9_ota.c)
 zephyr_include_directories(${SENSEI_GAP9_DIR}/include)
 zephyr_library_include_directories(${SENSEI_GAP9_DIR}/zephyr)
 # "pwr/pwr.h" (gap9_pwr) of the SDK system module

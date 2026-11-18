@@ -12,7 +12,7 @@ Second stage bootloader of the GAP9 on the SENSEI base board. It starts the firm
 nRF5340 picks the slot with the level of GAP9 pad 56 (net `CS_nRF_GAP`, nRF P1.04): low A, high B. The SSBL does not decide
 whether a firmware is good. The nRF5340 does (trial boot, [`gap9_trial.h`](../../lib/sensei_gap9/include/sensei_gap9/gap9_trial.h)).
 
-Forked from `utils/ssbl/src` of the GAP SDK 5.22.3 (GreenWaves Technologies, Apache-2.0): the load of the app binary into L2
+Forked from `utils/ssbl/src` of the GAP SDK 5.22.4 (GreenWaves Technologies, Apache-2.0): the load of the app binary into L2
 and the launch are the same SDK calls. The partition and volume table, the boot counter and the GAP CLI recovery are gone.
 
 ## Boot
@@ -44,7 +44,7 @@ SSBL's business either: the nRF5340 sees no HELLO and boots the other slot.
 
 | Offset | Size | What |
 |---|---|---|
-| 0x000000 | 0x10000 | boot area: FSBL, meta table, SSBL (section fixed to 28 KiB, the SSBL needs 23.7 KiB compressed), partition and volume table (padded), a 128 B `readfs_mram` placeholder |
+| 0x000000 | 0x10000 | boot area: FSBL, meta table, SSBL (section fixed to 30 KiB, the SSBL section is 28.6 KiB with the boot fixes of the BSP), partition and volume table (padded), a 128 B `readfs_mram` placeholder |
 | 0x010000 | 0x04000 | checkpoint of the OTA writer |
 | 0x014000 | 0xF6000 | slot A |
 | 0x10A000 | 0xF6000 | slot B |
@@ -60,7 +60,7 @@ checks the offsets.
 
 ## Build
 
-In the GAP SDK environment (Docker image `gap9:v5.22.3-sensei`):
+In the GAP SDK environment (Docker image `gap9:v5.22.4-sensei`):
 
 ```
 tools/ssbl_docker.sh build <outdir>     # board build, <outdir>/ssbl is the ELF for the layout (ssbl property)

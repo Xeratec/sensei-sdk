@@ -27,7 +27,7 @@
             "subtype": "ssbl",
             "compressed": true,
             "binary": null,
-            "size": 28672
+            "size": 30720
           }
         },
         {
@@ -58,7 +58,7 @@
                 ]
               }
             ],
-            "size": 32016
+            "size": 29968
           }
         },
         {

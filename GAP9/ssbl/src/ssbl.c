@@ -5,7 +5,7 @@
  * Authors:
  * - Philip Wiese <wiesep@iis.ee.ethz.ch>
  *
- * Forked from utils/ssbl/src (boot_app.c, ssbl.c) of the GAP SDK 5.22.3 (GreenWaves Technologies, Apache-2.0): the
+ * Forked from utils/ssbl/src (boot_app.c, ssbl.c) of the GAP SDK 5.22.4 (GreenWaves Technologies, Apache-2.0): the
  * loading of an app binary into L2 and its launch are the same calls.
  */
 

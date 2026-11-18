@@ -10,12 +10,12 @@
 #   tools/ssbl_docker.sh build <outdir>   board build: <outdir>/ssbl (ELF)
 #   tools/ssbl_docker.sh test             GVSoC test (test/gvsoc_cases.sh): prints SSBL TEST PASS or FAIL
 #
-# Environment: IMAGE is the Docker image (default gap9:v5.22.3-sensei), BUILD_JOBS (default 4).
+# Environment: IMAGE is the Docker image (default gap9:v5.22.4-sensei), BUILD_JOBS (default 4).
 set -euo pipefail
 
 HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 SDK=$(cd "$HERE/../../.." && pwd)
-IMAGE=${IMAGE:-gap9:v5.22.3-sensei}
+IMAGE=${IMAGE:-gap9:v5.22.4-sensei}
 MODE=${1:-test}
 OUT=""
 MOUNT=()

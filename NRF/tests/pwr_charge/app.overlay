@@ -1,0 +1,25 @@
+/*
+ * SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/* native_sim has no retained RAM: the test driver of the diag test keeps it in an array. The area of the counter is the
+ * one of the SENSEI boards (nrf5340_senseiv1_retained.dtsi): 32 B. */
+/ {
+	retained: test-retained-mem {
+		compatible = "sensei,test-retained-mem";
+		size = <128>;
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		charge_record: charge_record@50 {
+			compatible = "zephyr,retention";
+			status = "okay";
+			reg = <0x50 0x20>;
+		};
+	};
+
+	chosen {
+		sensei,charge = &charge_record;
+	};
+};

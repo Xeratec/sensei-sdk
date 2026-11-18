@@ -161,6 +161,12 @@ failure); `LpwanStatus.lte_answers` and `lte_no_answer` count. The RSRP in the s
 `rsrp_valid`). The server rule is in `lib/sensei_lpwan/README.md`. The RAI configuration of the cell
 (`LTE_LC_EVT_RAI_UPDATE`) is `LpwanStatus.rai_support`. A failed `setsockopt` is logged and does not fail the send.
 
+**Counters for the charge counter of the node**: `LpwanStatus.rrc_connected_ms` (time in the RRC connected state, from
+`LTE_LC_EVT_RRC_UPDATE`; a period ends at idle or when the registration is lost), `attaches` (registrations) and `psm_entries`
+(`LTE_LC_EVT_MODEM_SLEEP_ENTER` of type PSM; needs `LTE_LC_MODEM_SLEEP_NOTIFICATIONS`, which the app selects with the
+threshold at its minimum of 10.24 s) count since the shield started (`lib/sensei_lpwan/src/lpwan_counters.c`, host tested). Untested on
+hardware: whether the modem reports every PSM entry and the time of the RRC events.
+
 **Connection evaluation** (`CONFIG_LPWAN_SHIELD_LTE_EVAL`, default y): the request `lte_eval` posts `lte_lc_conn_eval_params_get()` to
 the worker (a few seconds at most); the `conn_eval` event carries energy estimate, RSRP, RSRQ, coverage level, repetitions and the RAI
 support of the cell. A result of 1 to 4 or an error is `valid = false`.

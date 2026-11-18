@@ -32,6 +32,7 @@
 #include <zephyr/net/socket.h>
 
 #include "lte.h"
+#include "sensei_lpwan/lpwan_counters.h"
 #include "sensei_lpwan/lpwan_rai.h"
 #include "sensei_lpwan/lpwan_timers.h"
 #include "service.h"
@@ -76,6 +77,9 @@ static bool last_rsrp_valid; /* the modem gave a valid RSRP at the last look; el
 static K_SEM_DEFINE(answer_sem, 0, 1);
 static atomic_t wait_key;
 static atomic_t n_answers, n_no_answer; /* answered / sent but unconfirmed (TxDone.unconfirmed) */
+/* RRC connected time, attaches and PSM entries (LpwanStatus): fed by the lte_lc handler, read by the service thread */
+static struct lpwan_counters cnt;
+static struct k_spinlock cnt_lock;
 static volatile sensei_RaiSupport rai_support;
 
 static struct k_thread lte_thread, rx_thread;
@@ -95,6 +99,10 @@ static void lte_handler(const struct lte_lc_evt *const evt) {
 
     registered =
         evt->nw_reg_status == LTE_LC_NW_REG_REGISTERED_HOME || evt->nw_reg_status == LTE_LC_NW_REG_REGISTERED_ROAMING;
+    k_spinlock_key_t k = k_spin_lock(&cnt_lock);
+
+    lpwan_cnt_reg(&cnt, registered, k_uptime_get_32());
+    k_spin_unlock(&cnt_lock, k);
     LOG_INF("registration status %d", (int)evt->nw_reg_status);
     if (registered) {
       k_sem_give(&registered_sem);
@@ -122,9 +130,25 @@ static void lte_handler(const struct lte_lc_evt *const evt) {
   case LTE_LC_EVT_EDRX_UPDATE:
     LOG_INF("eDRX: cycle %d, ptw %d", (int)evt->edrx_cfg.edrx, (int)evt->edrx_cfg.ptw);
     break;
-  case LTE_LC_EVT_RRC_UPDATE:
+  case LTE_LC_EVT_RRC_UPDATE: {
+    k_spinlock_key_t k = k_spin_lock(&cnt_lock);
+
+    lpwan_cnt_rrc(&cnt, evt->rrc_mode == LTE_LC_RRC_MODE_CONNECTED, k_uptime_get_32());
+    k_spin_unlock(&cnt_lock, k);
     LOG_DBG("RRC %s", evt->rrc_mode == LTE_LC_RRC_MODE_CONNECTED ? "connected" : "idle");
     break;
+  }
+#ifdef CONFIG_LTE_LC_MODEM_SLEEP_MODULE
+  case LTE_LC_EVT_MODEM_SLEEP_ENTER:
+    if (evt->modem_sleep.type == LTE_LC_MODEM_SLEEP_PSM ||
+        evt->modem_sleep.type == LTE_LC_MODEM_SLEEP_PROPRIETARY_PSM) {
+      k_spinlock_key_t k = k_spin_lock(&cnt_lock);
+
+      lpwan_cnt_psm(&cnt);
+      k_spin_unlock(&cnt_lock, k);
+    }
+    break;
+#endif
   default:
     break;
   }
@@ -659,6 +683,13 @@ void lte_fill_status(sensei_LpwanStatus *st) {
   st->rai_support = rai_support;
   st->lte_answers = (uint32_t)atomic_get(&n_answers);
   st->lte_no_answer = (uint32_t)atomic_get(&n_no_answer);
+  k_spinlock_key_t k = k_spin_lock(&cnt_lock);
+
+  st->has_rrc_connected_ms = st->has_attaches = st->has_psm_entries = true;
+  st->rrc_connected_ms = lpwan_cnt_rrc_ms(&cnt, k_uptime_get_32());
+  st->attaches = cnt.attaches;
+  st->psm_entries = cnt.psm_entries;
+  k_spin_unlock(&cnt_lock, k);
 }
 
 void lte_modem_string(char *out, size_t cap) { snprintf(out, cap, "%s", modem_ver); }

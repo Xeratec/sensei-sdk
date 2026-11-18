@@ -246,6 +246,14 @@ typedef struct _sensei_LpwanStatus {
     sensei_FaultRecord fault;
     /* LTE: false while the modem has no valid RSRP; rssi_dbm is 0 then. Not set by an older shield (reads false). */
     bool rssi_valid;
+    /* LTE activity since the shield started, for the charge counter of the node. Set when the shield counts (LTE built
+ in), absent otherwise. rrc_connected_ms wraps after 49 days: the client reads it at least that often. */
+    bool has_rrc_connected_ms;
+    uint32_t rrc_connected_ms; /* time in the RRC connected state, ms (a running period is included) */
+    bool has_attaches;
+    uint32_t attaches; /* registrations with the network */
+    bool has_psm_entries;
+    uint32_t psm_entries; /* times the modem went into PSM (modem sleep of type PSM) */
     /* LTE, fields 20 and up. rssi_dbm is the RSRP. */
     sensei_RaiSupport rai_support; /* what the network told the modem (LTE_LC_EVT_RAI_UPDATE), for the current cell */
     uint32_t lte_answers; /* sends that waited for an answer (LTE_RAI_ONE_RESP) and got one, since start */
@@ -432,7 +440,7 @@ extern "C" {
 #define sensei_LpwanSleep_init_default           {0}
 #define sensei_LpwanRequest_init_default         {0, 0, {sensei_Empty_init_default}}
 #define sensei_LpwanVersion_init_default         {false, sensei_Version_init_default, "", 0, 0, 0, 0, ""}
-#define sensei_LpwanStatus_init_default          {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, false, sensei_FaultRecord_init_default, 0, _sensei_RaiSupport_MIN, 0, 0}
+#define sensei_LpwanStatus_init_default          {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, false, sensei_FaultRecord_init_default, 0, false, 0, false, 0, false, 0, _sensei_RaiSupport_MIN, 0, 0}
 #define sensei_NetworkTime_init_default          {0, _sensei_Radio_MIN}
 #define sensei_SendInfo_init_default             {0, 0, 0}
 #define sensei_LpwanResponse_init_default        {0, _sensei_LpwanResult_MIN, 0, {sensei_LpwanVersion_init_default}}
@@ -453,7 +461,7 @@ extern "C" {
 #define sensei_LpwanSleep_init_zero              {0}
 #define sensei_LpwanRequest_init_zero            {0, 0, {sensei_Empty_init_zero}}
 #define sensei_LpwanVersion_init_zero            {false, sensei_Version_init_zero, "", 0, 0, 0, 0, ""}
-#define sensei_LpwanStatus_init_zero             {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, false, sensei_FaultRecord_init_zero, 0, _sensei_RaiSupport_MIN, 0, 0}
+#define sensei_LpwanStatus_init_zero             {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, false, sensei_FaultRecord_init_zero, 0, false, 0, false, 0, false, 0, _sensei_RaiSupport_MIN, 0, 0}
 #define sensei_NetworkTime_init_zero             {0, _sensei_Radio_MIN}
 #define sensei_SendInfo_init_zero                {0, 0, 0}
 #define sensei_LpwanResponse_init_zero           {0, _sensei_LpwanResult_MIN, 0, {sensei_LpwanVersion_init_zero}}
@@ -544,6 +552,9 @@ extern "C" {
 #define sensei_LpwanStatus_boot_count_tag        10
 #define sensei_LpwanStatus_fault_tag             11
 #define sensei_LpwanStatus_rssi_valid_tag        12
+#define sensei_LpwanStatus_rrc_connected_ms_tag  13
+#define sensei_LpwanStatus_attaches_tag          14
+#define sensei_LpwanStatus_psm_entries_tag       15
 #define sensei_LpwanStatus_rai_support_tag       20
 #define sensei_LpwanStatus_lte_answers_tag       21
 #define sensei_LpwanStatus_lte_no_answer_tag     22
@@ -734,6 +745,9 @@ X(a, STATIC,   SINGULAR, UINT32,   reset_cause,       9) \
 X(a, STATIC,   SINGULAR, UINT32,   boot_count,       10) \
 X(a, STATIC,   OPTIONAL, MESSAGE,  fault,            11) \
 X(a, STATIC,   SINGULAR, BOOL,     rssi_valid,       12) \
+X(a, STATIC,   OPTIONAL, UINT32,   rrc_connected_ms,  13) \
+X(a, STATIC,   OPTIONAL, UINT32,   attaches,         14) \
+X(a, STATIC,   OPTIONAL, UINT32,   psm_entries,      15) \
 X(a, STATIC,   SINGULAR, UENUM,    rai_support,      20) \
 X(a, STATIC,   SINGULAR, UINT32,   lte_answers,      21) \
 X(a, STATIC,   SINGULAR, UINT32,   lte_no_answer,    22)
@@ -888,9 +902,9 @@ extern const pb_msgdesc_t sensei_LpwanEvent_msg;
 #define sensei_LpwanError_size                   52
 #define sensei_LpwanEvent_size                   1038
 #define sensei_LpwanRequest_size                 1048
-#define sensei_LpwanResponse_size                146
+#define sensei_LpwanResponse_size                164
 #define sensei_LpwanSleep_size                   6
-#define sensei_LpwanStatus_size                  135
+#define sensei_LpwanStatus_size                  153
 #define sensei_LpwanVersion_size                 96
 #define sensei_LteConfigure_size                 134
 #define sensei_NetworkTime_size                  7

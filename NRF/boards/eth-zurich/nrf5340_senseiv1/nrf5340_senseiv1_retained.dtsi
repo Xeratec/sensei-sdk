@@ -6,6 +6,8 @@
 //
 //   0x2006fc00  diag_fault  64 B   record of the last fatal error (NRF/system/diag)
 //   0x2006fc40  diag_state  16 B   boot counter
+//   0x2006fc50  charge_record  32 B  battery charge counter (NRF/system/pwr/pwr_charge.c, lib/sensei_charge)
+//   0x2006fc70  (free, 16 B)
 //   0x2006fc80  diag_dump  896 B   optional coredump of the faulting thread
 //
 // The boot mode (MCUboot serial recovery requested by the application) is kept in GPREGRET1, which
@@ -41,6 +43,11 @@
 				status = "okay";
 				reg = <0x40 0x10>;
 			};
+			charge_record: charge_record@50 {
+				compatible = "zephyr,retention";
+				status = "okay";
+				reg = <0x50 0x20>;
+			};
 			diag_dump: diag_dump@80 {
 				compatible = "zephyr,retention";
 				status = "okay";
@@ -53,6 +60,7 @@
 		sensei,diag-fault = &diag_fault;
 		sensei,diag-state = &diag_state;
 		sensei,diag-dump = &diag_dump;
+		sensei,charge = &charge_record;
 		zephyr,boot-mode = &boot_mode0;
 	};
 };

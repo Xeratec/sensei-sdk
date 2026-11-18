@@ -69,3 +69,9 @@ checked against the MAX77654 data sheet (CNFG_CHG_A 0x20, ERCFLAG 0x05):
 
 Test: `NRF/tests/pwr` (`test_60_charger_thermistor_thresholds_go_to_their_fields`,
 `test_61_erc_flags_wdt_rst_and_wdt_off_are_separate`).
+
+Addition (charge counter): `max77654_measure_dischg_ua(h, scale, &ua)` gives the battery discharge current in uA at the full
+resolution of the ADC (`max77654_measure()` gives whole percent of the scale). It runs the NULL and the DISCHG conversion back to
+back with the optional `adc_read_fast` of the handle (no settling wait; else `adc_read`), switches the AMUX off again and does the
+datasheet's arithmetic on the raw readings. Tests: `test/test_measure.c` (`make` in this folder: scales, order of the conversions,
+noise below the null reading, fast and plain read) and `NRF/tests/pwr_charge` (on the PMIC emulator).

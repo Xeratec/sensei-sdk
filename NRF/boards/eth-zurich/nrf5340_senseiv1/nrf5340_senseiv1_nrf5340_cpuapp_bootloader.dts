@@ -102,6 +102,7 @@ zephyr_udc0: &usbd {
  *   &diag_fault { status = "disabled"; };
  *   &diag_state { status = "disabled"; };
  *   &diag_dump { status = "disabled"; };
+ *   &charge_record { status = "disabled"; };
  */
 &diag_retained {
 	status = "disabled";
@@ -113,5 +114,8 @@ zephyr_udc0: &usbd {
 	status = "disabled";
 };
 &diag_dump {
+	status = "disabled";
+};
+&charge_record {
 	status = "disabled";
 };

@@ -707,6 +707,17 @@ struct max77654_h {
   max77654_err_t (*adc_read)(struct max77654_adc_reading *reading);
 
   /**
+   * @brief Pointer to an adc-read function without any settling wait, for @ref max77654_measure_dischg_ua.
+   * The NULL and the DISCHG conversion of a discharge current must follow each other closely, so this one must not
+   * sleep.
+   * @note Optional. Without it @ref max77654_measure_dischg_ua uses adc_read.
+   *
+   * @param reading buffer to store the reading result in.
+   * @return @ref E_MAX77654_SUCCESS if the read was successful, otherwise @ref E_MAX77654_COM_ERR.
+   */
+  max77654_err_t (*adc_read_fast)(struct max77654_adc_reading *reading);
+
+  /**
    * @brief Pointer to logging function.
    * Called by the driver to log status and error messages, with an optional integer
    * variable to log. Note that the string does not contain any formatting specifiers,
@@ -895,6 +906,22 @@ max77654_err_t max77654_read_gpio(const struct max77654_h *h, max77654_gpio_t gp
  * @return @ref E_MAX77654_SUCCESS if successful, otherwise an error code from @ref max77654_err_t.
  */
 max77654_err_t max77654_measure(const struct max77654_h *h, max77654_measure_t m, uint32_t *result);
+
+/**
+ * @brief Measure the battery discharge current in uA at the full resolution of the ADC.
+ * @ref max77654_measure returns whole percent of the scale (3 mA steps at 300 mA). This one runs the NULL and the
+ * DISCHG conversion back to back (adc_read_fast of the handle, else adc_read), does the arithmetic of the datasheet
+ * (I = (V_amux - V_null) / (V_fs - V_null) x I_scale) on the raw readings, and switches the AMUX off again.
+ * With the 8.2 mA scale one ADC step of the 12 bit SAADC is about 6 uA, with 300 mA about 210 uA.
+ * @note Can only be used if the 'adc_read' function is provided in the handle.
+ *
+ * @param h Pointer to the device-specific handle struct.
+ * @param scale One of MAX77654_BATT_I_8MA2 ... MAX77654_BATT_I_300MA: the full-scale current. Take about twice the
+ * current that is expected.
+ * @param ua Buffer to store the current in uA. 0 if the reading is not above the null reading (noise).
+ * @return @ref E_MAX77654_SUCCESS if successful, otherwise an error code from @ref max77654_err_t.
+ */
+max77654_err_t max77654_measure_dischg_ua(const struct max77654_h *h, max77654_measure_t scale, uint32_t *ua);
 
 /**
  * @brief Clear the watchdog timer

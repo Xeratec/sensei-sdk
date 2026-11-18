@@ -25,15 +25,17 @@ nRF5340 (master)                          nRF9151 (slave)
 | `include/sensei_lpwan/lpwan_link.h` | transfer scheme, flags, shared state machine API |
 | `src/` | protocol cores without OS: `link_slave.c` (nRF9151), `lpwan_master.c` (nRF5340), `lpwan_sm.c` (both), `lpwan_timers.c` (3GPP PSM and eDRX timer coding), `lpwan_lora.c` (LoRa payload limit, airtime, send time estimate, what a send gets before it is queued, the send tracking of both sides), `lpwan_dfu.c` (rules of the shield update: offsets, resume, SHA-256, checkpoints, MCUboot header and kind checks, repeats, an abort that undoes the marking, rate limit and link hold; flash and modem behind an ops table), `lpwan_upd.c` (what the client remembers about the update: when a swap may be running, the trial of a new image, the end of a session; pure), `lpwan_sim.c` (stream framing of the simulated shield link), `lpwan_rai.c` (LTE uplink policy: the RAI flag of a chunk, the send sequence of RAI option, send and wait for the answer behind an ops table, the answer of the server, the connection evaluation classes and the decision when to ask; pure) |
 | `zephyr/` | nRF5340 client: `lpwan_client.c` (thread, shield power, shared SPI_A bus, radios, the update session), `lpwan_shell.c`, `sim/` (simulated shield link, native_sim) |
-| `tests/` | host tests: master against slave through a simulated SPI with faults, state machine, timer coding, LoRa limits and airtime, a model of the LR1121 (duty cycle, NbTrans, repeats) with the shield and the client around it, `test_lpwan_dfu` (a shield update on a RAM flash, with gaps, resume after a restart, bad images, repeats, abort, the modem path, and over the SPI link with damaged frames), `test_lpwan_dfu_fuzz` (random chunking, lost replies, restarts and power loss in the middle of a flash operation), `test_lpwan_upd` (swap wait, trial, session rules), `test_lpwan_rai` (RAI flag and sequence on a fake socket, ack or downlink as the answer, evaluation classes and decision) |
+| `tests/` | host tests: master against slave through a simulated SPI with faults, state machine, timer coding, LoRa limits and airtime, a model of the LR1121 (duty cycle, NbTrans, repeats) with the shield and the client around it, `test_lpwan_dfu` (a shield update on a RAM flash, with gaps, resume after a restart, bad images, repeats, abort, the modem path, and over the SPI link with damaged frames), `test_lpwan_dfu_fuzz` (random chunking, lost replies, restarts and power loss in the middle of a flash operation), `test_lpwan_upd` (swap wait, trial, session rules), `test_lpwan_rai` (RAI flag and sequence on a fake socket, ack or downlink as the answer, evaluation classes and decision), `test_lpwan_counters` (RRC connected time, attaches, PSM entries and how they travel in `LpwanStatus`); the `on_power` hook is checked on native_sim by `NRF/tests/lpwan_power` |
 
 ## Client API (nRF5340, `sensei_lpwan/lpwan.h`)
 
 - `sensei_lpwan_init(hooks, config)`: starts the `lpwan` thread. The shield stays off until a radio is needed.
 - `struct sensei_lpwan_config`: LTE server and port, PSM, eDRX, LoRa data rate, ADR, port, confirmed. Change it with
   `sensei_lpwan_set_config()`. It takes effect at the next connect or send. APN, eDRX cycle and window are Kconfig options.
-- `struct sensei_lpwan_hooks`: `on_up` (joined or connected), `on_downlink`, `on_time`, `on_error`, and the work queue that
-  runs them.
+- `struct sensei_lpwan_hooks`: `on_up` (joined or connected), `on_downlink`, `on_time`, `on_error`, `on_power` and the work queue that
+  runs them (not `on_error` and `on_power`). `on_power(bool on)`: the shield's 3.3 V went on or off, once per real change,
+  on the client thread, short and non-blocking (the charge counter of the node times the shield with it). A bring-up that
+  fails calls on, then off after the boot timeout.
 - `sensei_lpwan_radio_ready()` and `sensei_lpwan_radio_send()`: what an app registers as its uplink radios.
   MTU: LTE `SENSEI_LPWAN_MTU_LTE` 1024 B; LoRa `sensei_lpwan_lora_mtu()`, from the data rate (EU868: DR0 to DR2 51 B, DR3
   115 B, DR4 and up 222 B, no MAC commands in FOpts). With ADR the network may lower the rate: 51 B. After every send the
@@ -65,7 +67,9 @@ nRF5340 (master)                          nRF9151 (slave)
   reports its own count per message as `Status.lte_no_answer`.
 - `sensei_lpwan_lte_link_check()` and `sensei_lpwan_lte_info()`: the connection evaluation (energy estimate, RSRP, coverage
   level) of the LTE modem. See "LTE: connection evaluation".
-- `sensei_lpwan_shield_diag()`: reset cause and fault record of the shield. See "Diagnostics of the shield".
+- `sensei_lpwan_shield_diag()`: reset cause and fault record of the shield, and the LTE counters (`rrc_connected_ms`, `attaches`,
+  `psm_entries`, since the shield started; `counters_valid` is false for an older shield). They are as old as the last status
+  read, which comes with every version read: refresh with `sensei_lpwan_query_version()`. See "Diagnostics of the shield".
 
 Power: with LoRa the shield is switched off `SENSEI_LPWAN_IDLE_S` after the last traffic, never while a send is in
 flight or its frame waits in the LR1121 (the LR1121 keeps the LoRaWAN session). With LTE it stays on and the modem sleeps in PSM.

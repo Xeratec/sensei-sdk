@@ -57,6 +57,13 @@ void pmic_bsp_log(char *msg, bool is_err, bool has_int_arg, uint32_t arg);
 max77654_err_t pmic_bsp_adc_read(struct max77654_adc_reading *reading);
 
 /**
+ * @brief Adc-read function without the 1 ms wait of pmic_bsp_adc_read(), for max77654_measure_dischg_ua(): the NULL
+ * and the DISCHG conversion follow each other (a busy wait of 10 us after the channel switch, the channel is set up on
+ * the first call). Use it as the adc_read_fast of the MAX77654 handle.
+ */
+max77654_err_t pmic_bsp_adc_read_fast(struct max77654_adc_reading *reading);
+
+/**
  * @brief Reset I2C port hotfix
  * I2CB switch causes a glitch which confuses the PMIC. This performs
  * a dummy read (which errors, but can be ignored) to reset the PMIC's I2C

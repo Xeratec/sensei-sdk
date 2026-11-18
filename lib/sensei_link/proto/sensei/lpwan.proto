@@ -226,6 +226,11 @@ message LpwanStatus {
   FaultRecord fault = 11;
   // LTE: false while the modem has no valid RSRP; rssi_dbm is 0 then. Not set by an older shield (reads false).
   bool rssi_valid = 12;
+  // LTE activity since the shield started, for the charge counter of the node. Set when the shield counts (LTE built
+  // in), absent otherwise. rrc_connected_ms wraps after 49 days: the client reads it at least that often.
+  optional uint32 rrc_connected_ms = 13; // time in the RRC connected state, ms (a running period is included)
+  optional uint32 attaches = 14;         // registrations with the network
+  optional uint32 psm_entries = 15;      // times the modem went into PSM (modem sleep of type PSM)
 }
 
 message NetworkTime {

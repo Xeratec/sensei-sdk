@@ -1,0 +1,25 @@
+# SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+# SPDX-License-Identifier: Apache-2.0
+
+# Scenario of the charge test (testcase.yaml): what the counter finds when it starts. Each one is its own build, the
+# start happens once per boot.
+
+choice SENSEI_TEST_CHARGE_SCENARIO
+	prompt "Scenario of the charge test"
+	default SENSEI_TEST_CHARGE_NORMAL
+
+config SENSEI_TEST_CHARGE_NORMAL
+	bool "First start (no record), the counter runs: accounting, floor watchdog, checks, saves, button"
+
+config SENSEI_TEST_CHARGE_RETAINED
+	bool "Retained RAM and settings are valid: the retained record wins"
+
+config SENSEI_TEST_CHARGE_SETTINGS
+	bool "Retained RAM is damaged: the settings record is used (RESTORED), power-on reset is UNCONFIRMED too"
+
+config SENSEI_TEST_CHARGE_SWAP
+	bool "Power-on reset with a battery voltage 150 mV above the last one: AUTO_SWAP"
+
+endchoice
+
+source "Kconfig.zephyr"

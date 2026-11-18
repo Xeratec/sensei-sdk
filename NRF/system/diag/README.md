@@ -43,7 +43,7 @@ record layout, the reset cause bits and their tests are in [lib/sensei_diag](../
 Devicetree: three `zephyr,retention` areas in a `zephyr,retained-ram` region, chosen as `sensei,diag-fault` (64 B),
 `sensei,diag-state` (16 B) and `sensei,diag-dump` (896 B, only for the coredump). The SDK boards have them
 (`nrf5340_senseiv1_retained.dtsi`, `sensei_lpwan_nrf9151_nrf9151_common.dtsi`): the last 1 kB of the application RAM, taken out
-of the image RAM, so the linker, the heap and MCUboot do not use it. Other boards or tests add the same nodes (see
+of the image RAM, so the linker, the heap and MCUboot do not use it. The gap between `diag_state` and `diag_dump` (0x50 to 0x7F) holds the 32 B `charge_record` of the charge counter (`NRF/system/pwr`), chosen as `sensei,charge`; 0x70 to 0x7F is free. Other boards or tests add the same nodes (see
 `NRF/tests/diag_fault/app.overlay`). The areas have no checksum of the retention subsystem: the record has its own CRC-32.
 Without them the record lives in `noinit` RAM, which usually survives a warm reset but is not guaranteed. The module wants
 no mutex in the retention drivers (`imply RETENTION_MUTEX_FORCE_DISABLE`), the handler writes from an interrupt.

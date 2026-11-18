@@ -1,0 +1,10 @@
+# SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+# SPDX-License-Identifier: Apache-2.0
+#
+# Authors:
+# - Philip Wiese <wiesep@iis.ee.ethz.ch>
+
+config SENSEI_CHARGE
+	bool "SENSEI software charge counter (states, events, self-discharge, record)"
+	help
+	  Pure logic of lib/sensei_charge. The power module option SENSEI_PWR_CHARGE selects it.

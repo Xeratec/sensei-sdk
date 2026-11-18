@@ -1,0 +1,10 @@
+# SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+# SPDX-License-Identifier: Apache-2.0
+---
+# Client of the LPWAN shield (lib/sensei_lpwan) on the simulated link, without a shield behind it.
+tests:
+  sensei.lpwan.power:
+    platform_allow:
+      - native_sim/native/64
+    tags: sensei lpwan
+    timeout: 120

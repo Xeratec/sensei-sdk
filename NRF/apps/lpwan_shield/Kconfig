@@ -25,10 +25,17 @@ config LPWAN_SHIELD_LTE
 	select LTE_LINK_CONTROL if !LPWAN_SHIELD_SIM
 	select LTE_LC_PSM_MODULE if !LPWAN_SHIELD_SIM
 	select LTE_LC_EDRX_MODULE if !LPWAN_SHIELD_SIM
+	# modem sleep events: LpwanStatus.psm_entries counts the PSM entries
+	select LTE_LC_MODEM_SLEEP_MODULE if !LPWAN_SHIELD_SIM
+	select LTE_LC_MODEM_SLEEP_NOTIFICATIONS if !LPWAN_SHIELD_SIM
 	select DATE_TIME if !LPWAN_SHIELD_SIM
 	help
 	  UDP or TCP uplink and downlink over the LTE modem. The modem library starts at the first
 	  connect request.
+
+# The modem reports a sleep only when it lasts this long: the shortest value, so that every PSM counts.
+config LTE_LC_MODEM_SLEEP_NOTIFICATIONS_THRESHOLD_MS
+	default 10240 if LPWAN_SHIELD_LTE
 
 config LPWAN_SHIELD_LORA
 	bool "LoRaWAN on the LR1121 (Modem-E firmware)"

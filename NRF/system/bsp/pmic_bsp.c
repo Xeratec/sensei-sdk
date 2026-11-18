@@ -75,15 +75,8 @@ max77654_err_t pmic_bsp_write_regs(uint8_t reg_adr, uint32_t n, const uint8_t *b
   return E_MAX77654_SUCCESS;
 }
 
-max77654_err_t pmic_bsp_adc_read(struct max77654_adc_reading *reading) {
-
-  k_sleep(K_MSEC(1));
-
-  if (adc_channel_setup_dt(&adc_channel)) {
-    LOG_ERR("ADC Init failed!");
-    return E_MAX77654_COM_ERR;
-  };
-
+// One conversion of the AMUX channel (the channel is configured).
+static max77654_err_t adc_convert(struct max77654_adc_reading *reading) {
   int16_t buf;
   struct adc_sequence sequence = {
       .buffer = &buf,
@@ -101,6 +94,37 @@ max77654_err_t pmic_bsp_adc_read(struct max77654_adc_reading *reading) {
   reading->adc_max_reading = (0x1 << adc_channel.resolution) - 1;
 
   return E_MAX77654_SUCCESS;
+}
+
+max77654_err_t pmic_bsp_adc_read(struct max77654_adc_reading *reading) {
+
+  k_sleep(K_MSEC(1));
+
+  if (adc_channel_setup_dt(&adc_channel)) {
+    LOG_ERR("ADC Init failed!");
+    return E_MAX77654_COM_ERR;
+  };
+
+  return adc_convert(reading);
+}
+
+// The settling time of the AMUX after a channel switch is 0.3 us (datasheet); the I2C write that switches it takes much
+// longer. This margin is the only wait.
+#define PMIC_BSP_AMUX_SETTLE_US 10
+
+max77654_err_t pmic_bsp_adc_read_fast(struct max77654_adc_reading *reading) {
+  static bool adc_ready;
+
+  if (!adc_ready) {
+    if (adc_channel_setup_dt(&adc_channel)) {
+      LOG_ERR("ADC Init failed!");
+      return E_MAX77654_COM_ERR;
+    }
+    adc_ready = true;
+  }
+  k_busy_wait(PMIC_BSP_AMUX_SETTLE_US);
+
+  return adc_convert(reading);
 }
 
 void pmic_i2c_reset_hotfix() {

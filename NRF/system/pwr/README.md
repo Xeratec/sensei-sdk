@@ -93,13 +93,50 @@ The nIRQ and Soft_nRST lines (`gpio_pmic_irq`, `gpio_soft_nrst`) are set up by `
 devicetree flags: active low, internal pull-up (idle high; in case the board has no external one). Untested on hardware
 (T4.8 of the node repo).
 
+## Battery charge counter (`CONFIG_SENSEI_PWR_CHARGE`, `pwr/pwr_charge.h`)
+
+The MAX77654 has no fuel gauge. This option counts the charge in software with `lib/sensei_charge` (read its README for the
+method: floor, states, events, self-discharge, the report and the flags) and adds what only the PMIC side knows. Off by default.
+
+- **API.** `pwr_charge_init(cfg)` (after `pwr_init()` and the settings load; the application gives the table and the settings),
+  `pwr_charge_state(id, on)` and `pwr_charge_event(id, n)` (cheap, from any thread or interrupt), `pwr_charge_set_temp()`,
+  `pwr_charge_report()`, `pwr_charge_ledger()`, `pwr_charge_new()` (a new battery), `pwr_charge_save()`, `pwr_charge_check(cls)`
+  (AMUX sample while a job runs), `pwr_charge_configure()`, `pwr_charge_set_swap_cb()`.
+- **Power thread** (every 20 s and on PMIC interrupts): battery voltage (the table is at 3.6 V and scales with 3.6 V / V_bat),
+  external power (USB: the battery does not supply the node, only the ledger counts), the idle current (floor watchdog: one
+  8.2 mA-scale sample when no state is on; three in a row more than `CONFIG_SENSEI_PWR_CHARGE_FLOOR_MARGIN_UA` above the floor
+  set `FLOOR_HIGH`), the retained record. With the Li-ion choice also the charge current (`BATT_I_CHG`, integrated), "charger done"
+  (`PWR_CHG_DONE`: used = 0, `LIION_SYNCED`), the capacity learned from a full discharge to 3.3 V, and the voltage hint after 30 min
+  without load. Three short presses of the nEN button within 3 s, in the first 5 min after a power-on reset, declare a new battery
+  (a callback tells the application; every press also resets GAP9, as before).
+- **Measurement.** `max77654_measure_dischg_ua(scale)` of the driver: the NULL and the DISCHG conversion back to back (the BSP's
+  `pmic_bsp_adc_read_fast()`: no 1 ms wait, 10 us after the channel switch), at the full resolution of the SAADC (6 uA at the 8.2 mA scale,
+  211 uA at 40.5 mA), AMUX off afterwards, under the power mutex. The old `max77654_measure()` gives whole percent of the scale.
+  The PMIC is on I2C A, which GAP9 does not take, so no bus claim is needed.
+- **Persistence.** A 32 B record in the retained RAM (devicetree chosen `sensei,charge`, node `charge_record` at 0x50 of the retained
+  region in `nrf5340_senseiv1_retained.dtsi`, the gap between `diag_state` and `diag_dump`; without it `noinit` RAM) written at
+  every pass, and in the settings (`sensei_charge/rec` and `sensei_charge/ledger`, not under `sensei`, which the node's handler owns)
+  every `CONFIG_SENSEI_PWR_CHARGE_SAVE_H` hours (6), on a new battery, on "charger done", and on `pwr_charge_save()` (the node calls
+  it with the daily status and before planned reboots; `pwr_off_and_reboot()` calls it too). Start order: retained record, else
+  settings record (flag `RESTORED`, up to 6 h lost), else zero; a power-on reset without the retained record is `UNCONFIRMED`
+  unless the rested voltage is 150 mV above the last one (`AUTO_SWAP`, counter reset). MCUboot has no use for it: its board file
+  (`..._cpuapp_bootloader.dts`) disables the node like the other retention areas.
+- **Cost.** About 10 kB of flash and 0.9 kB of RAM in the node's Debug build, with the library, the settings records and the
+  retention driver already there for the boot mode.
+
+Untested on hardware: the AMUX samples (offset -0.5 ... +0.8 mA at 0 mA, accuracy +-15 % above 15 mA, datasheet), the retained
+RAM over a power cut, the floor margin (the sample is taken while the CPU is awake in the power thread).
+
 ## Tests
 
 Zephyr tests on native_sim (`NRF/tests/pwr`, `pwr_check`, `pwr_ram`; see `NRF/tests/README.md`). `pwr` runs this module
 with the real MAX77654 driver and BSP on an I2C emulator of the PMIC, the GPIO emulator and the ADC emulator: boot hook
 (order, wait after the reset, rails, settle time, retry in `pwr_init()`), charger and thresholds per battery choice,
 events and status, battery levels, failed PMIC reads, the periodic work, power-off and the button. `pwr_check` runs
-`sensei_pwr_check_idle()` on test devices, `pwr_ram` the size that `sensei_pwr_ram_powerdown()` reports.
+`sensei_pwr_check_idle()` on test devices, `pwr_ram` the size that `sensei_pwr_ram_powerdown()` reports, `pwr_charge` the charge counter
+with the real driver and BSP on the PMIC emulator (conversion order and uA result, accounting, voltage scaling, floor watchdog,
+external power, AMUX checks, the 6 h save, the retained record, a new battery, the button, Li-ion charge and "done"; and per build the
+restore precedence: retained, settings, none, swap).
 Not tested: the real PMIC (the emulator follows the driver's register map), the nEN edge and PMIC interrupt timing,
 `pwr_ram_boot.c` and the RAM switches. The patched MAX77654 driver is checked here too (thermistor thresholds, ERC flags,
 see `NRF/system/third_party/max77654/README.md`).

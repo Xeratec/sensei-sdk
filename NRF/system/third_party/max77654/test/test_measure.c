@@ -273,6 +273,93 @@ void test_measure_identity() {
   TEST_ASSERT_MUX_OFF();
 }
 
+// ---- max77654_measure_dischg_ua ----
+
+static int fast_calls;
+static uint8_t fast_mux[4];
+static int plain_calls;
+
+static max77654_err_t counting_adc_read_fast(struct max77654_adc_reading *reading) {
+  uint8_t cnfg_chg_i = 0;
+  mock_read_regs(REG(CNFG_CHG_I), 1, &cnfg_chg_i);
+  if (fast_calls < 4)
+    fast_mux[fast_calls] = REG_FIELD_GET(CNFG_CHG_I, MUX_SEL, cnfg_chg_i);
+  fast_calls++;
+  return mock_adc_read(reading);
+}
+
+static max77654_err_t counting_adc_read(struct max77654_adc_reading *reading) {
+  plain_calls++;
+  return mock_adc_read(reading);
+}
+
+void test_measure_dischg_ua() {
+  uint32_t ua = 99;
+
+  mock_set_adc_params(4095, 3600); // the SAADC of the board: 12 bit, 3.6 V full scale
+
+  // Vnull = 50 mV, V_amux = 300 mV, 8.2 mA scale: (300 - 50) / (1250 - 50) x 8200 uA = 1708 uA
+  mock_set_adc_reading_voltage(REG_CONST(CNFG_CHG_I, MUX_SEL, BATT_DISCHG_I_NULL), 50);
+  mock_set_adc_reading_voltage(REG_CONST(CNFG_CHG_I, MUX_SEL, BATT_DISCHG_I), 300);
+  TEST_ASSERT_EQUAL(E_MAX77654_SUCCESS, max77654_measure_dischg_ua(&h, MAX77654_BATT_I_8MA2, &ua));
+  TEST_ASSERT_UINT32_WITHIN(15, 1708, ua);
+  TEST_ASSERT_MUX_OFF();
+
+  // Full scale of each range with Vnull = 0
+  const uint32_t scale_ua[11] = {8200, 40500, 72300, 103400, 134100, 164100, 193700, 222700, 251200, 279300, 300000};
+  mock_set_adc_reading_voltage(REG_CONST(CNFG_CHG_I, MUX_SEL, BATT_DISCHG_I_NULL), 0);
+  mock_set_adc_reading_voltage(REG_CONST(CNFG_CHG_I, MUX_SEL, BATT_DISCHG_I), 1250);
+  for (unsigned int i = 0; i < 11; i++) {
+    TEST_ASSERT_EQUAL(E_MAX77654_SUCCESS, max77654_measure_dischg_ua(&h, (max77654_measure_t)(MAX77654_BATT_I_8MA2 + i), &ua));
+    TEST_ASSERT_UINT32_WITHIN(scale_ua[i] / 100 + 1, scale_ua[i], ua);
+    TEST_ASSERT_MUX_OFF();
+  }
+
+  // The resolution is the ADC step, not a percent: 100 uA at the 8.2 mA scale is 1.5 mV of 1250 mV (2 steps of 0.88 mV)
+  mock_set_adc_reading_voltage(REG_CONST(CNFG_CHG_I, MUX_SEL, BATT_DISCHG_I), 15);
+  TEST_ASSERT_EQUAL(E_MAX77654_SUCCESS, max77654_measure_dischg_ua(&h, MAX77654_BATT_I_8MA2, &ua));
+  TEST_ASSERT_UINT32_WITHIN(6, 100, ua);
+  // the integer percent function cannot see it
+  uint32_t pct = 99;
+  TEST_ASSERT_EQUAL(E_MAX77654_SUCCESS, max77654_measure(&h, MAX77654_BATT_I_8MA2, &pct));
+  TEST_ASSERT_EQUAL(1, pct);
+
+  // not above the null reading: 0 (noise), also with the same value
+  mock_set_adc_reading_voltage(REG_CONST(CNFG_CHG_I, MUX_SEL, BATT_DISCHG_I_NULL), 100);
+  mock_set_adc_reading_voltage(REG_CONST(CNFG_CHG_I, MUX_SEL, BATT_DISCHG_I), 0);
+  TEST_ASSERT_EQUAL(E_MAX77654_SUCCESS, max77654_measure_dischg_ua(&h, MAX77654_BATT_I_8MA2, &ua));
+  TEST_ASSERT_EQUAL(0, ua);
+  mock_set_adc_reading_voltage(REG_CONST(CNFG_CHG_I, MUX_SEL, BATT_DISCHG_I), 100);
+  TEST_ASSERT_EQUAL(E_MAX77654_SUCCESS, max77654_measure_dischg_ua(&h, MAX77654_BATT_I_8MA2, &ua));
+  TEST_ASSERT_EQUAL(0, ua);
+
+  // Bad arguments
+  TEST_ASSERT_NOT_EQUAL(E_MAX77654_SUCCESS, max77654_measure_dischg_ua(&h, MAX77654_BATT_V, &ua));
+  TEST_ASSERT_NOT_EQUAL(E_MAX77654_SUCCESS, max77654_measure_dischg_ua(&h, MAX77654_BATT_I_8MA2, 0));
+
+  // With adc_read_fast in the handle only that one is used, NULL first, then DISCHG, AMUX off afterwards
+  struct max77654_h hf = h;
+  hf.adc_read_fast = &counting_adc_read_fast;
+  hf.adc_read = &counting_adc_read;
+  fast_calls = plain_calls = 0;
+  mock_set_adc_reading_voltage(REG_CONST(CNFG_CHG_I, MUX_SEL, BATT_DISCHG_I_NULL), 50);
+  mock_set_adc_reading_voltage(REG_CONST(CNFG_CHG_I, MUX_SEL, BATT_DISCHG_I), 300);
+  TEST_ASSERT_EQUAL(E_MAX77654_SUCCESS, max77654_measure_dischg_ua(&hf, MAX77654_BATT_I_8MA2, &ua));
+  TEST_ASSERT_EQUAL(2, fast_calls);
+  TEST_ASSERT_EQUAL(0, plain_calls);
+  TEST_ASSERT_EQUAL_HEX(REG_CONST(CNFG_CHG_I, MUX_SEL, BATT_DISCHG_I_NULL), fast_mux[0]);
+  TEST_ASSERT_EQUAL_HEX(REG_CONST(CNFG_CHG_I, MUX_SEL, BATT_DISCHG_I), fast_mux[1]);
+  TEST_ASSERT_MUX_OFF();
+  // Without it adc_read is used
+  hf.adc_read_fast = 0;
+  fast_calls = plain_calls = 0;
+  TEST_ASSERT_EQUAL(E_MAX77654_SUCCESS, max77654_measure_dischg_ua(&hf, MAX77654_BATT_I_8MA2, &ua));
+  TEST_ASSERT_EQUAL(2, plain_calls);
+  // No ADC function at all
+  hf.adc_read = 0;
+  TEST_ASSERT_NOT_EQUAL(E_MAX77654_SUCCESS, max77654_measure_dischg_ua(&hf, MAX77654_BATT_I_8MA2, &ua));
+}
+
 // // ======== Main ===================================================================================
 
 void setUp(void) {}
@@ -292,6 +379,7 @@ int main(void) {
   RUN_TEST(test_measure_batt_i);
   RUN_TEST(test_measure_identity);
   RUN_TEST(test_measure_vsys);
+  RUN_TEST(test_measure_dischg_ua);
 
   return UNITY_END();
 }

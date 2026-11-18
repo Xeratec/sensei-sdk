@@ -1,0 +1,26 @@
+# SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+# SPDX-License-Identifier: Apache-2.0
+---
+# The battery charge counter of NRF/system/pwr (lib/sensei_charge) with the real MAX77654 driver and BSP on the I2C
+# emulator of the PMIC and the ADC emulator, a retained RAM array and the settings on the flash simulator.
+common:
+  platform_allow:
+    - native_sim/native/64
+  tags: sensei pwr charge
+tests:
+  sensei.pwr.charge:
+    # Li-SOCl2 battery (the default), first start
+    timeout: 180
+  sensei.pwr.charge.liion:
+    timeout: 180
+    extra_configs:
+      - CONFIG_SENSEI_PWR_BATTERY_LIION=y
+  sensei.pwr.charge.retained:
+    extra_configs:
+      - CONFIG_SENSEI_TEST_CHARGE_RETAINED=y
+  sensei.pwr.charge.settings:
+    extra_configs:
+      - CONFIG_SENSEI_TEST_CHARGE_SETTINGS=y
+  sensei.pwr.charge.swap:
+    extra_configs:
+      - CONFIG_SENSEI_TEST_CHARGE_SWAP=y

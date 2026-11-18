@@ -6,6 +6,7 @@ target_sources_ifdef(CONFIG_SENSEI_PWR app PRIVATE
     thread_pwr.c
 )
 
+target_sources_ifdef(CONFIG_SENSEI_PWR_CHARGE app PRIVATE pwr_charge.c)
 target_sources_ifdef(CONFIG_SENSEI_PWR_CHECK app PRIVATE pwr_check.c)
 target_sources_ifdef(CONFIG_SENSEI_PWR_RAM_POWERDOWN app PRIVATE pwr_ram.c)
 

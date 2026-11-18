@@ -42,6 +42,59 @@ config SENSEI_PWR_BAT_OK_MV
 	default 3500 if SENSEI_PWR_BATTERY_LIION
 	default 3300
 
+config SENSEI_PWR_CHARGE
+	bool "Battery charge counter (lib/sensei_charge): coulomb counting in software"
+	default n
+	select SENSEI_CHARGE
+	select SETTINGS
+	# The retained RAM record (devicetree chosen sensei,charge, see README.md). Without it the record lives in noinit RAM.
+	imply RETAINED_MEM
+	imply RETENTION
+	imply RETENTION_MUTEX_FORCE_DISABLE
+	imply RETAINED_MEM_MUTEX_FORCE_DISABLE
+	help
+	  The MAX77654 has no fuel gauge. The application tells the module which states are on (GAP9 powered, BLE
+	  connected, ...) and which events happened (a sensor reading, a LoRa uplink), the module counts the charge
+	  with the table of the application, adds the idle floor and the self-discharge, and keeps the result in
+	  retained RAM and in the settings. The power thread feeds it the battery voltage, the external power state,
+	  the idle current (floor watchdog) and, with a Li-ion cell, the charge current and the charger-done reset.
+	  See NRF/system/pwr/README.md and lib/sensei_charge/README.md.
+
+if SENSEI_PWR_CHARGE
+
+config SENSEI_PWR_CHARGE_DEFAULT_CAPACITY_MAH
+	int "Capacity used while none is declared (mAh)"
+	default 17000 if SENSEI_PWR_BATTERY_LISOCL2
+	default 0
+	help
+	  17000 mAh is the Saft LS33600 of the SENSEI board. The Li-ion choice has no default (0): the counter reports the
+	  used charge and learns the capacity from a full discharge. A default is flagged CAPACITY_DEFAULT.
+
+config SENSEI_PWR_CHARGE_SAVE_H
+	int "Hours between saves of the counter to the settings"
+	default 6
+	range 1 48
+	help
+	  A power loss (battery change) loses at most this long: the retained RAM does not survive it, the settings do. About
+	  two flash entries per save, so a few erases per sector and year.
+
+config SENSEI_PWR_CHARGE_FLOOR_MARGIN_UA
+	int "Floor watchdog margin (uA)"
+	default 2000
+	help
+	  An idle sample of the battery current that many uA above the board floor counts as high. Three in a row set
+	  FLOOR_HIGH and the excess is counted. The sample is taken in the power thread, so the margin has to cover the CPU
+	  being awake there (calibrate on the PPK2, TESTING.md).
+
+config SENSEI_PWR_CHARGE_FAST_UA
+	int "Fast-charge current of the charger (uA), Li-ion"
+	default 15000
+	help
+	  The charge current monitor reports percent of the fast-charge current; this converts it (the 15 mA of
+	  config/pmic_default.h).
+
+endif # SENSEI_PWR_CHARGE
+
 config SENSEI_PWR_BOOT_RAILS
 	bool "Turn the PMIC rails on at boot, before the shield drivers start"
 	default y if SHIELD_UT_SENSORSHIELD

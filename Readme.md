@@ -157,6 +157,7 @@ Plain C libraries for nRF (Zephyr), GAP9 and host builds. Each folder has `inclu
 | [lib/sensei_sensor_math](lib/sensei_sensor_math/README.md) | `CONFIG_SENSEI_SENSOR_MATH` | Unit conversions of the sensor shield drivers (SGP41 ticks, AS7331 uW/cm2, SCD41 ASC hours, LIS2DUXS12 wake threshold) |
 | [lib/sensei_pwr_math](lib/sensei_pwr_math/README.md) | `CONFIG_SENSEI_PWR_MATH` | Battery charge estimate per chemistry and button press detection of the power module |
 | [lib/sensei_diag](lib/sensei_diag/README.md) | `CONFIG_SENSEI_DIAG_CODEC` | Reset cause bits, fault record and boot state of the diagnostics module (byte layout, names) |
+| [lib/sensei_charge](lib/sensei_charge/README.md) | `CONFIG_SENSEI_CHARGE` | Software charge counter: states and events from a table, self-discharge, days left, retained record, swap rules |
 
 ## Applications (`NRF/apps/`)
 - [lpwan_shield](NRF/apps/lpwan_shield/README.md): firmware of the LPWAN shield's nRF9151 (LTE-M, NB-IoT, LoRaWAN over an LR1121). Board `sensei_lpwan_nrf9151/nrf9151/ns`.

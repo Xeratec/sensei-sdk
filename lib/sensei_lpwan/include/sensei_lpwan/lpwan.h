@@ -72,6 +72,11 @@ struct sensei_lpwan_hooks {
   void (*on_time)(uint32_t unix_s, sensei_Radio radio);
   /** Something failed (radio error, dropped downlink, send failure). Count it. */
   void (*on_error)(void);
+  /** The 3.3 V of the shield went on (true) or off (false): once per real change, never for a repeated up or down
+   * and not when the bring-up fails before the rail is on. Runs on the client thread at that moment, not on `wq`, with
+   * no client lock held: keep it short and do not wait (a spinlock of your own is fine). Used by the charge counter to
+   * time the shield. After a power-up the shield answers its version a few hundred ms later. */
+  void (*on_power)(bool on);
 };
 
 /**
@@ -277,9 +282,18 @@ struct sensei_lpwan_shield_diag {
   uint32_t boot_count;  /**< boots of the shield since its retained RAM was lost */
   bool has_fault;       /**< the shield reported a fatal error of its previous run (kept until the node restarts) */
   sensei_FaultRecord fault;
+  /** LTE activity since the shield started (LpwanStatus 13 to 15), for the charge counter. Valid only when the shield
+   *  reported them (an older shield, or one without LTE, does not). The shield restarts at every power cut, so a value
+   *  below the last one is a new run: count it from zero (boot_count may also change). */
+  bool counters_valid;
+  uint32_t rrc_connected_ms; /**< time in the RRC connected state, ms; wraps after 49 days */
+  uint32_t attaches;         /**< registrations with the network */
+  uint32_t psm_entries;      /**< times the modem went into PSM */
 };
 
-/** The shield's diagnostics (the node puts the reset cause in Status). -ENODATA: not read yet. */
+/** The shield's diagnostics (the node puts the reset cause in Status). -ENODATA: not read yet. The counters are as old
+ *  as the last status read: it comes with every version read, so refresh them with sensei_lpwan_query_version() (the
+ *  shield stays on with LTE, so that costs one SPI exchange). */
 int sensei_lpwan_shield_diag(struct sensei_lpwan_shield_diag *out);
 
 /** One-line state for the shell and status messages. */

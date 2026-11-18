@@ -74,6 +74,7 @@ Harness to shield:
 | `lr reset` | the LR1121 resets by itself: its volatile state and the frame in flight are gone, the session stays |
 | `lr maxpayload N` / `nbtrans N` / `dr N` / `slow PCT` / `hang 0/1` | the payload the next uplink takes (MAC answers owed, 0: by data rate), NbTrans, data rate, air time stretched, TX_DONE never comes |
 | `modem cover 0/1` | the network is lost or back (registration events) |
+| `modem rrc 0/1` | RRC state change (idle, connected): the time in the connected state goes into the status counters. Attaches follow the registration; the modem sleep events (PSM entries) do not exist in the sim |
 | `modem rai 0/1` / `modem energy N` | the cell supports RAI or not; the energy class of the connection evaluation (5 excessive, 7 normal) |
 | `modem fault` | the modem core crashes: `nrf_modem_fault_handler` records it and resets the chip |
 | `shield reset` | the shield restarts |

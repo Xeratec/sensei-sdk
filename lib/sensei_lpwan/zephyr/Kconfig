@@ -122,6 +122,13 @@ config SENSEI_LPWAN_SIM
 	  native_sim): `zephyr.exe -lpwan_shield=<host>:<port>`. Connecting is the power of the shield, closing the
 	  connection cuts it. For tests without hardware. See lib/sensei_lpwan/README.md.
 
+config SENSEI_LPWAN_SIM_TARGET
+	string "Where the simulated shield listens, host:port (the command line option -lpwan_shield wins)"
+	default ""
+	depends on SENSEI_LPWAN_SIM
+	help
+	  For tests that cannot give a command line (Twister). A port that nobody listens on is a shield that never boots.
+
 config SENSEI_LPWAN_SPI_HZ
 	int "SPI clock, Hz"
 	default 4000000

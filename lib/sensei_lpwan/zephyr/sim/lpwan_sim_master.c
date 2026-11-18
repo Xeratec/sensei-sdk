@@ -159,11 +159,12 @@ static void link_main(void *a, void *b, void *c) {
 }
 
 int lpwan_sim_master_init(void (*on_event)(void)) {
-  char *colon = target != NULL ? strrchr(target, ':') : NULL;
+  const char *tgt = target != NULL ? target : CONFIG_SENSEI_LPWAN_SIM_TARGET; /* the option wins */
+  const char *colon = tgt[0] != '\0' ? strrchr(tgt, ':') : NULL;
 
   event_cb = on_event;
-  if (colon != NULL && colon != target) {
-    snprintf(host, sizeof(host), "%.*s", (int)MIN((size_t)(colon - target), sizeof(host) - 1), target);
+  if (colon != NULL && colon != tgt) {
+    snprintf(host, sizeof(host), "%.*s", (int)MIN((size_t)(colon - tgt), sizeof(host) - 1), tgt);
     port = atoi(colon + 1);
   }
   if (port <= 0) {

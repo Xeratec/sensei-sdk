@@ -29,6 +29,9 @@
 
 #include "pwr/pwr.h"
 #include "pwr/pwr_priv.h"
+#ifdef CONFIG_SENSEI_PWR_CHARGE
+#include "pwr/pwr_charge.h"
+#endif
 
 #include "config/pmic_default.h"
 #include "config/tasks.h"
@@ -226,6 +229,18 @@ static void thread_pwr(void *_a, void *_b, void *_c) {
         events = collect_events();
       }
 
+#ifdef CONFIG_SENSEI_PWR_CHARGE
+      // Charge counter: voltage, external power, charger state, idle current sample, accounting up to now. It also
+      // runs when a PMIC read failed (the last status is used), so the time is always accounted.
+      {
+        struct pwr_status s;
+
+        (void)pwr_get_status(&s);
+        pwr_charge_pmic_tick((uint32_t)atomic_get(&battery_mV), s.valid && s.chgin == PWR_CHGIN_OK,
+                             s.valid && s.charging, s.charger);
+      }
+#endif
+
       // nEN pressed (key-down), Soft_nRST edge (key-up). A press longer than 2 seconds switches off and reboots.
       // The key-down time is the interrupt that came with the flag. Without a new interrupt it is the time of this
       // read, which is later than the edge, so the press can only look shorter, never longer:
@@ -239,11 +254,18 @@ static void thread_pwr(void *_a, void *_b, void *_c) {
       }
       // Only after a good flag read, so that a key-down in the flags is seen before its key-up:
       if (flags_valid && atomic_cas(&keyup_pending, 1, 0)) {
-        if (sensei_button_up(&button, keyup_ms, THREAD_PWR_SOFT_RESET_LATENCY_MS, THREAD_PWR_BUTTON_MAX_MS) ==
-            SENSEI_BUTTON_LONG) {
+        enum sensei_button_press press =
+            sensei_button_up(&button, keyup_ms, THREAD_PWR_SOFT_RESET_LATENCY_MS, THREAD_PWR_BUTTON_MAX_MS);
+
+        if (press == SENSEI_BUTTON_LONG) {
           LOG_INF("Button pressed for more than 2 seconds");
           pwr_off_and_reboot();
         }
+#ifdef CONFIG_SENSEI_PWR_CHARGE
+        if (press == SENSEI_BUTTON_SHORT) {
+          pwr_charge_button_short(keyup_ms); // three short presses in a row declare a new battery
+        }
+#endif
       }
 
       // Re-apply charger configuration periodically. Recommended by PMIC Datasheet.

@@ -12,8 +12,9 @@
  * the UDP socket of lte.c is an offloaded host socket (CONFIG_NET_NATIVE_OFFLOADED_SOCKETS) and reaches the collector.
  *
  * What it does: registration after a delay (home network), PSM, eDRX and RAI reports, connection evaluation, network
- * time from the host clock, AT commands for the modem version and the signal. What it does not: RRC states, paging,
- * radio timing, the RAI option on the air (the option is only counted and reported). Commands of the harness
+ * time from the host clock, AT commands for the modem version and the signal, RRC changes on command (`modem rrc`, for
+ * the status counters). What it does not: automatic RRC states, modem sleep events, paging, radio timing, the RAI
+ * option on the air (the option is only counted and reported). Commands of the harness
  * ("modem ..."): see README.md.
  */
 
@@ -283,6 +284,12 @@ void sim_modem_command(int argc, char **argv) {
     }
   } else if (argc >= 2 && strcmp(argv[0], "rai") == 0) {
     rai_ok = argv[1][0] != '0';
+  } else if (argc >= 2 && strcmp(argv[0], "rrc") == 0) {
+    /* RRC state change for the counters of the status: "modem rrc 1" connected, "modem rrc 0" idle */
+    struct lte_lc_evt e = {.type = LTE_LC_EVT_RRC_UPDATE,
+                           .rrc_mode = argv[1][0] != '0' ? LTE_LC_RRC_MODE_CONNECTED : LTE_LC_RRC_MODE_IDLE};
+
+    emit(&e);
   } else if (argc >= 2 && strcmp(argv[0], "energy") == 0) {
     energy = atoi(argv[1]);
   } else if (argc >= 1 && strcmp(argv[0], "fault") == 0) {

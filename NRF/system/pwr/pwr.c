@@ -34,6 +34,9 @@
 #include "config/pmic_default.h"
 #include "pwr/pwr_board.h"
 #include "pwr/pwr_priv.h"
+#ifdef CONFIG_SENSEI_PWR_CHARGE
+#include "pwr/pwr_charge.h"
+#endif
 
 #include "max77654.h"
 
@@ -76,6 +79,7 @@ struct max77654_h pmic_h = {
     .read_regs = pmic_bsp_read_regs,
     .write_regs = pmic_bsp_write_regs,
     .adc_read = pmic_bsp_adc_read,
+    .adc_read_fast = pmic_bsp_adc_read_fast,
     .log = pmic_bsp_log,
     .conf = PMIC_CONFIG_DEFAULT,
 };
@@ -259,6 +263,10 @@ int pwr_start(void) {
 void pwr_off_and_reboot(void) {
   bool did_lock = false;
   // FIXME: This whole thing is very hacky and a workaround until the PMIC's FSM is working.
+
+#ifdef CONFIG_SENSEI_PWR_CHARGE
+  (void)pwr_charge_save(); // the counter survives the planned reset in the settings too
+#endif
 
   LOG_INF("Stopping power subsystem...");
   for (uint32_t i = 0; i < 3; i++) {

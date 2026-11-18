@@ -81,6 +81,12 @@ static void report_error(void) {
   }
 }
 
+static void report_power(bool on) {
+  if (hooks.on_power != NULL) {
+    hooks.on_power(on);
+  }
+}
+
 static void submit_work(struct k_work *w) {
   if (hooks.wq != NULL) {
     k_work_submit_to_queue(hooks.wq, w);
@@ -803,6 +809,10 @@ static void read_diag(void) {
 
   shield_diag.reset_cause = rs.status.reset_cause;
   shield_diag.boot_count = rs.status.boot_count;
+  shield_diag.counters_valid = rs.status.has_rrc_connected_ms && rs.status.has_attaches && rs.status.has_psm_entries;
+  shield_diag.rrc_connected_ms = rs.status.rrc_connected_ms;
+  shield_diag.attaches = rs.status.attaches;
+  shield_diag.psm_entries = rs.status.psm_entries;
   if (rs.status.has_fault) {
     shield_diag.has_fault = true;
     shield_diag.fault = rs.status.fault;
@@ -940,6 +950,7 @@ static int shield_up_for(uint32_t boot_timeout_ms) {
     /* 3.3 V on, then the level shifter (unless GAP9 has the bus), then SPI. */
     k_msleep(5);
     shield_on = true;
+    report_power(true);
     level_update();
 #ifndef CONFIG_SENSEI_LPWAN_SIM
     gpio_pin_set_dt(&pin_ack, 1);
@@ -1008,6 +1019,7 @@ static void shield_down(void) {
   level_on = false;
   lpwan_upd_power_cut(&upd); /* an image on trial goes back: a swap at power-up */
   shield_on = false;
+  report_power(false);
   shield_off_at = k_uptime_get();
   link_up = false;
   lora_next_max = 0;

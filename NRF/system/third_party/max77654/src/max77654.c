@@ -784,6 +784,68 @@ max77654_err_t max77654_measure(const struct max77654_h *h, max77654_measure_t m
   return err;
 }
 
+// Full-scale current of IMON_DISCHG_SCALE (uA), indexed like scale_lookup.
+static const uint32_t scale_ua_lookup[] = {
+    [MAX77654_BATT_I_8MA2] = 8200,    [MAX77654_BATT_I_40MA5] = 40500,  [MAX77654_BATT_I_72MA3] = 72300,
+    [MAX77654_BATT_I_103MA4] = 103400, [MAX77654_BATT_I_134MA1] = 134100, [MAX77654_BATT_I_164MA1] = 164100,
+    [MAX77654_BATT_I_193MA7] = 193700, [MAX77654_BATT_I_222MA7] = 222700, [MAX77654_BATT_I_251MA2] = 251200,
+    [MAX77654_BATT_I_279MA3] = 279300, [MAX77654_BATT_I_300MA] = 300000,
+};
+
+max77654_err_t max77654_measure_dischg_ua(const struct max77654_h *h, max77654_measure_t scale, uint32_t *ua) {
+  max77654_err_t err = E_MAX77654_SUCCESS;
+  max77654_err_t (*adc_read)(struct max77654_adc_reading *) = 0;
+
+  err |= validate_handle(h);
+  if (err)
+    return err;
+  adc_read = h->adc_read_fast != 0 ? h->adc_read_fast : h->adc_read;
+  if (adc_read == 0) {
+    DRVR_ERR("adc_read is nullptr!")
+    return E_MAX77654_NULLPTR_ERR;
+  }
+  if (ua == 0)
+    return E_MAX77654_NULLPTR_ERR;
+  if (scale < MAX77654_BATT_I_8MA2 || scale > MAX77654_BATT_I_300MA)
+    return E_MAX77654_ERR;
+
+  struct max77654_adc_reading null_r = {0};
+  struct max77654_adc_reading dischg_r = {0};
+  uint8_t cnfg_chg_i = 0;
+  cnfg_chg_i = REG_FIELD_SET(CNFG_CHG_I, IMON_DISCHG_SCALE, cnfg_chg_i, scale_lookup[scale]);
+
+  // A NULL conversion always comes first (it cancels the offset), the DISCHG conversion right after it:
+  uint8_t sel = REG_FIELD_SET_CONST(CNFG_CHG_I, MUX_SEL, cnfg_chg_i, BATT_DISCHG_I_NULL);
+  err |= h->write_regs(REG(CNFG_CHG_I), 1, &sel);
+  if (err == E_MAX77654_SUCCESS)
+    err |= adc_read(&null_r);
+  if (err == E_MAX77654_SUCCESS) {
+    sel = REG_FIELD_SET_CONST(CNFG_CHG_I, MUX_SEL, cnfg_chg_i, BATT_DISCHG_I);
+    err |= h->write_regs(REG(CNFG_CHG_I), 1, &sel);
+  }
+  if (err == E_MAX77654_SUCCESS)
+    err |= adc_read(&dischg_r);
+
+  // AMUX off again, also after an error (it draws current while it is on):
+  cnfg_chg_i = REG_FIELD_SET_CONST(CNFG_CHG_I, MUX_SEL, cnfg_chg_i, DISABLED);
+  err |= h->write_regs(REG(CNFG_CHG_I), 1, &cnfg_chg_i);
+  if (err)
+    return err;
+
+  // I = (V_amux - V_null) / (V_fs - V_null) x I_scale with V = reading x fullscale_mV / max, V_fs = 1250 mV:
+  // I = (r_i - r_n) x F x I_scale / (1250 x max - r_n x F). Both readings are of the same ADC channel.
+  uint64_t r_i = dischg_r.reading;
+  uint64_t r_n = null_r.reading;
+  uint64_t fs = dischg_r.adc_fullscale_mV;
+  uint64_t max = dischg_r.adc_max_reading;
+  if (r_i <= r_n || max == 0 || 1250 * max <= r_n * fs) {
+    *ua = 0; // not above the null reading (noise) or a bad reading
+    return E_MAX77654_SUCCESS;
+  }
+  *ua = (uint32_t)(((r_i - r_n) * fs * scale_ua_lookup[scale]) / (1250 * max - r_n * fs));
+  return E_MAX77654_SUCCESS;
+}
+
 max77654_err_t max77654_clr_wdt(const struct max77654_h *h) {
 
   max77654_err_t err = E_MAX77654_SUCCESS;

@@ -40,3 +40,4 @@ manifest:
           - oberon-psa-crypto
           - nanopb
           - zcbor
+          - mcuboot

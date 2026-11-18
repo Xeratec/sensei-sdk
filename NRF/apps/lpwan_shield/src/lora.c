@@ -44,10 +44,9 @@ LOG_MODULE_REGISTER(lora, CONFIG_LPWAN_SHIELD_LOG_LEVEL);
 #define ctx (&lr1121_ctx)
 #define RC_OK LR1121_MODEM_RESPONSE_CODE_OK
 
-/* Modem-E TX done status */
-#define TX_NOT_SENT 0x00
-#define TX_UNCONFIRMED 0x01
-#define TX_CONFIRMED 0x02
+/* Modem-E TX done status (LPWAN_LORA_TX_*, lpwan_lora.h) */
+#define TX_NOT_SENT LPWAN_LORA_TX_NOT_SENT
+#define TX_CONFIRMED LPWAN_LORA_TX_CONFIRMED
 
 /* GPS epoch (1980-01-06) in Unix seconds, and the GPS-UTC offset in 2026. */
 #define GPS_TO_UNIX_S 315964800u
@@ -454,8 +453,7 @@ static void handle_event(const lr1121_modem_event_fields_t *e) {
     if (lr1121_modem_get_nb_trans(ctx, &nb) != RC_OK) {
       nb = 0;
     }
-    svc_emit_tx_done(cur_seq, ok, lpwan_lora_tx_attempts(nb, cur_confirmed, cur_confirmed && status == TX_CONFIRMED),
-                     next_max);
+    svc_emit_tx_done(cur_seq, ok, lpwan_lora_tx_done_attempts(status, nb, cur_confirmed), next_max);
     break;
   }
   case LR1121_MODEM_LORAWAN_EVENT_DOWN_DATA:

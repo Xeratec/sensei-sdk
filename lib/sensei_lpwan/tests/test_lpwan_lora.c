@@ -216,6 +216,12 @@ static void test_chunk_and_limits(void) {
   CHECK(lpwan_lora_tx_attempts(3, true, true) == 1); /* acknowledged: at least one */
   CHECK(lpwan_lora_tx_attempts(0, false, false) == 1 && lpwan_lora_tx_attempts(16, false, false) == 1);
   CHECK(lpwan_lora_tx_attempts(0, true, false) == 2 && lpwan_lora_tx_attempts(15, false, false) == 15);
+  /* from the TX_DONE status: an unconfirmed uplink that was not sent counts 0, whatever NbTrans is */
+  CHECK(lpwan_lora_tx_done_attempts(LPWAN_LORA_TX_NOT_SENT, 3, false) == 0);
+  CHECK(lpwan_lora_tx_done_attempts(LPWAN_LORA_TX_NOT_SENT, 0, false) == 0);
+  CHECK(lpwan_lora_tx_done_attempts(LPWAN_LORA_TX_UNCONFIRMED, 3, false) == 3);
+  CHECK(lpwan_lora_tx_done_attempts(LPWAN_LORA_TX_NOT_SENT, 3, true) == 4);  /* confirmed, no ack: frames went out */
+  CHECK(lpwan_lora_tx_done_attempts(LPWAN_LORA_TX_CONFIRMED, 3, true) == 1); /* acknowledged */
   for (uint32_t nb = 0; nb < LPWAN_LORA_NB_TRANS_MAX; nb++) { /* the count and the time of the estimate agree */
     CHECK(lpwan_lora_tx_ms(5, false, 10, nb, true) ==
           lpwan_lora_tx_ms(5, false, 10, lpwan_lora_tx_attempts(nb, true, false), false));

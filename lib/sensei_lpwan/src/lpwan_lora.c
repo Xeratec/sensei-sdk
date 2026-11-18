@@ -71,6 +71,13 @@ uint32_t lpwan_lora_tx_attempts(uint32_t nb_trans, bool confirmed, bool acked) {
   return acked ? 1u : nb + 1u;
 }
 
+uint32_t lpwan_lora_tx_done_attempts(uint8_t status, uint32_t nb_trans, bool confirmed) {
+  if (!confirmed && status == LPWAN_LORA_TX_NOT_SENT) {
+    return 0;
+  }
+  return lpwan_lora_tx_attempts(nb_trans, confirmed, confirmed && status == LPWAN_LORA_TX_CONFIRMED);
+}
+
 uint32_t lpwan_lora_tx_ms(uint8_t data_rate, bool adr, uint32_t app_len, uint32_t nb_trans, bool confirmed) {
   uint64_t n = (nb_trans >= 1 && nb_trans <= LPWAN_LORA_NB_TRANS_MAX ? nb_trans : 1u) + (confirmed ? 1u : 0u);
   uint64_t air = lpwan_lora_airtime_ms(adr ? 0 : data_rate, app_len + LPWAN_LORA_PHY_OVERHEAD);

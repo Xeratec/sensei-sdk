@@ -80,6 +80,18 @@ uint32_t lpwan_lora_tx_ms(uint8_t data_rate, bool adr, uint32_t app_len, uint32_
  */
 uint32_t lpwan_lora_tx_attempts(uint32_t nb_trans, bool confirmed, bool acked);
 
+/** Status byte of the Modem-E TX_DONE event. */
+#define LPWAN_LORA_TX_NOT_SENT 0x00    /**< unconfirmed: the frame did not go out; confirmed: no ack came */
+#define LPWAN_LORA_TX_UNCONFIRMED 0x01 /**< sent, no ack asked for */
+#define LPWAN_LORA_TX_CONFIRMED 0x02   /**< sent and acknowledged */
+
+/**
+ * TxDone.attempts from the status of the TX_DONE event: 0 if an unconfirmed uplink was not sent (nothing went out, so
+ * nothing to count); else lpwan_lora_tx_attempts() (a confirmed uplink with status NOT_SENT had no ack: its frames
+ * went out).
+ */
+uint32_t lpwan_lora_tx_done_attempts(uint8_t status, uint32_t nb_trans, bool confirmed);
+
 /** What the shield read from the LR1121 for a send. A call that failed is `*_known == false`. */
 struct lpwan_lora_est_in {
   uint8_t data_rate;

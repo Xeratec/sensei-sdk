@@ -81,3 +81,9 @@ SPDX-License-Identifier = "MIT"
 path = "NRF/apps/*/VERSION"
 SPDX-FileCopyrightText = "2026 ETH Zurich and University of Bologna"
 SPDX-License-Identifier = "Apache-2.0"
+
+# The licence text that the Python package ships (a copy of LICENSES/Apache-2.0.txt)
+[[annotations]]
+path = "tools/python/LICENSE"
+SPDX-FileCopyrightText = "2026 ETH Zurich and University of Bologna"
+SPDX-License-Identifier = "Apache-2.0"

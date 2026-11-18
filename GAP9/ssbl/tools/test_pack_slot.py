@@ -474,3 +474,36 @@ def test_layout_has_the_readfs_placeholder():
     # the slots stay where gap9_slot.h says: the placeholder is paid for by the padding of the volume table
     names = [sec["name"] for sec in sections]
     assert names.index("readfs_mram") < names.index("checkpoint") < names.index("slot_a") < names.index("slot_b")
+
+
+# The boot area of the A/B layout, in bytes: the sections that the layout sizes (the SSBL, the partition table, the
+# volume table that pads the area, the readfs placeholder) add up to this. The FSBL and the meta table, which gapy sizes
+# itself, take the rest of the 64 KiB. A change of one section (a bigger SSBL) has to change another by the same amount.
+BOOT_AREA_FIXED_SECTIONS = 61840
+
+
+def test_layout_boot_area_and_slot_offsets_follow_the_header():
+    """The sum of the fixed boot sections and the offsets of the checkpoint and the slots are those of gap9_slot.h. The
+    individual sizes are free (the SSBL grows, the volume table padding shrinks) as long as the sum stays."""
+    header = HEADER.read_text()
+
+    def define(name: str) -> int:
+        return ch.read_define(header, name)
+
+    sections = json.loads((SDK / "GAP9/layouts/sensei_ab.json").read_text())["flashes"][0]["sections"]
+    size = {sec["name"]: sec["properties"]["size"] for sec in sections if "size" in sec["properties"]}
+    fixed = ("ssbl", "partition_table", "volume_table", "readfs_mram")
+    assert sum(size[n] for n in fixed) == BOOT_AREA_FIXED_SECTIONS
+    assert BOOT_AREA_FIXED_SECTIONS < define("SENSEI_G9_BOOT_SIZE")  # room left for the FSBL and the meta table
+    # order in the layout: boot area, checkpoint, slot A, slot B (gapy places the sections one after the other)
+    names = [sec["name"] for sec in sections]
+    assert names.index("readfs_mram") < names.index("checkpoint") < names.index("slot_a") < names.index("slot_b")
+    assert names[-1] == "slot_b"
+    # offsets of the header: the boot area ends where the checkpoint starts, the slots follow, slot B ends the MRAM
+    assert define("SENSEI_G9_CKPT_OFF") == define("SENSEI_G9_BOOT_SIZE")
+    assert define("SENSEI_G9_SLOT_A_OFF") == define("SENSEI_G9_CKPT_OFF") + define("SENSEI_G9_CKPT_SIZE")
+    assert define("SENSEI_G9_SLOT_B_OFF") == define("SENSEI_G9_SLOT_A_OFF") + define("SENSEI_G9_SLOT_SIZE")
+    assert define("SENSEI_G9_MRAM_SIZE") == define("SENSEI_G9_SLOT_B_OFF") + define("SENSEI_G9_SLOT_SIZE")
+    # the sizes of the layout are those of the header
+    assert size["checkpoint"] == define("SENSEI_G9_CKPT_SIZE")
+    assert size["slot_a"] == size["slot_b"] == define("SENSEI_G9_SLOT_SIZE")

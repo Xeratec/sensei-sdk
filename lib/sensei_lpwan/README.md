@@ -62,7 +62,7 @@ nRF5340 (master)                          nRF9151 (slave)
 - `sensei_lpwan_radio_send_ex(radio, chunk, len, last, done, user)`: like `radio_send` and says if the chunk is the last of its
   message. See "LTE: RAI, the answer of the server" below.
 - `sensei_lpwan_send_attempts()`: inside `done()`, `TxDone.attempts` of the send: how often the shield transmitted the chunk (LoRa:
-  NbTrans, one more for a confirmed uplink without ack, `lpwan_lora_tx_attempts()`; the LR1121 does not count its frames, so this
+  NbTrans, one more for a confirmed uplink without ack, 0 for an unconfirmed uplink with TX_DONE status NOT_SENT, `lpwan_lora_tx_done_attempts()`; the LR1121 does not count its frames, so this
   is the model of the time estimate, a lower bound for an acknowledged uplink; LTE: the datagrams). 0: nothing was sent, or the send
   ended without a result (timeout, lost link), or an older shield. A charge counter counts this per attempt, not once per `send()`.
 - `sensei_lpwan_send_unconfirmed()`: inside `done()`, true if the chunk went out but the answer of the server did not come.

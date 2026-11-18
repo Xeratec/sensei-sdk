@@ -45,8 +45,8 @@ struct sensei_button {
 /** @brief Result of a key-up. */
 enum sensei_button_press {
   SENSEI_BUTTON_NONE,  /**< no key-down before: the edge is ignored */
-  SENSEI_BUTTON_SHORT, /**< pressed for long_ms or less */
-  SENSEI_BUTTON_LONG,  /**< pressed for more than long_ms */
+  SENSEI_BUTTON_SHORT, /**< pressed for long_ms or less (or a stale key-down, see sensei_button_up()) */
+  SENSEI_BUTTON_LONG,  /**< pressed for more than long_ms and not more than max_ms */
 };
 
 /** @brief Key-down. A second key-down without a key-up replaces the first time (its key-up was missed). */
@@ -54,8 +54,9 @@ void sensei_button_down(struct sensei_button *b, uint32_t now_ms);
 
 /** @brief Key-up. Returns what the press was, and clears the state. Presses are measured with a signed 32-bit
  * difference of the times: they wrap after 49 days, a press must be shorter than 24 days, and a key-up that is
- * earlier than the key-down is a short press. */
-enum sensei_button_press sensei_button_up(struct sensei_button *b, uint32_t now_ms, uint32_t long_ms);
+ * earlier than the key-down is a short press. A press longer than max_ms (0: no limit) cannot be real, its key-up was
+ * lost and this edge belongs to something else: it is a short press, never a long one. */
+enum sensei_button_press sensei_button_up(struct sensei_button *b, uint32_t now_ms, uint32_t long_ms, uint32_t max_ms);
 
 #ifdef __cplusplus
 }

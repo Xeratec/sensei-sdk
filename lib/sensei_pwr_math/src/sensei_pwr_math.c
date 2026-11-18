@@ -49,7 +49,7 @@ void sensei_button_down(struct sensei_button *b, uint32_t now_ms) {
   b->down_ms = now_ms;
 }
 
-enum sensei_button_press sensei_button_up(struct sensei_button *b, uint32_t now_ms, uint32_t long_ms) {
+enum sensei_button_press sensei_button_up(struct sensei_button *b, uint32_t now_ms, uint32_t long_ms, uint32_t max_ms) {
   if (!b->pressed) {
     return SENSEI_BUTTON_NONE;
   }
@@ -57,5 +57,8 @@ enum sensei_button_press sensei_button_up(struct sensei_button *b, uint32_t now_
   /* A key-up before the key-down time belongs to an older press (key-up read late): short. */
   int32_t held_ms = (int32_t)(now_ms - b->down_ms);
 
-  return held_ms > 0 && (uint32_t)held_ms > long_ms ? SENSEI_BUTTON_LONG : SENSEI_BUTTON_SHORT;
+  if (held_ms <= 0 || (uint32_t)held_ms <= long_ms || (max_ms != 0 && (uint32_t)held_ms > max_ms)) {
+    return SENSEI_BUTTON_SHORT;
+  }
+  return SENSEI_BUTTON_LONG;
 }

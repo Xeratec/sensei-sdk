@@ -55,3 +55,17 @@ $ make format
 $ make clean
 $ bear -- make
 ```
+
+## Origin and local patches (SENSEI)
+
+Source: the MAX77654 driver by Philipp Schilk (PBL, D-ITET, ETH Zurich), Apache-2.0 (header of `src/max77654.c`,
+SPDX tag in the files). It is used here by `NRF/system/pwr`. Local fixes, found by the `NRF/tests/pwr` tests and
+checked against the MAX77654 data sheet (CNFG_CHG_A 0x20, ERCFLAG 0x05):
+
+- `max77654_config_charger()`: `th_cool` was written to THM_COLD and `th_cold` to THM_COOL (swapped). The default
+  config sets both to the same register value, so only a changed threshold showed it.
+- `max77654_get_erc_flags()`: `wdt_off` was never set, `wdt_rst` was assigned twice (the second time with the WDT_OFF
+  bit).
+
+Test: `NRF/tests/pwr` (`test_60_charger_thermistor_thresholds_go_to_their_fields`,
+`test_61_erc_flags_wdt_rst_and_wdt_off_are_separate`).

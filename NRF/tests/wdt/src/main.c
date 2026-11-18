@@ -10,10 +10,10 @@
  * and the feed only follow a good installation, and that the feed stops while the application is not healthy. Time
  * is the simulated clock of native_sim.
  *
- * sensei_wdt_start() keeps a delayable work item in static memory and initialises it on every call. A second
- * start while the first one still runs would corrupt the timer list, so each test gets its own work queue and
- * stops it afterwards (the pending timer then finds a stopped queue and the item is idle again). The last test
- * uses the system work queue (wq = NULL) and leaves it running. */
+ * sensei_wdt_start() keeps a delayable work item in static memory. A second start while the loop runs returns
+ * -EALREADY (test_08). The loop only ends in a test: each test gets its own work queue and stops it afterwards (the
+ * pending timer then finds a stopped queue and the item is idle again). The last test uses the system work queue
+ * (wq = NULL) and leaves it running. */
 
 #include <zephyr/device.h>
 #include <zephyr/drivers/watchdog.h>
@@ -212,15 +212,53 @@ ZTEST(wdt, test_06_not_healthy_is_not_fed) {
 ZTEST(wdt, test_07_feed_error_does_not_stop_the_loop) {
   fake_feed_fake.custom_fake = NULL;
   fake_feed_fake.return_val = -EAGAIN;
+  uint32_t errors = sensei_wdt_feed_errors();
+
   zassert_ok(sensei_wdt_start(CONFIG_SENSEI_WDT_TIMEOUT_S, healthy_cb, &wq));
   k_sleep(K_MSEC(FEED_MS * 2 + 100));
   zassert_equal(fake_feed_fake.call_count, 3, "it tries again every period");
+  zassert_equal(sensei_wdt_feed_errors() - errors, 3, "every failed feed is counted");
+}
+
+ZTEST(wdt, test_08_second_start_is_refused_and_changes_nothing) {
+  zassert_ok(sensei_wdt_start(42, healthy_cb, &wq));
+  k_sleep(K_MSEC(100));
+  zassert_equal(fake_feed_fake.call_count, 1);
+
+  /* other timeout, no check, system queue: all ignored */
+  zassert_equal(sensei_wdt_start(99, NULL, NULL), -EALREADY);
+  zassert_equal(sensei_wdt_start(42, healthy_cb, &wq), -EALREADY);
+  zassert_equal(fake_install_fake.call_count, 1, "not installed again");
+  zassert_equal(fake_setup_fake.call_count, 1);
+  zassert_equal(installed.window.max, 42000, "the first timeout stays");
+
+  /* the loop is the first one, undisturbed: one feed per period, through the first callback */
+  k_sleep(K_MSEC(FEED_MS * 2));
+  zassert_equal(fake_feed_fake.call_count, 3);
+  zassert_equal(health_calls, 3);
+}
+
+ZTEST(wdt, test_09_timeout_must_be_longer_than_the_feed_period) {
+  uint32_t period_s = FEED_MS / 1000;
+
+  zassert_equal(sensei_wdt_start(0, healthy_cb, &wq), -EINVAL);
+  zassert_equal(sensei_wdt_start(period_s, healthy_cb, &wq), -EINVAL, "equal to the period");
+  zassert_equal(sensei_wdt_start(UINT32_MAX, healthy_cb, &wq), -EINVAL, "milliseconds overflow");
+  zassert_equal(fake_install_fake.call_count, 0, "nothing is installed");
+  k_sleep(K_MSEC(FEED_MS * 2));
+  zassert_equal(fake_feed_fake.call_count, 0);
+  /* one second more is enough, and a refused call does not block a good one */
+  zassert_ok(sensei_wdt_start(period_s + 1, healthy_cb, &wq));
+  zassert_equal(installed.window.max, (period_s + 1) * 1000);
 }
 
 /* The system work queue and no check: always fed. Last test, it cannot be stopped. */
 ZTEST(wdt, test_99_system_work_queue_always_feeds) {
+  uint32_t errors = sensei_wdt_feed_errors();
+
   zassert_ok(sensei_wdt_start(CONFIG_SENSEI_WDT_TIMEOUT_S, NULL, NULL));
   k_sleep(K_MSEC(FEED_MS * 2 + 100));
   zassert_equal(fake_feed_fake.call_count, 3);
   zassert_equal(health_calls, 0);
+  zassert_equal(sensei_wdt_feed_errors(), errors, "no feed failed");
 }

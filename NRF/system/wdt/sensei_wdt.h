@@ -28,12 +28,18 @@ extern "C" {
  * CONFIG_SENSEI_WDT_FEED_PERIOD_MS, but only if healthy() returns true (NULL: always). The SoC resets when the
  * feed stops. The watchdog pauses while a debugger halts the CPU.
  *
- * @param timeout_s Timeout in seconds. Must be longer than the feed period.
+ * A second call while the feed loop runs does nothing and returns -EALREADY: the first timeout and callback stay.
+ *
+ * @param timeout_s Timeout in seconds. Must be longer than the feed period (checked here).
  * @param healthy   Called from the work item. May be NULL.
  * @param wq        Work queue that runs the feed (NULL: the system work queue).
- * @return 0, or a negative errno if the watchdog is not ready or the setup fails.
+ * @return 0, -EINVAL if timeout_s is 0 or not longer than the feed period, -EALREADY if already started, -ENODEV if
+ *         the watchdog is not ready, -EIO if install or setup fails.
  */
 int sensei_wdt_start(uint32_t timeout_s, bool (*healthy)(void), struct k_work_q *wq);
+
+/** Number of failed wdt_feed() calls since boot. The feed loop goes on after an error. */
+uint32_t sensei_wdt_feed_errors(void);
 
 #ifdef __cplusplus
 }

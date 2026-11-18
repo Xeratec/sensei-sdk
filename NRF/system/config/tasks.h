@@ -51,4 +51,10 @@
 #ifndef THREAD_PWR_SOFT_RESET_LATENCY_MS
 #define THREAD_PWR_SOFT_RESET_LATENCY_MS 2000
 #endif
+
+/** Longest press that counts. The PMIC resets itself after 8 s or 16 s of nEN held (manual reset), so a key-down
+ * that is older is a lost key-up and its press is ignored. */
+#ifndef THREAD_PWR_BUTTON_MAX_MS
+#define THREAD_PWR_BUTTON_MAX_MS 20000
+#endif
 #endif // TASKS_H_

@@ -86,10 +86,12 @@ static struct gpio_callback softRst_int_cb;
 static void softRst_int_cb_handler(const struct device *port, struct gpio_callback *cb, gpio_port_pins_t pins);
 
 // Button: key-down is the nEN falling edge (flag read from the PMIC), key-up is the Soft_nRST edge. The interrupt
-// handlers only store a time and wake the thread. pmic_irq_ms is the time of the last PMIC interrupt, which is
-// the time of the key-down when the flags say nEN fell.
+// handlers only store a time and wake the thread. pmic_irq_ms is the time of the last PMIC interrupt and
+// pmic_irq_fresh says that one came since the flags were last read. Only then is it the time of a key-down that
+// the flags report; a flag read without a new interrupt (pwr_refresh(), the periodic pass) takes the time of the read.
 static struct sensei_button button;
 static volatile uint32_t pmic_irq_ms;
+static atomic_t pmic_irq_fresh;
 static volatile uint32_t keyup_ms;
 static atomic_t keyup_pending;
 
@@ -141,6 +143,18 @@ int thread_pwr_init() {
   // The button state starts clean; the interrupts are enabled last, after the callbacks:
   memset(&button, 0, sizeof(button));
   atomic_clear(&keyup_pending);
+  atomic_clear(&pmic_irq_fresh);
+
+  // The nIRQ and Soft_nRST lines are inputs. The devicetree flags give the pull (idle level high; both lines are
+  // active low), so no edge comes from the pin being configured.
+  if (!gpio_is_ready_dt(&gpio_pmic_irq) || !gpio_is_ready_dt(&gpio_soft_nrst)) {
+    LOG_ERR("GPIO port of the PMIC lines not ready");
+    return -1;
+  }
+  if (gpio_pin_configure_dt(&gpio_pmic_irq, GPIO_INPUT) < 0 || gpio_pin_configure_dt(&gpio_soft_nrst, GPIO_INPUT) < 0) {
+    LOG_ERR("GPIO input config error!");
+    return -1;
+  }
 
   // Create a callback:
   gpio_init_callback(&pmic_int_cb, pmic_int_cb_handler, BIT(gpio_pmic_irq.pin));
@@ -212,13 +226,21 @@ static void thread_pwr(void *_a, void *_b, void *_c) {
         events = collect_events();
       }
 
-      // nEN pressed (key-down), Soft_nRST edge (key-up). A press longer than 2 seconds switches off and reboots:
-      if (pmic.flags.nen_f) {
-        sensei_button_down(&button, pmic_irq_ms);
+      // nEN pressed (key-down), Soft_nRST edge (key-up). A press longer than 2 seconds switches off and reboots.
+      // The key-down time is the interrupt that came with the flag. Without a new interrupt it is the time of this
+      // read, which is later than the edge, so the press can only look shorter, never longer:
+      if (flags_valid) {
+        uint32_t irq_ms = pmic_irq_ms;
+        bool irq_fresh = atomic_set(&pmic_irq_fresh, 0) != 0;
+
+        if (pmic.flags.nen_f) {
+          sensei_button_down(&button, irq_fresh ? irq_ms : k_uptime_get_32());
+        }
       }
       // Only after a good flag read, so that a key-down in the flags is seen before its key-up:
       if (flags_valid && atomic_cas(&keyup_pending, 1, 0)) {
-        if (sensei_button_up(&button, keyup_ms, THREAD_PWR_SOFT_RESET_LATENCY_MS) == SENSEI_BUTTON_LONG) {
+        if (sensei_button_up(&button, keyup_ms, THREAD_PWR_SOFT_RESET_LATENCY_MS, THREAD_PWR_BUTTON_MAX_MS) ==
+            SENSEI_BUTTON_LONG) {
           LOG_INF("Button pressed for more than 2 seconds");
           pwr_off_and_reboot();
         }
@@ -255,6 +277,7 @@ static void thread_pwr(void *_a, void *_b, void *_c) {
 static void pmic_int_cb_handler(const struct device *port, struct gpio_callback *cb, gpio_port_pins_t pins) {
   LOG_DBG("PMIC interrupt!");
   pmic_irq_ms = k_uptime_get_32();
+  atomic_set(&pmic_irq_fresh, 1);
   k_sem_give(&pmic_update_sem);
 }
 

@@ -34,6 +34,7 @@
 #include <zephyr/ztest.h>
 
 #include "bsp/pwr_bsp.h"
+#include "config/tasks.h"
 #include "emul_max77654.h"
 #include "max77654.h"
 #include "max77654_reg.h"
@@ -204,6 +205,19 @@ ZTEST_SUITE(pwr, NULL, NULL, NULL, NULL, NULL);
 
 #if defined(CONFIG_SENSEI_TEST_NORMAL) || defined(CONFIG_SENSEI_TEST_BOOT_FAIL)
 
+/* The power module sets up its two input lines itself (input with the pull of the devicetree, idle high, no edge from
+ * the setup). */
+static void check_irq_pins_are_inputs(void) {
+  gpio_flags_t f = 0;
+
+  zassert_ok(gpio_emul_flags_get(irq_pin.port, irq_pin.pin, &f));
+  zassert_true((f & GPIO_INPUT) != 0 && (f & GPIO_PULL_UP) != 0, "nIRQ: input with pull-up, flags 0x%x", f);
+  zassert_equal(gpio_pin_get_raw(irq_pin.port, irq_pin.pin), 1, "nIRQ idles high");
+  zassert_ok(gpio_emul_flags_get(soft_nrst_pin.port, soft_nrst_pin.pin, &f));
+  zassert_true((f & GPIO_INPUT) != 0 && (f & GPIO_PULL_UP) != 0, "Soft_nRST: input with pull-up, flags 0x%x", f);
+  zassert_equal(gpio_pin_get_raw(soft_nrst_pin.port, soft_nrst_pin.pin), 1, "Soft_nRST idles high");
+}
+
 /* ---- the PMIC at boot: the first PMIC access and its effects ---- */
 
 static void check_rails_on(const int sbb[3], const int ldo[2]) {
@@ -270,16 +284,7 @@ ZTEST(pwr, test_05_battery_thresholds_follow_the_battery_choice) {
 
 /* ---- pwr_init() ---- */
 
-static void idle_irq_pins(void) {
-  /* the board pulls both up; the power module only sets their interrupts */
-  zassert_ok(gpio_pin_configure_dt(&irq_pin, GPIO_INPUT));
-  zassert_ok(gpio_pin_configure_dt(&soft_nrst_pin, GPIO_INPUT));
-  zassert_ok(gpio_emul_input_set(gpio0, PIN_IRQ, 1));
-  zassert_ok(gpio_emul_input_set(gpio0, PIN_SOFT_NRST, 1));
-}
-
 ZTEST(pwr, test_10_init_fails_when_the_board_hook_fails) {
-  idle_irq_pins();
   set_battery_mv(OK_MV + 100);
   pwr_bsp_init_fake.return_val = -1;
   zassert_equal(pwr_init(), -1);
@@ -302,6 +307,7 @@ ZTEST(pwr, test_11_init_reads_the_battery_and_does_not_cycle_the_rails_again) {
   zassert_equal(pwr_bsp_init_fake.call_count, 2);
   zassert_equal(atomic_get(&pwr_is_initialised), 1);
   zassert_equal(e->resets, resets, "the boot hook did the reset; pwr_init() does not cycle the rails");
+  check_irq_pins_are_inputs();
   zassert_within(pwr_bat_mV(), OK_MV + 100, 15);
   zassert_equal(pwr_get_status(&(struct pwr_status){0}), -EAGAIN, "the power thread has not read the PMIC yet");
 }
@@ -742,6 +748,85 @@ ZTEST(pwr, test_51_key_up_is_handled_only_after_a_good_flag_read) {
   zassert_equal(reboots, 3, "a key-up with no key-down is ignored");
 }
 
+ZTEST(pwr, test_52_key_down_flag_read_without_a_new_interrupt_takes_the_time_of_the_read) {
+  /* An unrelated PMIC interrupt: it sets the interrupt time. */
+  irq_falling_edge();
+  k_sleep(K_MSEC(THREAD_PASS_MS));
+  k_sleep(K_SECONDS(5));
+  /* The nEN flag is read on a refresh, with no interrupt of its own (as after pwr_refresh() or on the 20 s pass).
+   * It must not take the 5 s old interrupt as the time of the key-down. */
+  pmic_emul_raise(MAX77654__REG_INT_GLBL0__FIELD_nEN_F, 0, 0);
+  pwr_refresh();
+  k_sleep(K_MSEC(THREAD_PASS_MS));
+  zassert_false(pmic_emul_pending(), "the flag was read");
+  soft_nrst_release(); /* about 0.5 s after the flag was read */
+  k_sleep(K_MSEC(NO_REBOOT_MS));
+  zassert_equal(reboots, 3, "a short press, not 5 s from a stale interrupt time");
+}
+
+ZTEST(pwr, test_53_key_up_of_a_press_older_than_any_real_one_is_ignored) {
+  /* A key-down whose key-up was lost, then a bare edge on Soft_nRST long after. The PMIC resets itself after 16 s of
+   * nEN, so this was no press. */
+  pmic_emul_raise(MAX77654__REG_INT_GLBL0__FIELD_nEN_F, 0, 0);
+  irq_falling_edge();
+  k_sleep(K_SECONDS(THREAD_PWR_BUTTON_MAX_MS / 1000 + 5));
+  soft_nrst_release();
+  k_sleep(K_MSEC(NO_REBOOT_MS));
+  zassert_equal(reboots, 3, "no power-off for a lost key-up");
+}
+
+/* ---- third-party driver (NRF/system/third_party/max77654): register fields ---- */
+
+ZTEST(pwr, test_60_charger_thermistor_thresholds_go_to_their_fields) {
+  struct max77654_h *h = pwr_pmic();
+  struct max77654_conf saved = h->conf;
+
+  /* Distinct values in all four fields (the defaults are not: cool and cold are both 0b11). */
+  h->conf.th_hot = MAX77654_THM_HOT_0V367;   /* 0b01 */
+  h->conf.th_warm = MAX77654_THM_WARM_0V411; /* 0b10 */
+  h->conf.th_cool = MAX77654_THM_COOL_0V923; /* 0b00 */
+  h->conf.th_cold = MAX77654_THM_COLD_0V867; /* 0b11 */
+  zassert_ok(k_mutex_lock(&pwr_mutex, K_SECONDS(1)));
+  zassert_equal(max77654_config_charger(h), E_MAX77654_SUCCESS);
+  k_mutex_unlock(&pwr_mutex);
+  /* CNFG_CHG_A: THM_HOT[7:6] THM_WARM[5:4] THM_COOL[3:2] THM_COLD[1:0] (data sheet, register 0x20) */
+  zassert_equal(pmic_emul_reg(MAX77654__REG_CNFG_CHG_A), 0x63, "CNFG_CHG_A 0x%02x",
+                pmic_emul_reg(MAX77654__REG_CNFG_CHG_A));
+
+  h->conf = saved;
+  zassert_ok(k_mutex_lock(&pwr_mutex, K_SECONDS(1)));
+  zassert_equal(max77654_config_charger(h), E_MAX77654_SUCCESS);
+  k_mutex_unlock(&pwr_mutex);
+}
+
+ZTEST(pwr, test_61_erc_flags_wdt_rst_and_wdt_off_are_separate) {
+  struct max77654_erc f;
+  const struct {
+    uint8_t reg;
+    bool rst, off;
+  } cases[] = {
+      {0x00, false, false},
+      {MAX77654__REG_ERC_FLAG__FIELD_WDT_RST, true, false},
+      {MAX77654__REG_ERC_FLAG__FIELD_WDT_OFF, false, true},
+      {MAX77654__REG_ERC_FLAG__FIELD_WDT_RST | MAX77654__REG_ERC_FLAG__FIELD_WDT_OFF, true, true},
+  };
+
+  zassert_ok(k_mutex_lock(&pwr_mutex, K_SECONDS(1)));
+  for (size_t i = 0; i < ARRAY_SIZE(cases); i++) {
+    pmic_emul_set_reg(MAX77654__REG_ERC_FLAG, cases[i].reg);
+    memset(&f, 0, sizeof(f));
+    zassert_equal(max77654_get_erc_flags(pwr_pmic(), &f), E_MAX77654_SUCCESS);
+    zassert_equal(f.wdt_rst, cases[i].rst, "ERCFLAG 0x%02x: wdt_rst", cases[i].reg);
+    zassert_equal(f.wdt_off, cases[i].off, "ERCFLAG 0x%02x: wdt_off", cases[i].reg);
+  }
+  /* the other flags keep their bits */
+  pmic_emul_set_reg(MAX77654__REG_ERC_FLAG,
+                    MAX77654__REG_ERC_FLAG__FIELD_SFT_CRST_F | MAX77654__REG_ERC_FLAG__FIELD_TOVLD);
+  zassert_equal(max77654_get_erc_flags(pwr_pmic(), &f), E_MAX77654_SUCCESS);
+  zassert_true(f.sft_crst_f && f.tovld && !f.wdt_rst && !f.wdt_off && !f.mrst);
+  k_mutex_unlock(&pwr_mutex);
+}
+
 /* Last: the power thread parks in the reset. */
 ZTEST(pwr, test_99_long_press_powers_off_and_reboots) {
   zassert_ok(gpio_pin_set_dt(&led_pwr, 1)); /* the earlier power-off tests switched it off */
@@ -808,10 +893,9 @@ ZTEST(pwr, test_04_init_brings_the_pmic_up_when_it_answers) {
 
   e->cid = 0x02;
   pwr_bsp_init_fake.return_val = 0;
-  zassert_equal(gpio_pin_configure_dt(&irq_pin, GPIO_INPUT), 0);
-  zassert_equal(gpio_pin_configure_dt(&soft_nrst_pin, GPIO_INPUT), 0);
   set_battery_mv(OK_MV + 100);
   zassert_ok(pwr_init());
+  check_irq_pins_are_inputs();
   zassert_equal(e->resets, 2);
   check_rails_on((int[]){pmic_emul_sbb_mv(0), pmic_emul_sbb_mv(1), pmic_emul_sbb_mv(2)},
                  (int[]){pmic_emul_ldo_mv(0), pmic_emul_ldo_mv(1)});

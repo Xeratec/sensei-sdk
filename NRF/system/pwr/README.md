@@ -84,6 +84,15 @@ key-down is ignored, and a new key-down replaces an older one (its key-up was mi
 after a good flag read. A press longer than 2 s (`THREAD_PWR_SOFT_RESET_LATENCY_MS`) switches the rails off and
 reboots.
 
+The key-down time is the time of the PMIC interrupt that came with the flag. A flag read without a new interrupt
+(`pwr_refresh()`, the 20 s pass) uses the time of the read, so the press can only look shorter. A key-down older than
+`THREAD_PWR_BUTTON_MAX_MS` (20 s; the PMIC resets itself after 8 or 16 s of nEN) is a lost key-up: the next key-up is not
+a long press.
+
+The nIRQ and Soft_nRST lines (`gpio_pmic_irq`, `gpio_soft_nrst`) are set up by `pwr_init()` as inputs with the
+devicetree flags: active low, internal pull-up (idle high; in case the board has no external one). Untested on hardware
+(T4.8 of the node repo).
+
 ## Tests
 
 Zephyr tests on native_sim (`NRF/tests/pwr`, `pwr_check`, `pwr_ram`; see `NRF/tests/README.md`). `pwr` runs this module
@@ -91,4 +100,6 @@ with the real MAX77654 driver and BSP on an I2C emulator of the PMIC, the GPIO e
 (order, wait after the reset, rails, settle time, retry in `pwr_init()`), charger and thresholds per battery choice,
 events and status, battery levels, failed PMIC reads, the periodic work, power-off and the button. `pwr_check` runs
 `sensei_pwr_check_idle()` on test devices, `pwr_ram` the size that `sensei_pwr_ram_powerdown()` reports.
-Not tested: the real PMIC (the emulator follows the driver's register map), `pwr_ram_boot.c` and the RAM switches.
+Not tested: the real PMIC (the emulator follows the driver's register map), the nEN edge and PMIC interrupt timing,
+`pwr_ram_boot.c` and the RAM switches. The patched MAX77654 driver is checked here too (thermistor thresholds, ERC flags,
+see `NRF/system/third_party/max77654/README.md`).

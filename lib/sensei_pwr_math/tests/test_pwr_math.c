@@ -53,39 +53,50 @@ static void test_button(void) {
 
   memset(&b, 0, sizeof(b));
   /* a key-up without a key-down is ignored (this rebooted the node after a short press) */
-  CHECK(sensei_button_up(&b, 50000, 2000) == SENSEI_BUTTON_NONE);
+  CHECK(sensei_button_up(&b, 50000, 2000, 0) == SENSEI_BUTTON_NONE);
   CHECK(!b.pressed);
 
   /* short press */
   sensei_button_down(&b, 10000);
   CHECK(b.pressed);
-  CHECK(sensei_button_up(&b, 10150, 2000) == SENSEI_BUTTON_SHORT);
+  CHECK(sensei_button_up(&b, 10150, 2000, 0) == SENSEI_BUTTON_SHORT);
   CHECK(!b.pressed);
-  CHECK(sensei_button_up(&b, 10200, 2000) == SENSEI_BUTTON_NONE); /* bounce on release */
+  CHECK(sensei_button_up(&b, 10200, 2000, 0) == SENSEI_BUTTON_NONE); /* bounce on release */
 
   /* long press: more than the limit */
   sensei_button_down(&b, 20000);
-  CHECK(sensei_button_up(&b, 22000, 2000) == SENSEI_BUTTON_SHORT); /* exactly the limit is still short */
+  CHECK(sensei_button_up(&b, 22000, 2000, 0) == SENSEI_BUTTON_SHORT); /* exactly the limit is still short */
   sensei_button_down(&b, 20000);
-  CHECK(sensei_button_up(&b, 22001, 2000) == SENSEI_BUTTON_LONG);
+  CHECK(sensei_button_up(&b, 22001, 2000, 0) == SENSEI_BUTTON_LONG);
 
   /* a missed key-up: the next key-down replaces the old time, so a short press stays short (E8) */
   sensei_button_down(&b, 30000);
   sensei_button_down(&b, 90000);
-  CHECK(sensei_button_up(&b, 90150, 2000) == SENSEI_BUTTON_SHORT);
+  CHECK(sensei_button_up(&b, 90150, 2000, 0) == SENSEI_BUTTON_SHORT);
   sensei_button_down(&b, 30000);
   sensei_button_down(&b, 31500);
-  CHECK(sensei_button_up(&b, 33600, 2000) == SENSEI_BUTTON_LONG);
+  CHECK(sensei_button_up(&b, 33600, 2000, 0) == SENSEI_BUTTON_LONG);
 
   /* a key-up that is older than the key-down (read late) is never long */
   sensei_button_down(&b, 50000);
-  CHECK(sensei_button_up(&b, 49000, 2000) == SENSEI_BUTTON_SHORT);
+  CHECK(sensei_button_up(&b, 49000, 2000, 0) == SENSEI_BUTTON_SHORT);
 
   /* the millisecond counter wraps */
   sensei_button_down(&b, 0xFFFFFF00u);
-  CHECK(sensei_button_up(&b, 0x00000100u, 2000) == SENSEI_BUTTON_SHORT); /* 512 ms */
+  CHECK(sensei_button_up(&b, 0x00000100u, 2000, 0) == SENSEI_BUTTON_SHORT); /* 512 ms */
   sensei_button_down(&b, 0xFFFFFC00u);
-  CHECK(sensei_button_up(&b, 0x00000C00u, 2000) == SENSEI_BUTTON_LONG); /* 2 s + 1 s */
+  CHECK(sensei_button_up(&b, 0x00000C00u, 2000, 0) == SENSEI_BUTTON_LONG); /* 2 s + 1 s */
+
+  /* a key-down that is older than any real press (its key-up was lost): the next key-up is not a long press */
+  sensei_button_down(&b, 1000);
+  CHECK(sensei_button_up(&b, 1000 + 20001, 2000, 20000) == SENSEI_BUTTON_SHORT);
+  CHECK(!b.pressed);
+  sensei_button_down(&b, 1000);
+  CHECK(sensei_button_up(&b, 1000 + 20000, 2000, 20000) == SENSEI_BUTTON_LONG); /* exactly the limit still counts */
+  sensei_button_down(&b, 1000);
+  CHECK(sensei_button_up(&b, 1000 + 2001, 2000, 20000) == SENSEI_BUTTON_LONG);
+  sensei_button_down(&b, 1000);
+  CHECK(sensei_button_up(&b, 1000 + 20001, 2000, 0) == SENSEI_BUTTON_LONG); /* 0: no limit */
 }
 
 int main(void) {

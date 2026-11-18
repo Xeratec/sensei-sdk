@@ -16,7 +16,7 @@ same code.
   4.2 V Li-ion or LiPo cell.
 - `sensei_button_down()`, `sensei_button_up()`: press detection of the nEN button. A key-up without a key-down is
   ignored, a new key-down replaces an older one (its key-up was missed), a press longer than the limit is
-  `SENSEI_BUTTON_LONG`.
+  `SENSEI_BUTTON_LONG`. A press longer than `max_ms` is a lost key-up, not a long press (short).
 
 ## Use
 

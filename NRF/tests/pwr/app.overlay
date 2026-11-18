@@ -33,10 +33,10 @@
 	sensei_irq: sensei_irq {
 		compatible = "gpio-keys";
 		gpio_pmic_irq: gpio_pmic_irq {
-			gpios = <&gpio0 5 GPIO_ACTIVE_LOW>;
+			gpios = <&gpio0 5 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
 		};
 		gpio_soft_nrst: gpio_soft_nrst {
-			gpios = <&gpio0 6 GPIO_ACTIVE_LOW>;
+			gpios = <&gpio0 6 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
 		};
 	};
 };

@@ -22,12 +22,13 @@
 	sensei_irq: sensei_irq {
 		compatible = "gpio-keys";
 		debounce-interval-ms = <0>;
+		/* Both lines idle high. The internal pull-up is in case the board has none (nIRQ is open drain). */
 		gpio_pmic_irq: gpio_pmic_irq {
-			gpios = <&gpio0 21 GPIO_ACTIVE_LOW>;
+			gpios = <&gpio0 21 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
 			label = "PMIC_nIRQ";
 		};
 		gpio_soft_nrst: gpio_soft_nrst {
-			gpios = <&gpio0 26 GPIO_ACTIVE_LOW>;
+			gpios = <&gpio0 26 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
 			label = "Soft_nRST";
 		};
 	};

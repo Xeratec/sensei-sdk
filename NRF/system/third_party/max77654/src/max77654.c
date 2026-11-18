@@ -191,8 +191,8 @@ max77654_err_t max77654_config_charger(const struct max77654_h *h) {
   uint8_t cnfg_chg_a = 0;
   cnfg_chg_a = REG_FIELD_SET(CNFG_CHG_A, THM_HOT, cnfg_chg_a, h->conf.th_hot);
   cnfg_chg_a = REG_FIELD_SET(CNFG_CHG_A, THM_WARM, cnfg_chg_a, h->conf.th_warm);
-  cnfg_chg_a = REG_FIELD_SET(CNFG_CHG_A, THM_COOL, cnfg_chg_a, h->conf.th_cold);
-  cnfg_chg_a = REG_FIELD_SET(CNFG_CHG_A, THM_COLD, cnfg_chg_a, h->conf.th_cool);
+  cnfg_chg_a = REG_FIELD_SET(CNFG_CHG_A, THM_COOL, cnfg_chg_a, h->conf.th_cool);
+  cnfg_chg_a = REG_FIELD_SET(CNFG_CHG_A, THM_COLD, cnfg_chg_a, h->conf.th_cold);
   err |= h->write_regs(REG(CNFG_CHG_A), 1, &cnfg_chg_a);
   if (err)
     return err;
@@ -563,7 +563,7 @@ max77654_err_t max77654_get_erc_flags(const struct max77654_h *h, struct max7765
     return err;
 
   flags->wdt_rst = REG_FIELD_GET(ERC_FLAG, WDT_RST, ercflag);
-  flags->wdt_rst = REG_FIELD_GET(ERC_FLAG, WDT_OFF, ercflag);
+  flags->wdt_off = REG_FIELD_GET(ERC_FLAG, WDT_OFF, ercflag);
   flags->sft_crst_f = REG_FIELD_GET(ERC_FLAG, SFT_CRST_F, ercflag);
   flags->sft_off_f = REG_FIELD_GET(ERC_FLAG, SFT_OFF_F, ercflag);
   flags->mrst = REG_FIELD_GET(ERC_FLAG, MRST, ercflag);

@@ -72,6 +72,7 @@ static const struct gpio_dt_spec gap9_lines[] = {
     GPIO_DT_SPEC_GET(DT_NODELABEL(gpio_gap9_i2c_ctrl), gpios),
     GPIO_DT_SPEC_GET(DT_NODELABEL(gpio_gap9_spi_ctrl), gpios),
     GPIO_DT_SPEC_GET(DT_NODELABEL(gpio_gap9_shared_ctrl), gpios),
+    GPIO_DT_SPEC_GET(DT_NODELABEL(gpio_gap9_slot_sel), gpios),
 };
 static const struct gpio_dt_spec irq_pin __maybe_unused = GPIO_DT_SPEC_GET(DT_NODELABEL(gpio_pmic_irq), gpios);
 static const struct gpio_dt_spec soft_nrst_pin __maybe_unused = GPIO_DT_SPEC_GET(DT_NODELABEL(gpio_soft_nrst), gpios);

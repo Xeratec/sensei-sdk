@@ -29,6 +29,9 @@
 		gpio_gap9_shared_ctrl: gpio_gap9_shared_ctrl {
 			gpios = <&gpio0 4 GPIO_ACTIVE_HIGH>;
 		};
+		gpio_gap9_slot_sel: gpio_gap9_slot_sel {
+			gpios = <&gpio0 7 GPIO_ACTIVE_HIGH>;
+		};
 	};
 	sensei_irq: sensei_irq {
 		compatible = "gpio-keys";

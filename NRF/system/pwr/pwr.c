@@ -67,7 +67,9 @@ static const struct gpio_dt_spec gap9_lines[] = {
     GPIO_DT_SPEC_GET(DT_NODELABEL(gpio_gap9_i2c_ctrl), gpios),
     GPIO_DT_SPEC_GET(DT_NODELABEL(gpio_gap9_spi_ctrl), gpios),
     GPIO_DT_SPEC_GET(DT_NODELABEL(gpio_gap9_shared_ctrl), gpios),
+#if DT_NODE_EXISTS(DT_NODELABEL(gpio_gap9_slot_sel))
     GPIO_DT_SPEC_GET(DT_NODELABEL(gpio_gap9_slot_sel), gpios),
+#endif
 };
 
 static const struct device *pwr_i2c = DEVICE_DT_GET(DT_ALIAS(i2ca));

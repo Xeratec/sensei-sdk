@@ -83,6 +83,21 @@ long lpwan_sim_file_read(const char *path, void *buf, size_t cap);
 /** Replace the contents of a file (written to a temporary file first). Returns 0 or -1. */
 int lpwan_sim_file_write(const char *path, const void *buf, size_t n);
 
+/**
+ * AES-128 CMAC (RFC 4493) of `len` bytes. Small and slow, for the simulation only (the fake LR1121 and its tests): the
+ * real radio does this in hardware.
+ */
+void lpwan_sim_cmac(const uint8_t key[16], const uint8_t *msg, size_t len, uint8_t mac[16]);
+
+/**
+ * MIC of a LoRaWAN 1.0.x join request: the first 4 bytes of AES-CMAC(AppKey, 0x00 | JoinEUI | DevEUI | DevNonce). On
+ * the air the EUIs and the nonce are little endian; here the EUIs come in the order the radio holds them (most
+ * significant byte first) and are reversed inside. The fake LR1121 sends nonce and MIC to the network server instead
+ * of the AppKey, which can check it against the key it has for the device.
+ */
+void lpwan_sim_join_mic(const uint8_t app_key[16], const uint8_t join_eui[8], const uint8_t dev_eui[8],
+                        uint16_t dev_nonce, uint8_t mic[4]);
+
 #ifdef __cplusplus
 }
 #endif

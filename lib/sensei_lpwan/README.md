@@ -49,13 +49,20 @@ nRF5340 (master)                          nRF9151 (slave)
   min), so the nRF9151 refused it before queueing it. Do not count it as a failure and keep the message.
   `sensei_lpwan_lora_retry_after_ms()` says when it may be tried again; `radio_ready(LORA)` is false until then and
   `on_up` comes when it is over.
-- `sensei_lpwan_lora_provision()`: LoRaWAN keys at run time. They are sent to the shield and dropped from RAM (after
-  three failed tries too: provision again). The shell command puts the keys in the shell history: bench use only.
+- `-ENOTCONN` (from `done()`): the shield restarted or lost its connection. The client connects again and `on_up` follows. Keep
+  the message, count these per message without progress, give up after a few. For LTE start the message again from its first
+  chunk (the new connection is a new socket); for LoRa the chunks sent before are kept by the collector for a while.
+- `sensei_lpwan_lora_provision()`: LoRaWAN keys at run time. It connects LoRa now (it releases another active radio first).
+  The keys are sent to the shield and dropped from RAM (after three failed tries too: provision again).
+  `sensei_lpwan_lora_keys_queue()` only keeps them for the next LoRa connect, without touching the connection: for a node
+  whose radio is not LoRa. The client has no host test for this (it needs Zephyr); untested on hardware. The shell command puts the keys in the shell history: bench use only.
 
 - `sensei_lpwan_radio_send_ex(radio, chunk, len, last, done, user)`: like `radio_send` and says if the chunk is the last of its
   message. See "LTE: RAI, the answer of the server" below.
 - `sensei_lpwan_send_unconfirmed()`: inside `done()`, true if the chunk went out but the answer of the server did not come.
-- `sensei_lpwan_lte_no_answer()`: how many sends got no answer since boot (the node reports it as `Status.lte_no_answer`).
+- `sensei_lpwan_lte_no_answer()`: how many sends the shield sent, waited for the answer and got none, since boot. It counts sends
+  (a last chunk sent again counts twice); a failed send and a shield that did not wait are not counted. The SENSEI IEQ node
+  reports its own count per message as `Status.lte_no_answer`.
 - `sensei_lpwan_lte_link_check()` and `sensei_lpwan_lte_info()`: the connection evaluation (energy estimate, RSRP, coverage
   level) of the LTE modem. See "LTE: connection evaluation".
 - `sensei_lpwan_shield_diag()`: reset cause and fault record of the shield. See "Diagnostics of the shield".
@@ -88,7 +95,7 @@ Whether the network acts on it depends on the operator.
   `done(0)` and `sensei_lpwan_send_unconfirmed()` true inside the callback. The datagram may have arrived (the ack was lost or the
   network was slow), so the app does not resend the chunk at once and does not count the message as delivered; the collector
   stores a repeated message once only within its duplicate window. `TxDone.acked` says the answer came; `sensei lpwan status` and
-  `LpwanStatus.lte_no_answer` count unconfirmed sends. A server that never answers (an older collector, or another one) makes
+  `LpwanStatus.lte_no_answer` count unconfirmed sends (only when `tx_done.ok` and the shield waited). A server that never answers (an older collector, or another one) makes
   every last chunk unconfirmed: use `LTE_RAI_LAST` or `OFF` with it.
 - The modem reports what the network supports (`LTE_LC_EVT_RAI_UPDATE`, `%RAI`): `LpwanStatus.rai_support` and the
   evaluation event. A modem or network without it ignores the option; the shield logs a warning.
@@ -162,8 +169,9 @@ while GAP9 holds the bus and on again after it. Untested on hardware.
   The master keeps an ACK until a frame that carries it has gone out, and does not confirm a message it could not decode.
 - **Shield restart:** the client resets the master's link state when it powers the shield (`lpwan_master_reset`). The
   nRF9151 forgets everything when it restarts: the client then sees `NOT_CONNECTED` for a request its own state allowed,
-  starts again from idle and connects again. A send that meets a restarted shield ends with `-EAGAIN` and the client connects
-  again (`on_up` follows): the app does not count a failure and the message is not held until the next uplink time.
+  starts again from idle and connects again. A send that meets a restarted shield ends with `-ENOTCONN` (not `-EAGAIN`: that is the duty cycle) and the client connects
+  again (`on_up` follows): the message is not held until the next uplink time. The app counts these per message and gives up after a
+  few; for LTE it starts the message again from chunk 0, because the new connection is a new socket.
 - **Lost link:** `SENSEI_LPWAN_LINK_FAILURES` requests (default 3) without an answer, or that many sends without a result,
   power-cycle the shield. A shield that does not answer at power-on is cut and tried again after 15 s. A request
   does not count while GAP9 owns the bus.

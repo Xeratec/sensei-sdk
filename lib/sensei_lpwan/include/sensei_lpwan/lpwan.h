@@ -102,13 +102,21 @@ uint32_t sensei_lpwan_lora_mtu(void);
  * Send one chunk (at most the MTU of the radio). done(err, user) runs on hooks.wq when it is out or
  * failed. Returns -EBUSY while a send is in flight, -EINVAL for a bad length, -EMSGSIZE for a LoRa chunk above the
  * nominal size of the data rate now (it was lowered after the message was chunked), -EAGAIN while LoRa sends are
- * refused for the duty cycle (see below).
+ * refused for the duty cycle or a shield update runs (see below).
  *
  * done(-EMSGSIZE): the chunk does not fit the next LoRa uplink. Read sensei_lpwan_lora_mtu() again; if it is smaller
  * than the chunk, chunk the message again. done(-EAGAIN): the LR1121 would hold the frame back for longer than a send
  * may take (10 min), so the nRF9151 refused it before queueing. Do not count it as a failure: keep the message.
  * on_up(RADIO_LORA) comes when a send may be tried again (sensei_lpwan_lora_retry_after_ms() says when);
  * sensei_lpwan_radio_ready() is false until then.
+ *
+ * done(-ENOTCONN): the shield restarted or lost its connection ("not connected", "not joined"), or its power was cut
+ * with the send in flight. The client connects again (on_up follows). This is not the duty cycle: keep the message, but
+ * count these per message without progress and give up after a few (a shield that resets on every send must not block
+ * the queue). The new connection is a new socket for LTE, so the server does not know the chunks sent before: send the
+ * message again from its first chunk (new message id). For LoRa the network server and the collector keep the chunks
+ * (within the collector's reassembly time), so the message may go on with the refused chunk. -EAGAIN is also given
+ * while an update of the shield holds the link (the same rule for LTE: start the message again).
  *
  * A LoRa chunk can take minutes to go out: the LR1121 holds it back for the duty cycle (277 s after a full chunk at
  * DR0), and repeats it NbTrans times (and once more if confirmed). The nRF9151 estimates the time; done() comes when
@@ -136,13 +144,16 @@ int sensei_lpwan_radio_send_ex(sensei_Radio radio, const uint8_t *chunk, size_t 
 
 /**
  * True if the send whose done() runs now (call it inside the callback) went out but got no answer within the wait
- * (LTE_RAI_ONE_RESP only; see sensei_lpwan_radio_send_ex()). Counted in the shield status (lte_no_answer) and in
- * `sensei lpwan status`. False for every other send and for a send that failed.
+ * (LTE_RAI_ONE_RESP only; see sensei_lpwan_radio_send_ex()). Counted in `sensei lpwan status` ("sent unconfirmed") and
+ * by sensei_lpwan_lte_no_answer(). False for every other send, for a send that failed, and for a shield that did not
+ * wait for an answer.
  */
 bool sensei_lpwan_send_unconfirmed(void);
 
-/** Sends since boot that waited for the answer of the server (LTE_RAI_ONE_RESP) and got none: the count of
- * sensei_lpwan_send_unconfirmed() (and of `lte_no_answer` in the shield status). Safe to call from any thread. */
+/** Sends since boot that the shield sent, waited for the answer of the server (LTE_RAI_ONE_RESP) and got none: the
+ * number of times sensei_lpwan_send_unconfirmed() was true. It counts sends, so a last chunk that the app sends again
+ * after "unconfirmed" counts twice; an app that wants a count per message counts where it gives up (the SENSEI IEQ node
+ * reports its scheduler's count of messages as `Status.lte_no_answer`). Safe to call from any thread. */
 uint32_t sensei_lpwan_lte_no_answer(void);
 
 /** What to do before a data uplink on LTE (from the connection evaluation, %CONEVAL). */
@@ -181,11 +192,21 @@ uint32_t sensei_lpwan_lora_retry_after_ms(void);
  * Provision LoRaWAN keys (from the shell or the host link); never stored in git. The keys are
  * sent to the shield, joined, and then dropped from RAM: the LR1121 keeps them in its own flash,
  * so the nRF5340 stores nothing. They are wiped after the shield took them, or after three failed
- * sends (provision again). Returns 0 if the request was accepted (the result is logged and visible
- * in `sensei lpwan status`), or a negative errno. The shell command echoes the keys into the shell
- * history: bench use only.
+ * sends (provision again). Returns 0 if the keys are queued and the connect is started (the result is logged and
+ * visible in `sensei lpwan status`), or a negative errno. This tears down an active connection of another radio:
+ * on a node whose radio is not LoRa use sensei_lpwan_lora_keys_queue(). The shell command echoes the keys into the
+ * shell history: bench use only.
  */
 int sensei_lpwan_lora_provision(const sensei_LoraProvision *keys);
+
+/**
+ * Keep LoRaWAN keys for the next LoRa connect and do not connect now. For a node whose radio is not LoRa: the LTE
+ * connection stays up and no join is started. The keys go to the shield when LoRa is connected the next time (the
+ * radio setting changed to LoRa, or sensei_lpwan_lora_provision() again) and are wiped as described there. Until
+ * then they stay in RAM, so they are lost at a reset. 0 means queued, not "the shield has them":
+ * `sensei lpwan status` says "LoRaWAN keys waiting" until they are sent. Returns -EINVAL for NULL.
+ */
+int sensei_lpwan_lora_keys_queue(const sensei_LoraProvision *keys);
 
 /**
  * Query the nRF9151 firmware version, blocking up to timeout_ms. Powers the shield for the query.

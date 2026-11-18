@@ -608,7 +608,9 @@ static void op_on_event(void *c, const sensei_LpwanEvent *evt) {
     if (send_radio != sensei_Radio_RADIO_LORA) {
       if (evt->tx_done.acked) {
         lte_acked++;
-      } else if (send_rai == sensei_LteRai_LTE_RAI_ONE_RESP) {
+      } else if (send_unconfirmed) {
+        /* The shield sent the datagram, waited for the answer, and none came. Not a failed send (ok is false), and not
+         * a shield that did not wait (an older app, RAI off, a chunk without the answer key): it sets neither flag. */
         lte_noack++;
       }
     }
@@ -1250,8 +1252,10 @@ static void do_send(void) {
     } else if (res == sensei_LpwanResult_LPWAN_NOT_CONNECTED || res == sensei_LpwanResult_LPWAN_NOT_JOINED) {
       /* The shield restarted (or lost the connection) and request() started the state machine again: connect again and
        * let the app wait for on_up. A failed chunk would only be retried into the same refusal until the retries are
-       * used up, and the message would wait for the next uplink time. */
-      finish_send(-EAGAIN);
+       * used up, and the message would wait for the next uplink time. -ENOTCONN and not -EAGAIN: this is not the duty
+       * cycle. The new connection is a new socket for LTE, so the app must start the message again, and it counts
+       * these (a shield that restarts on every send must not block the queue for ever). */
+      finish_send(-ENOTCONN);
       (void)post(CMD_CONNECT, send_radio, false);
     } else {
       finish_send(-EIO);
@@ -2011,14 +2015,20 @@ int sensei_lpwan_shield_version(sensei_LpwanVersion *out) {
   return ok ? 0 : -ENODATA;
 }
 
-int sensei_lpwan_lora_provision(const sensei_LoraProvision *k) {
+int sensei_lpwan_lora_keys_queue(const sensei_LoraProvision *k) {
   if (k == NULL) {
     return -EINVAL;
   }
   keys = *k;
   keys_tries = 0;
   atomic_set(&keys_pending, 1);
-  return post(CMD_PROVISION, sensei_Radio_RADIO_LORA, false);
+  return 0;
+}
+
+int sensei_lpwan_lora_provision(const sensei_LoraProvision *k) {
+  int err = sensei_lpwan_lora_keys_queue(k);
+
+  return err ? err : post(CMD_PROVISION, sensei_Radio_RADIO_LORA, false);
 }
 
 int sensei_lpwan_cmd_connect(sensei_Radio radio) { return post(CMD_CONNECT, radio, false); }

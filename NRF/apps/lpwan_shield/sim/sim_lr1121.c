@@ -57,7 +57,7 @@ LOG_MODULE_REGISTER(sim_lr1121, CONFIG_LPWAN_SHIELD_LOG_LEVEL);
 #define VERDICT_WAIT_MS 20000u /* longest wait for the answer of the network server */
 #define GPS_TO_UNIX_S 315964800u
 #define GPS_UTC_LEAP_S 18u
-#define NV_MAGIC 0x4C523131u
+#define NV_MAGIC 0x4C523132u
 
 struct lr1121_context lr1121_ctx = {
     .spi_gpio = {.event = GPIO_DT_SPEC_GET(LR_NODE, event_gpios)},
@@ -70,6 +70,7 @@ static struct nv {
   uint8_t dev_eui[8], join_eui[8], nwk_key[16];
   uint8_t joined;
   uint8_t region;
+  uint16_t dev_nonce; /* DevNonce of the next join request (LoRaWAN 1.0.4: counts up, kept over resets) */
   uint32_t fcnt;
 } nv;
 
@@ -170,15 +171,21 @@ static void cancel_all(void) {
 
 static void hex_line(char *out, const uint8_t *p, int n) { sim_hex_encode(p, n, out); }
 
+/* The join request as the air carries it: DevEUI, JoinEUI, DevNonce and the MIC that the AppKey makes (LoRaWAN 1.0.x).
+ * The AppKey itself never leaves the radio; the network server checks the MIC against the key it has for the DevEUI. */
 static void join_send(void) {
-  char deveui[17], joineui[17], key[33];
+  char deveui[17], joineui[17];
+  uint8_t mic[4];
+  uint16_t nonce = nv.dev_nonce++;
 
+  save();
   hex_line(deveui, nv.dev_eui, 8);
   hex_line(joineui, nv.join_eui, 8);
-  hex_line(key, nv.nwk_key, 16);
+  lpwan_sim_join_mic(nv.nwk_key, nv.join_eui, nv.dev_eui, nonce, mic);
   t.verdict = false;
   t.asked_at = k_uptime_get_32();
-  if (!sim_ctl_send("join %s %s %s %u", deveui, joineui, key, (unsigned)nv.region)) {
+  if (!sim_ctl_send("join %s %s %04x %02x%02x%02x%02x %u", deveui, joineui, (unsigned)nonce, mic[0], mic[1], mic[2],
+                    mic[3], (unsigned)nv.region)) {
     LOG_WRN("join: no network server connected");
   }
   schedule(STEP_JOIN_WAIT, JOIN_RX_MS);

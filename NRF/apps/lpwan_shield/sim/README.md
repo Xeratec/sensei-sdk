@@ -42,7 +42,7 @@ zephyr.exe -link_port=7101 -ctl_port=7102 -lr_state=shield.state -rt -rt-ratio=2
 | Option | |
 |---|---|
 | `-link_port=N` | the node connects here (127.0.0.1 only: the link is trusted) |
-| `-ctl_port=N` | control connection of the harness; `-bind=ADDR` is its address (default 127.0.0.1) |
+| `-ctl_port=N` | control connection of the harness; `-bind=ADDR` is its address (default 127.0.0.1). The port has no login: whoever reaches it can reset the shield, inject downlinks and load keys. Keep it on 127.0.0.1. `-bind=0.0.0.0` is for the container of the node simulator only, whose port is published on 127.0.0.1 of the host (`firmware/sim/README.md` of SENSEI IEQ says why that is acceptable) |
 | `-lr_state=FILE` | what the fake LR1121 keeps in its flash (keys, session, counter) |
 | `-rt -rt-ratio=R` | simulated seconds per real second (as for every native_sim); `-no-rt` as fast as possible. The node must run at the same ratio |
 
@@ -58,7 +58,7 @@ Shield to harness:
 
 | Line | |
 |---|---|
-| `join <DevEUI> <JoinEUI> <AppKey> <region>` | a join request (hex) |
+| `join <DevEUI> <JoinEUI> <DevNonce> <MIC> <region>` | a join request (hex). The MIC is the one of a LoRaWAN 1.0.x join request, made with the AppKey the radio holds (`lpwan_sim_join_mic()`); the key itself is not sent. The network server checks it against its own key for the DevEUI, as a real one does, so a wrong AppKey fails the join |
 | `up <fcnt> <port> <confirmed> <dr> <t_ms> <payload hex or ->` | the first transmission of an uplink; `t_ms` is the uptime of the shield |
 | `lte_rai <option>` | the RAI socket option that `lte.c` set (1 no data, 2 last, 3 one response) |
 | `restart <why>` | the process restarts |
@@ -70,7 +70,7 @@ Harness to shield:
 | `lr join accept` or `reject` | the answer to a join request. No answer for 20 s counts as a rejection |
 | `lr rx <ack 0/1> <fport> <payload hex or ->` | the receive windows of that uplink: acknowledged, and the downlink if any. The radio waits for it before TX_DONE (20 s at most) |
 | `lr down <fport> <hex>` | a downlink now, whatever the radio does |
-| `lr keys <DevEUI> <JoinEUI> <AppKey>` | what the radio holds from the factory (the node cannot give keys) |
+| `lr keys <DevEUI> <JoinEUI> <AppKey>` | what the radio holds from the factory: a shortcut for tests that do not provision the keys through the node. The key travels in clear on this connection, so use it on 127.0.0.1 only. The e2e test of SENSEI IEQ gives the keys to the node with `lora_provision` instead |
 | `lr reset` | the LR1121 resets by itself: its volatile state and the frame in flight are gone, the session stays |
 | `lr maxpayload N` / `nbtrans N` / `dr N` / `slow PCT` / `hang 0/1` | the payload the next uplink takes (MAC answers owed, 0: by data rate), NbTrans, data rate, air time stretched, TX_DONE never comes |
 | `modem cover 0/1` | the network is lost or back (registration events) |

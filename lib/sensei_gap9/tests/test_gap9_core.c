@@ -18,7 +18,11 @@
 
 /* ---- the test's job and result: raw structs, no schema ---- */
 
-enum { TK_PLAIN = 1, TK_BUS = 2 }; /* TK_BUS: needs the camera bus, like a detect job */
+enum {
+  TK_PLAIN = 1,
+  TK_BUS = 2,
+  TK_NEW = 3
+}; /* TK_BUS: needs the camera bus, like a detect job; TK_NEW: an update job */
 typedef struct {
   uint32_t seq;
   uint8_t kind;
@@ -201,7 +205,10 @@ static const struct g9_ops ops = {op_power, op_trigger, op_lock,   op_unlock,   
                                   deliver,  op_error,   op_marker, op_reboot_done};
 static const struct g9_cfg cfg = {4000, 3000, 8000, 200, 150, 2000};
 
-static void reset(void) {
+static void reset_with(const struct g9_codec *c);
+static void reset(void) { reset_with(&codec); }
+
+static void reset_with(const struct g9_codec *c) {
   memset(evlog, 0, sizeof(evlog));
   powered = trig = locked = false;
   lock_n = unlock_n = 0;
@@ -212,7 +219,7 @@ static void reset(void) {
   slot_req = 0;
   power_ups = 0;
   memset(&rbk, 0, sizeof(rbk));
-  g9_init(&g, &ops, &codec, &cfg, jobs_pool, &res_buf);
+  g9_init(&g, &ops, c, &cfg, jobs_pool, &res_buf);
 }
 
 /* ---- simulated GAP9 master ---- */
@@ -1285,6 +1292,148 @@ static void test_recovery_reboot_and_reprobe(void) {
   CHECK(ngot == 1 && gots[0].err == -ENOEXEC && g9_recovery(&g, NULL));
 }
 
+/* ---- job protocol majors: the app may be older than the newest the nRF5340 speaks ---- */
+
+static uint32_t t_job_min_major(const void *j) { return ((const tjob *)j)->kind == TK_NEW ? 2 : 0; }
+
+static const struct g9_codec codec_12 = {
+    .job_size = sizeof(tjob),
+    .result_size = sizeof(tres),
+    .encode_job = t_encode,
+    .decode_result = t_decode_result,
+    .job_seq = t_job_seq,
+    .job_set_seq = t_job_set_seq,
+    .result_seq = t_result_seq,
+    .result_err = t_result_err,
+    .job_uses_bus = t_uses_bus,
+    .gap9_major = 2,
+    .gap9_major_min = 1,
+    .job_min_major = t_job_min_major,
+};
+
+static void test_major_range(void) {
+  tjob j = job_forecast();
+  tjob nj = job_forecast();
+  uint32_t major = 0;
+
+  nj.kind = TK_NEW;
+
+  /* an app of major 1: the normal jobs run, the update job fails before it is sent (queued while GAP9 boots) */
+  reset_with(&codec_12);
+  CHECK(!g9_app_major(&g, &major));
+  CHECK(g9_submit(&g, &j, done_cb, NULL) == 0 && g9_submit(&g, &nj, done_cb, NULL) == 0);
+  sim_hello_major(1);
+  CHECK(ngot == 1 && gots[0].err == -EPROTONOSUPPORT && gots[0].final && nerr == 0 && powered);
+  CHECK(g9_app_major(&g, &major) && major == 1);
+  CHECK(gap9_do_job() == 1 && ngot == 2 && gots[1].err == 0);
+  /* ... and refused at once while the app is known to be old */
+  CHECK(g9_submit(&g, &nj, done_cb, NULL) == -EPROTONOSUPPORT);
+  CHECK(g9_submit(&g, &j, done_cb, NULL) == 0);
+  CHECK(gap9_do_job() == 3 && ngot == 3 && gots[2].err == 0);
+
+  /* an app of major 2 runs both */
+  reset_with(&codec_12);
+  g9_submit(&g, &nj, done_cb, NULL);
+  sim_hello_major(2);
+  CHECK(ngot == 0 && g9_app_major(&g, &major) && major == 2);
+  CHECK(gap9_do_job() == 1 && gots[0].err == 0);
+
+  /* outside the range: a mismatch, as before */
+  for (uint32_t m = 0; m < 4; m += 3) {
+    reset_with(&codec_12);
+    g9_submit(&g, &j, done_cb, NULL);
+    sim_hello_major(m);
+    CHECK(!powered && ngot == 1 && gots[0].err == -EPROTO);
+  }
+
+  /* a codec without gap9_major_min takes only gap9_major (every app of the SDK before this field) */
+  reset();
+  g9_submit(&g, &j, done_cb, NULL);
+  sim_hello_major(TEST_GAP9_MAJOR + 1);
+  CHECK(!powered && gots[0].err == -EPROTO);
+}
+
+/* ---- the forced recovery does not outlive its power ---- */
+
+static void test_forced_latch(void) {
+  tjob j = job_forecast();
+  uint32_t reason = 0;
+
+  /* forced: the HELLO is the boot loader's, the session ends, the idle timer powers GAP9 off: the strap went with the
+   * power, the next boot is a normal one, so the app's jobs run again at once (no wait for a re-probe) */
+  rec_reset();
+  g9_hold(&g, true);
+  sim_hello_rec(G9L_RECOVERY_PROTO, G9L_RECOVERY_FORCED);
+  CHECK(g9_recovery(&g, &reason) && reason == G9L_RECOVERY_FORCED);
+  g9_hold(&g, false);
+  CHECK(timer_ms == cfg.idle_off_ms);
+  g9_timer_expired(&g); /* the idle timer set by hold(false) */
+  CHECK(!powered && !g9_recovery(&g, NULL));
+  CHECK(g9_submit(&g, &j, done_cb, NULL) == 0 && powered); /* a normal boot */
+  sim_hello();
+  CHECK(gap9_do_job() == 1 && gots[0].err == 0);
+  g9_shutdown(&g);
+
+  /* a reboot (the forced session's own) from the forced state: the latch goes with the power-off, the new HELLO sets it
+   * again or not */
+  rec_reset();
+  g9_hold(&g, true);
+  sim_hello_rec(G9L_RECOVERY_PROTO, G9L_RECOVERY_FORCED);
+  CHECK(g9_reboot(&g, reboot_cb, NULL) == 0 && !g9_recovery(&g, NULL));
+  g9_timer_expired(&g);
+  sim_hello();
+  CHECK(rbk.err == 0 && !g9_recovery(&g, NULL));
+  g9_shutdown(&g);
+
+  /* a job that times out in a forced session powers GAP9 off: same */
+  rec_reset();
+  g9_hold(&g, true);
+  sim_hello_rec(G9L_RECOVERY_PROTO, G9L_RECOVERY_FORCED);
+  {
+    rjob rj;
+
+    memset(&rj, 0, sizeof(rj));
+    CHECK(g9_submit_recovery(&g, &rj, rdone_cb, NULL) == 0);
+    g9_timer_expired(&g); /* FETCH: GAP9 never takes it */
+    CHECK(ngot == 1 && gots[0].err == -ETIMEDOUT && !g9_recovery(&g, NULL));
+  }
+  g9_shutdown(&g);
+
+  /* both slots failed: the boot loader runs again after any power-off, the latch stays (test_recovery_hello) */
+  rec_reset();
+  g9_hold(&g, true);
+  sim_hello_rec(G9L_RECOVERY_PROTO, G9L_RECOVERY_BOTH_BAD);
+  g9_shutdown(&g);
+  CHECK(g9_recovery(&g, &reason) && reason == G9L_RECOVERY_BOTH_BAD);
+}
+
+/* The look again (re-probe) only while GAP9 is off: a session or a queued job has it on and the latch is true. */
+static void test_reprobe_only_off(void) {
+  tjob j = job_forecast();
+  rjob rj;
+  uint32_t reason = 0;
+
+  memset(&rj, 0, sizeof(rj));
+  rec_reset();
+  g9_hold(&g, true);
+  sim_hello_rec(G9L_RECOVERY_PROTO, G9L_RECOVERY_BOTH_BAD);
+  CHECK(g9_submit_recovery(&g, &rj, rdone_cb, NULL) == 0);
+  g9_reprobe(&g);
+  CHECK(g9_recovery(&g, &reason) && reason == G9L_RECOVERY_BOTH_BAD && powered && power_ups == 1);
+  CHECK(g9_submit(&g, &j, done_cb, NULL) == -ENOEXEC); /* the app's jobs still fail at once */
+  CHECK(gap9_do_rec_job() == 1 && ngot == 1 && gots[0].err == 0);
+  g9_shutdown(&g);
+
+  /* booting (after a reboot request): no look either */
+  rec_reset();
+  g9_hold(&g, true);
+  sim_hello_rec(G9L_RECOVERY_PROTO, G9L_RECOVERY_BOTH_BAD);
+  CHECK(g9_reboot(&g, reboot_cb, NULL) == 0);
+  g9_reprobe(&g); /* in the cycle: nothing */
+  CHECK(!powered && g.state == G9_CYCLE && power_ups == 1);
+  g9_shutdown(&g);
+}
+
 int main(void) {
   test_normal();
   test_result_crc_error();
@@ -1312,6 +1461,9 @@ int main(void) {
   test_hold();
   test_recovery_hello();
   test_recovery_reboot_and_reprobe();
+  test_major_range();
+  test_forced_latch();
+  test_reprobe_only_off();
   printf("%d checks, %d failed\n", checks, fails);
   return fails ? 1 : 0;
 }

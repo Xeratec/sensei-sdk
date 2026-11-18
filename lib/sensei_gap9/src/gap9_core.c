@@ -158,6 +158,9 @@ static void start_boot(struct g9 *g) {
 
 /* GAP9 is off first, then the camera bus goes back to the sensors. */
 static void power_off(struct g9 *g) {
+  if (g->recovery && g->rec_reason == G9L_RECOVERY_FORCED) {
+    g->recovery = false; /* the strap goes with the power: the next boot is a normal one */
+  }
   g->ops->trigger(false);
   g->ops->power(false);
   g->ops->marker(false);
@@ -193,6 +196,24 @@ static void fail_kind(struct g9 *g, bool rec, int err) {
   for (int i = 0; i < G9_QUEUE_DEPTH; i++) {
     if (g->q[i].st != G9E_FREE && g->q[i].rec == rec) {
       fail_entry(g, &g->q[i], err);
+    }
+  }
+}
+
+/* The oldest GAP9 major that can run the job (0: any). */
+static uint32_t job_min_major(const struct g9 *g, const struct g9_entry *e) {
+  const struct g9_codec *c = codec_of(g, e);
+
+  return c->job_min_major != NULL ? c->job_min_major(e->job) : 0;
+}
+
+/* Jobs of the app that the major of this GAP9 cannot run. */
+static void fail_unsupported(struct g9 *g) {
+  for (int i = 0; i < G9_QUEUE_DEPTH; i++) {
+    struct g9_entry *e = &g->q[i];
+
+    if (e->st != G9E_FREE && !e->rec && job_min_major(g, e) > g->version.major) {
+      fail_entry(g, e, -EPROTONOSUPPORT);
     }
   }
 }
@@ -284,6 +305,9 @@ int g9_submit(struct g9 *g, const void *job, g9_done_fn done, void *user) {
   if (g->recovery) {
     return -ENOEXEC; /* the boot loader runs: no job of the app can, and GAP9 is not powered for it */
   }
+  if (g->state == G9_RUN && g->codec->job_min_major != NULL && g->codec->job_min_major(job) > g->version.major) {
+    return -EPROTONOSUPPORT; /* the app that runs is too old for this job (its HELLO is known) */
+  }
   return submit(g, job, done, user, false);
 }
 
@@ -314,12 +338,23 @@ bool g9_recovery(const struct g9 *g, uint32_t *reason) {
   return g->recovery;
 }
 
-void g9_reprobe(struct g9 *g) {
-  g->recovery = false;
-  if (g->state == G9_OFF) {
-    g->boot_retry = true;
-    start_boot(g);
+bool g9_app_major(const struct g9 *g, uint32_t *major) {
+  if (g->recovery || g->version.major == 0) {
+    return false;
   }
+  if (major != NULL) {
+    *major = g->version.major;
+  }
+  return true;
+}
+
+void g9_reprobe(struct g9 *g) {
+  if (g->state != G9_OFF) {
+    return; /* GAP9 is on (a session, a job): the latch is true for it, a power cycle would cut the transfer */
+  }
+  g->recovery = false;
+  g->boot_retry = true;
+  start_boot(g);
 }
 
 void g9_shutdown(struct g9 *g) {
@@ -378,8 +413,9 @@ static bool on_hello(struct g9 *g, const uint8_t *p, size_t len) {
   bool decoded = sensei_decode_Version(p, len, &g->version);
   bool rec = decoded && g->version.major == G9L_RECOVERY_MAJOR && g->rec_codec != NULL &&
              g->version.minor == g->rec_codec->gap9_major;
+  uint32_t lo = g->codec->gap9_major_min != 0 ? g->codec->gap9_major_min : g->codec->gap9_major;
 
-  if (!decoded || (!rec && g->version.major != g->codec->gap9_major)) {
+  if (!decoded || (!rec && (g->version.major < lo || g->version.major > g->codec->gap9_major))) {
     /* GAP9 runs a firmware with other job messages: no job can work. */
     count_error(g);
     power_off(g);
@@ -393,6 +429,9 @@ static bool on_hello(struct g9 *g, const uint8_t *p, size_t len) {
   g->recovery = rec;
   g->rec_reason = rec ? g->version.patch : 0;
   fail_kind(g, !rec, -ENOEXEC);
+  if (!rec) {
+    fail_unsupported(g); /* the jobs that only a newer app runs */
+  }
   if (g->state == G9_RUN) {
     /* GAP9 restarted by itself (watchdog, fault): the job it had is lost. Run it again from the
      * start, unless some of its result frames were delivered already. */

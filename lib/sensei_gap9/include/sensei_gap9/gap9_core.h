@@ -62,10 +62,18 @@ struct g9_codec {
   /** The job needs the shared camera bus: the bus lock is held until GAP9 sends BUSFREE. */
   bool (*job_uses_bus)(const void *job);
   /**
-   * Major version that GAP9 reports in its hello (Version.major) and that these job and result
-   * messages need. Another major: the jobs fail with -EPROTO and GAP9 is powered off.
+   * Newest major version that GAP9 reports in its hello (Version.major) and that these job and result
+   * messages speak. A major outside gap9_major_min ... gap9_major: the jobs fail with -EPROTO and GAP9 is
+   * powered off.
    */
   uint32_t gap9_major;
+  /** Oldest major that is accepted for the jobs without a higher minimum (job_min_major). 0: only gap9_major. */
+  uint32_t gap9_major_min;
+  /**
+   * Oldest GAP9 major that can run this job, or 0 for any accepted major. A job that needs more than the GAP9
+   * reported fails with -EPROTONOSUPPORT, before it is sent. May be NULL (every job runs on every accepted major).
+   */
+  uint32_t (*job_min_major)(const void *job);
 };
 
 struct g9_ops {
@@ -147,8 +155,9 @@ struct g9 {
 void g9_init(struct g9 *g, const struct g9_ops *ops, const struct g9_codec *codec, const struct g9_cfg *cfg, void *jobs,
              void *res);
 
-/** Queue a job (copied). -ENOMEM if the queue is full, -ENOEXEC while GAP9 is in recovery (nothing is powered for it).
- * Starts a boot if GAP9 is off. */
+/** Queue a job (copied). -ENOMEM if the queue is full, -ENOEXEC while GAP9 is in recovery (nothing is powered for it),
+ * -EPROTONOSUPPORT if the app that GAP9 runs is older than the job needs (codec->job_min_major; a job queued while
+ * GAP9 boots fails with it through its callback). Starts a boot if GAP9 is off. */
 int g9_submit(struct g9 *g, const void *job, g9_done_fn done, void *user);
 
 /**
@@ -159,7 +168,9 @@ int g9_submit(struct g9 *g, const void *job, g9_done_fn done, void *user);
  *
  * After a HELLO with major G9L_RECOVERY_MAJOR (and that protocol as minor) the core latches "recovery": the app's jobs
  * fail with -ENOEXEC, at once for new ones, and GAP9 stays as it is; jobs of g9_submit_recovery() run. A reboot
- * callback gets -ENOEXEC with the HELLO. A HELLO of the app clears the latch.
+ * callback gets -ENOEXEC with the HELLO. A HELLO of the app clears the latch, so does a power-off after the forced
+ * recovery (the strap goes with the power: the next boot is a normal one). After "both slots failed" the latch stays
+ * through a power-off: the boot loader runs again.
  */
 int g9_set_recovery(struct g9 *g, const struct g9_codec *rec);
 
@@ -168,11 +179,16 @@ int g9_set_recovery(struct g9 *g, const struct g9_codec *rec);
  * app came up). */
 int g9_submit_recovery(struct g9 *g, const void *job, g9_done_fn done, void *user);
 
+/** The major version of the app that said hello last (not the boot loader's): true if GAP9 said hello since the start
+ * and the last HELLO was the app's. */
+bool g9_app_major(const struct g9 *g, uint32_t *major);
+
 /** True while the latch is set; `reason` (may be NULL) gets G9L_RECOVERY_BOTH_BAD or G9L_RECOVERY_FORCED. */
 bool g9_recovery(const struct g9 *g, uint32_t *reason);
 
-/** Look again: clear the latch and power GAP9 once if it is off (the next HELLO sets it again if it is still in
- * recovery; the idle timer powers GAP9 off after it). The platform calls it every few hours. */
+/** Look again, only while GAP9 is off (a session or a job has GAP9 on, and the latch is true for it): clear the latch
+ * and power GAP9 once (the next HELLO sets it again if it is still in recovery; the idle timer powers GAP9 off after
+ * it). The platform calls it every few hours. */
 void g9_reprobe(struct g9 *g);
 
 /** True if g9_submit() would fail with -ENOMEM. */

@@ -11,7 +11,9 @@ menu "SENSEI SSBL"
     config MANDATORY
         bool
         default y
-        select DRIVER_BOOTLOADER
+        # The loader and the boot safety, not DRIVER_BOOTLOADER: that one also pulls in the old OTA driver and MD5.
+        select DRIVER_PARTITION_APP_BIN
+        select DRIVER_PARTITION_APP_BOOT
         select DRIVER_PARTITION
         select DRIVER_MRAM
         select DRIVER_CRC32

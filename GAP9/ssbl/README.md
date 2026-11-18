@@ -23,7 +23,8 @@ and the launch are the same SDK calls. The partition and volume table, the boot 
      ([`gap9_slot.h`](../../lib/sensei_gap9/include/sensei_gap9/gap9_slot.h), host tested);
    - the app descriptor (area count, no XIP, every section and LZ4 block inside the app, no section beyond the physical L2
      (0x1C190000), over the SSBL or over the hand-off record);
-   - `pi_app_bin_load()` with the CRC32 of every section.
+   - `pi_app_bin_load()` with the CRC32 of every section (gap-sdk skips that check without `CONFIG_DRIVER_CRC32`: the
+     config files set it and `CMakeLists.txt` stops the build if it is missing).
 3. Write the hand-off record: magic, slot, ~slot at `SENSEI_G9_HANDOFF_ADDR` (L2 priv0, 0x1C00FF00,
    [`gap9_slot.h`](../../lib/sensei_gap9/include/sensei_gap9/gap9_slot.h)). It names the slot that started, after any fallback; the app
    reads it at the start of `main()`. L2 shared is no place for it: the runtime powers down banks without allocations.

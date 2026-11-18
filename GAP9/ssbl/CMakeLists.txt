@@ -21,6 +21,14 @@ set(TARGET_NAME "ssbl")
 set(ENV{KCONFIG_CONFIG} "config/sdk_${SENSEI_PLATFORM}.config")
 set(SENSEI_SDK_DIR ${CMAKE_CURRENT_LIST_DIR}/../..)
 
+# pi_app_bin_load() skips the CRC32 check of the sections without CONFIG_DRIVER_CRC32 (gap-sdk bsp/partition/app_bin.c):
+# the SSBL would start a damaged slot. The config file must say y.
+file(STRINGS "${CMAKE_CURRENT_LIST_DIR}/config/sdk_${SENSEI_PLATFORM}.config" _ssbl_crc REGEX "^CONFIG_DRIVER_CRC32=y$")
+if(NOT _ssbl_crc)
+    message(FATAL_ERROR "config/sdk_${SENSEI_PLATFORM}.config needs CONFIG_DRIVER_CRC32=y: without it the SSBL does not "
+                        "check the CRC32 of the sections of a slot")
+endif()
+
 # Do NOT change the order of the next lines: the SDK's setup.cmake comes first.
 include($ENV{GAP_SDK_HOME}/utils/cmake/setup.cmake)
 project(${TARGET_NAME} C ASM)

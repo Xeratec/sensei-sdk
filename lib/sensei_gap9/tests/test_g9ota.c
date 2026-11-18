@@ -86,10 +86,13 @@ static sensei_Gap9OtaResult send_chunk(const uint8_t *img, uint32_t off, size_t 
   return g9ota_chunk(&ota, &d, info);
 }
 
+static long seal_jobs; /* seal jobs sent so far (the power-cut runner counts them) */
+
 /* Seal the transfer with the hash that `fin` (the answer to finish) carries. */
 static sensei_Gap9OtaResult seal_with(const sensei_Gap9OtaInfo *fin, sensei_Gap9OtaInfo *info) {
   sensei_Gap9OtaSeal sl = sensei_Gap9OtaSeal_init_zero;
 
+  seal_jobs++;
   memcpy(sl.image_hash, fin->image_hash.bytes, 32);
   return g9ota_seal(&ota, &sl, info);
 }
@@ -842,6 +845,63 @@ static int ssbl_choice(int first) {
   return slot_parses((uint8_t)first) ? first : (slot_parses((uint8_t)(1 - first)) ? 1 - first : -1);
 }
 
+/* The SSBL's look at the log (g9ota_ckpt_sealed_waiting): a slot that was sealed and never started is no fallback. */
+static int ssbl_choice_rule(int first) {
+  const uint32_t ck[2] = {SENSEI_G9_CKPT_OFF, SENSEI_G9_CKPT_OFF + G9OTA_SECTOR};
+  int other = 1 - first;
+
+  if (slot_parses((uint8_t)first)) {
+    return first;
+  }
+  return slot_parses((uint8_t)other) && !g9ota_ckpt_sealed_waiting(fm_read, &mram, ck, (uint8_t)other) ? other : -1;
+}
+
+static void test_sealed_not_fallback(void) {
+  struct img_opt o = {.payload = 30000, .major = 1, .minor = 1, .kind = FAKE_KIND, .sign = true, .seed = 91};
+  size_t n = build_image(image, &o);
+  sensei_Gap9OtaInfo info, fin;
+  sensei_Gap9OtaBegin b = begin_req(image, n, false);
+  const uint32_t ck[2] = {SENSEI_G9_CKPT_OFF, SENSEI_G9_CKPT_OFF + G9OTA_SECTOR};
+  struct g9ota_ckpt c;
+
+  /* an empty log: nobody waits */
+  fresh_mram();
+  CHECK(!g9ota_ckpt_newest(fm_read, &mram, ck, &c) && !g9ota_ckpt_sealed_waiting(fm_read, &mram, ck, 0) &&
+        !g9ota_ckpt_sealed_waiting(fm_read, &mram, ck, 1));
+
+  install_running(0, 1, 0, 0);
+  boot(0);
+  CHECK(g9ota_begin(&ota, &b, &info) == sensei_Gap9OtaResult_GAP9_OTA_OK);
+  CHECK(send_from(image, n, 0, 1024, &info) == sensei_Gap9OtaResult_GAP9_OTA_OK);
+  CHECK(g9ota_ckpt_newest(fm_read, &mram, ck, &c) && c.state == G9OTA_CK_OPEN && c.target == 1);
+  CHECK(!g9ota_ckpt_sealed_waiting(fm_read, &mram, ck, 1));
+  CHECK(g9ota_finish(&ota, &fin) == sensei_Gap9OtaResult_GAP9_OTA_OK);
+  CHECK(!g9ota_ckpt_sealed_waiting(fm_read, &mram, ck, 1)); /* checked, not sealed: no magic, no slot anyway */
+
+  /* sealed: slot B parses, the SSBL starts it only when the slot line names it; slot A (running) is not held back */
+  CHECK(seal_with(&fin, &info) == sensei_Gap9OtaResult_GAP9_OTA_OK && slot_parses(1));
+  CHECK(g9ota_ckpt_sealed_waiting(fm_read, &mram, ck, 1) && !g9ota_ckpt_sealed_waiting(fm_read, &mram, ck, 0));
+  CHECK(ssbl_choice_rule(1) == 1);            /* the slot line names it: the apply */
+  CHECK(ssbl_choice_rule(0) == 0);            /* A is fine */
+  mram.mem[SENSEI_G9_SLOT_A_OFF + 3] ^= 0x80; /* the confirmed slot goes bad */
+  CHECK(ssbl_choice_rule(0) == -1);           /* B is no fallback */
+  CHECK(ssbl_choice(0) == 1);                 /* (the old rule would have started it) */
+  CHECK(ssbl_choice_rule(1) == 1);
+
+  /* it started once (the record is consumed): from then on it is a fallback */
+  boot(1);
+  g9ota_boot_note(&ota);
+  CHECK(!g9ota_ckpt_sealed_waiting(fm_read, &mram, ck, 1) && ssbl_choice_rule(0) == 1);
+
+  /* a torn record does not count; the newest valid one wins over older ones */
+  CHECK(g9ota_ckpt_newest(fm_read, &mram, ck, &c) && c.state == G9OTA_CK_CLEARED);
+
+  /* a read error is not "waiting" */
+  mram.dead = true;
+  CHECK(!g9ota_ckpt_sealed_waiting(fm_read, &mram, ck, 1) && !g9ota_ckpt_newest(fm_read, &mram, ck, &c));
+  mram.dead = false;
+}
+
 static void test_deferred_seal(void) {
   struct img_opt o = {.payload = 30000, .major = 1, .minor = 1, .kind = FAKE_KIND, .sign = true, .seed = 81};
   size_t n = build_image(image, &o);
@@ -972,6 +1032,7 @@ static bool cut_run(const uint8_t *img, size_t n, uint8_t booted, long cut, long
   bool ok = true;
 
   memcpy(pre_copy, slot_mem(tgt), SENSEI_G9_SLOT_SIZE);
+  seal_jobs = 0;
   mram.writes = 0;
   mram.cut_at = cut;
   mram.cut_seed = seed;
@@ -1020,6 +1081,11 @@ static bool cut_run(const uint8_t *img, size_t n, uint8_t booted, long cut, long
        * new one, or a slot that does not parse. Never a mix. */
       if (slot_parses(tgt)) {
         ok &= memcmp(slot_mem(tgt), pre_copy, SENSEI_G9_SLOT_SIZE) == 0 || memcmp(slot_mem(tgt), img, n) == 0;
+        /* The new image parses only if a seal job was sent: the magic is written by nothing else. (The old image
+         * of the slot, if it parsed, is the other case.) */
+        if (memcmp(slot_mem(tgt), pre_copy, SENSEI_G9_SLOT_SIZE) != 0) {
+          ok &= seal_jobs > 0;
+        }
       }
     }
     cuts_left--;
@@ -1038,7 +1104,7 @@ static bool cut_run(const uint8_t *img, size_t n, uint8_t booted, long cut, long
   }
   /* the end state: the image is in place, the slot that runs untouched, no write outside the
    * guard */
-  ok &= memcmp(slot_mem(tgt), img, n) == 0;
+  ok &= memcmp(slot_mem(tgt), img, n) == 0 && seal_jobs > 0;
   ok &= memcmp(slot_mem(booted), booted_copy, SENSEI_G9_SLOT_SIZE) == 0;
   ok &= ota.writes_outside == 0 && mram.reprogram == 0 && mram.bad_align == 0;
   {
@@ -1224,6 +1290,7 @@ int main(int argc, char **argv) {
   test_layout();
   test_done_record();
   test_deferred_seal();
+  test_sealed_not_fallback();
   test_log_wrap();
   test_power_cuts(0, 3 * G9OTA_SECTOR + 4000, 188, 3, 0);
   test_power_cuts(1, 2 * G9OTA_SECTOR + 77, 1024, 3, 0);

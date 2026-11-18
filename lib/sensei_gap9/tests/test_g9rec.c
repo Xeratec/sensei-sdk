@@ -122,9 +122,12 @@ static int do_simple(pb_size_t tag, sensei_Gap9RecoveryResult *r) {
   return wire(&j, r);
 }
 
+static long seal_jobs; /* seal jobs sent so far (the power-cut runner counts them) */
+
 static int do_seal(const uint8_t hash[32], sensei_Gap9RecoveryResult *r) {
   sensei_Gap9RecoveryJob j = job(sensei_Gap9RecoveryJob_seal_tag);
 
+  seal_jobs++;
   memcpy(j.seal.image_hash, hash, 32);
   return wire(&j, r);
 }
@@ -238,6 +241,7 @@ static bool cut_run(const uint8_t *img, size_t n, uint8_t keep, long cut, long c
   bool resume = false, ok = true;
   int cuts_left = cut2 >= 0 ? 2 : 1;
 
+  seal_jobs = 0;
   mram.writes = 0;
   mram.cut_at = cut;
   mram.cut_seed = seedv;
@@ -273,7 +277,7 @@ static bool cut_run(const uint8_t *img, size_t n, uint8_t keep, long cut, long c
     ok &= mram.dead;
     /* power gone: what the SSBL would see is the new image whole, or no slot at the target */
     if (slot_parses(tgt)) {
-      ok &= memcmp(slot_mem(tgt), img, n) == 0;
+      ok &= memcmp(slot_mem(tgt), img, n) == 0 && seal_jobs > 0; /* the magic comes from a seal job and nothing else */
     }
     ok &= memcmp(slot_mem(keep), keep_copy, SENSEI_G9_SLOT_SIZE) == 0 && memcmp(mram.mem, boot_copy, BOOT_AREA) == 0;
     cuts_left--;
@@ -284,7 +288,7 @@ static bool cut_run(const uint8_t *img, size_t n, uint8_t keep, long cut, long c
     }
     resume = true;
   }
-  ok &= !mram.dead && slot_parses(tgt) && memcmp(slot_mem(tgt), img, n) == 0;
+  ok &= !mram.dead && slot_parses(tgt) && memcmp(slot_mem(tgt), img, n) == 0 && seal_jobs > 0;
   ok &= memcmp(slot_mem(keep), keep_copy, SENSEI_G9_SLOT_SIZE) == 0 && memcmp(mram.mem, boot_copy, BOOT_AREA) == 0;
   ok &= ota.writes_outside == 0 && mram.reprogram == 0 && mram.bad_align == 0;
   return ok;

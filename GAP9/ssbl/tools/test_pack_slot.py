@@ -417,6 +417,7 @@ def test_image_goes_through_the_firmware_writer(tmp_path):
     srcs = [
         gap9 / "tests/test_g9ota.c",
         gap9 / "src/g9ota.c",
+        gap9 / "src/g9ota_ckpt.c",
         *(link / "src" / n for n in ("crc.c", "sha256.c")),
         link / "generated/sensei/types.pb.c",
         link / "generated/sensei/gap9_ota.pb.c",

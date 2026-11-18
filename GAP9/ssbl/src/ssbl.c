@@ -13,9 +13,10 @@
  * SENSEI second stage bootloader. Starts the firmware of slot A or B of the MRAM (lib/sensei_gap9/include/sensei_gap9/
  * gap9_slot.h). The nRF5340 selects the slot with the level of GAP9 pad 56 (P1.04): low A, high B. A slot that is not
  * a complete image or whose app does not load (header, descriptor, CRC of the sections) is skipped: the other slot
- * boots. If both fail, GAP9 waits (the nRF5340 powers it off after its boot timeout; JTAG recovers it), or, in a build
- * with SENSEI_SSBL_RECOVERY, runs the update writer for the nRF5340 (recovery.c). Before the launch it writes a
- * hand-off record with the slot that started (the app cannot tell after a fallback).
+ * boots, except a slot whose image was sealed and never started (checkpoint record DONE): it starts only when the slot
+ * line names it, never as the fallback. If both fail, GAP9 waits (the nRF5340 powers it off after its boot timeout;
+ * JTAG recovers it), or, in a build with SENSEI_SSBL_RECOVERY, runs the update writer for the nRF5340 (recovery.c).
+ * Before the launch it writes a hand-off record with the slot that started (the app cannot tell after a fallback).
  *
  * Build flags: SENSEI_SSBL_FORCE_SLOT=0|1 uses that slot instead of the pad (GVSoC does not model it),
  * SENSEI_SSBL_BOOT_SAFETY_US is the watchdog the app disarms in its start-up (runtime system init),
@@ -30,6 +31,7 @@
 #include <bsp/app_boot.h>
 #include <bsp/bsp.h>
 
+#include "sensei_gap9/g9ota_ckpt.h"
 #include "sensei_gap9/gap9_slot.h"
 
 #ifdef SENSEI_SSBL_RECOVERY
@@ -107,11 +109,32 @@ static int load_slot(uint8_t slot) {
   return 0;
 }
 
+static int ckpt_read(void *ctx, uint32_t addr, void *buf, uint32_t len) { return mram_read(ctx, addr, buf, len); }
+
+/* The image of this slot was sealed (the nRF5340 checked its signature) and never started: nobody has seen it run, so
+ * it is no fallback. The update starts it with the slot line. */
+static bool sealed_waiting(uint8_t slot) {
+  const uint32_t ckpt[2] = {SENSEI_G9_CKPT_OFF, SENSEI_G9_CKPT_OFF + G9OTA_SECTOR};
+  struct mram_ctx c = {.dev = NULL, .base = 0};
+  bool waiting;
+
+  if (pi_open(PI_FLASH_MRAM, &c.dev) != PI_OK) {
+    return false;
+  }
+  waiting = g9ota_ckpt_sealed_waiting(ckpt_read, &c, ckpt, slot);
+  pi_close(PI_FLASH_MRAM);
+  return waiting;
+}
+
 /* Try `first`, then the other slot. Returns only if neither boots. */
 static void boot_slots(uint8_t first) {
   for (int i = 0; i < 2; i++) {
     uint8_t slot = i == 0 ? first : (uint8_t)(first ^ 1u);
 
+    if (i == 1 && sealed_waiting(slot)) {
+      printf("slot %c: sealed, never started: not a fallback\n", 'A' + slot);
+      continue;
+    }
     printf("try slot %c\n", 'A' + slot);
     if (load_slot(slot) == 0) {
       printf("boot slot %c\n", 'A' + slot);
@@ -152,6 +175,12 @@ int main(void) {
   (void)recovery_run(first, G9L_RECOVERY_BOTH_BAD);
   boot_slots(first);
   printf("no bootable slot\n");
+#ifdef SENSEI_SSBL_RECOVERY_TEST
+  /* The nRF5340 applies the update: the slot line names the slot that the recovery wrote. */
+  printf("apply: slot line %c\n", 'A' + (first ^ 1u));
+  boot_slots((uint8_t)(first ^ 1u));
+  printf("no bootable slot\n");
+#endif
 #endif
 #ifdef SENSEI_SSBL_FORCE_SLOT
   pmsis_exit(-1); /* test build: end the simulation */

@@ -15,7 +15,6 @@
 #include "sensei_link/crc.h"
 #include "sensei_ota_image.h"
 
-#define CKPT_MAGIC 0x31544F47u /* "GOT1" */
 #define TLV_KEYHASH 0x01u
 #define TLV_ECDSA_SIG 0x22u
 
@@ -74,34 +73,6 @@ bool g9ota_sig_der_to_raw(const uint8_t *der, size_t len, uint8_t out[64]) {
     return false;
   }
   return pos == len;
-}
-
-void g9ota_ckpt_encode(const struct g9ota_ckpt *c, uint8_t out[G9OTA_CKPT_LEN]) {
-  memset(out, 0, G9OTA_CKPT_LEN);
-  wr32(out, CKPT_MAGIC);
-  wr32(out + 4, c->seq);
-  out[8] = c->state;
-  out[9] = c->target;
-  wr32(out + 12, c->size);
-  wr32(out + 16, c->offset);
-  memcpy(out + 20, c->sha, 32);
-  memcpy(out + 52, c->hdr0, 16);
-  wr32(out + G9OTA_CKPT_LEN - 4, sensei_crc32(out, G9OTA_CKPT_LEN - 4));
-}
-
-bool g9ota_ckpt_decode(const uint8_t in[G9OTA_CKPT_LEN], struct g9ota_ckpt *c) {
-  if (rd32(in) != CKPT_MAGIC || rd32(in + G9OTA_CKPT_LEN - 4) != sensei_crc32(in, G9OTA_CKPT_LEN - 4)) {
-    return false;
-  }
-  c->valid = true;
-  c->seq = rd32(in + 4);
-  c->state = in[8];
-  c->target = in[9];
-  c->size = rd32(in + 12);
-  c->offset = rd32(in + 16);
-  memcpy(c->sha, in + 20, 32);
-  memcpy(c->hdr0, in + 52, 16);
-  return c->state >= G9OTA_CK_OPEN && c->state <= G9OTA_CK_CHECKED && c->target < 2;
 }
 
 /* ---- Guarded MRAM access: the one place that writes ---- */

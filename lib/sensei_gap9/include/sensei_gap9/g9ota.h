@@ -54,15 +54,14 @@
 #include <stdint.h>
 
 #include "sensei/gap9_ota.pb.h"
+#include "sensei_gap9/g9ota_ckpt.h"
 #include "sensei_link/sha256.h"
 
-/** MRAM erase unit, and the size of the write buffer. */
-#define G9OTA_SECTOR 8192u
-/** Largest Gap9OtaData.data. */
+/** Largest Gap9OtaData.data. (G9OTA_SECTOR, the checkpoint record and its states: g9ota_ckpt.h.) */
 #define G9OTA_CHUNK_MAX 1024u
-/** Bytes of one checkpoint record, and the records in one checkpoint sector. */
-#define G9OTA_CKPT_LEN 80u
-#define G9OTA_CKPT_PER_SECTOR (G9OTA_SECTOR / G9OTA_CKPT_LEN)
+/** The oldest job protocol major of a GAP9 app that takes update requests (deferred sealing, the seal job). An app
+ * with a lower major runs the normal jobs, but the nRF5340 does not send it update requests (-EPROTONOSUPPORT). */
+#define G9OTA_APP_MAJOR_MIN 2u
 /** Shortest time between two fresh transfers, ms (the slot's sectors wear out). Needs g9ota_touch().
  */
 #define G9OTA_OPEN_MIN_MS 10000u
@@ -86,22 +85,6 @@ struct g9ota_cfg {
   uint32_t ckpt_base[2];
   const char *kind;
 };
-
-/** What the newest valid checkpoint record says. */
-struct g9ota_ckpt {
-  bool valid;
-  uint8_t state; /* G9OTA_CK_* */
-  uint8_t target;
-  uint32_t seq;
-  uint32_t size;
-  uint32_t offset;
-  uint8_t sha[32];
-  uint8_t hdr0[16]; /* the first 16 bytes of the file, once its first sector is in (see g9ota.c) */
-};
-
-/* OPEN: bytes are coming. CHECKED: every byte is in and finish checked it, the magic is not written (the slot is not an
- * image yet; a resume re-checks and answers VERIFIED). DONE: sealed. CLEARED: nothing is open. */
-enum { G9OTA_CK_OPEN = 1, G9OTA_CK_DONE = 2, G9OTA_CK_CLEARED = 3, G9OTA_CK_CHECKED = 4 };
 
 struct g9ota {
   const struct g9ota_flash *fl;
@@ -239,9 +222,5 @@ bool g9ota_header_version(const uint8_t hdr[32], uint32_t *packed);
 /** ECDSA signature TLV (DER SEQUENCE of two INTEGER) to r || s (64 B). false if it is not a P-256
  * signature. */
 bool g9ota_sig_der_to_raw(const uint8_t *der, size_t len, uint8_t out[64]);
-
-void g9ota_ckpt_encode(const struct g9ota_ckpt *c, uint8_t out[G9OTA_CKPT_LEN]);
-/** False for an empty record, a wrong magic or a failed CRC. */
-bool g9ota_ckpt_decode(const uint8_t in[G9OTA_CKPT_LEN], struct g9ota_ckpt *c);
 
 #endif /* SENSEI_GAP9_G9OTA_H_ */

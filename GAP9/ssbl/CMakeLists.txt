@@ -9,6 +9,7 @@
 # GVSoC test: scripts in test/ (tools/gvsoc_test.sh).
 #   -DSENSEI_SSBL_FORCE_SLOT=0|1   boot that slot, do not read pad 56
 #   -DSENSEI_SSBL_SLOT_A=<file> -DSENSEI_SSBL_SLOT_B=<file>   slot images put into the MRAM image of run/flash
+#   -DSENSEI_SSBL_CKPT=<file>   checkpoint sectors of the MRAM image (tests: a sealed slot that never started)
 #   -DSENSEI_SSBL_BOOT_ONLY=ON   (board) flash only the boot area: FSBL, SSBL, tables; the slots stay
 #   -DSENSEI_SSBL_RECOVERY=ON -DSENSEI_SSBL_KIND=<board id>   recovery: with no bootable slot the SSBL runs the update
 #       writer and serves it to the nRF5340 over SPI (needs -DSENSEI_SSBL_KIND, e.g. sensei-ieq-gap9; OFF by default: the
@@ -22,6 +23,7 @@ set(SENSEI_PLATFORM "board" CACHE STRING "board or gvsoc (the simulator)")
 set(SENSEI_SSBL_FORCE_SLOT "" CACHE STRING "0 or 1: boot that slot and ignore pad 56 (tests)")
 set(SENSEI_SSBL_SLOT_A "" CACHE FILEPATH "slot A image for the MRAM image (tests, factory flash)")
 set(SENSEI_SSBL_SLOT_B "" CACHE FILEPATH "slot B image for the MRAM image")
+set(SENSEI_SSBL_CKPT "" CACHE FILEPATH "checkpoint sectors (16 KiB) for the MRAM image (tests)")
 option(SENSEI_SSBL_RECOVERY "With no bootable slot run the update writer for the nRF5340 (OTA.md, Recovery)" OFF)
 set(SENSEI_SSBL_KIND "" CACHE STRING "board id of the images (the kind TLV): needed for the recovery")
 option(SENSEI_SSBL_STRAP "Recovery strap: pad 57 high forces recovery (UNVERIFIED hardware)" OFF)
@@ -29,6 +31,23 @@ option(SENSEI_SSBL_RECOVERY_TEST "GVSoC test build of the recovery: jobs from th
 option(SENSEI_SSBL_RECOVERY_TEST_STRAP "Test build: the strap is high" OFF)
 option(SENSEI_SSBL_RECOVERY_TEST_NOSEAL "Test build: the feed stops before the seal" OFF)
 set(TARGET_NAME "ssbl")
+
+# The test build feeds seals without a signature check: only for the simulator, and only with the recovery. The options
+# are cache options: a build directory that had them keeps them, so every build says them (the node Makefile passes
+# ON or OFF for all of them).
+if(NOT SENSEI_PLATFORM MATCHES "^(board|gvsoc)$")
+    message(FATAL_ERROR "SENSEI_PLATFORM must be board or gvsoc")
+endif()
+if(SENSEI_SSBL_RECOVERY_TEST AND NOT SENSEI_PLATFORM STREQUAL "gvsoc")
+    message(FATAL_ERROR "SENSEI_SSBL_RECOVERY_TEST feeds seals without a signature check: only with "
+                        "-DSENSEI_PLATFORM=gvsoc (the board build must not have it)")
+endif()
+if(SENSEI_SSBL_RECOVERY_TEST AND NOT SENSEI_SSBL_RECOVERY)
+    message(FATAL_ERROR "SENSEI_SSBL_RECOVERY_TEST needs SENSEI_SSBL_RECOVERY=ON")
+endif()
+if((SENSEI_SSBL_RECOVERY_TEST_STRAP OR SENSEI_SSBL_RECOVERY_TEST_NOSEAL) AND NOT SENSEI_SSBL_RECOVERY_TEST)
+    message(FATAL_ERROR "SENSEI_SSBL_RECOVERY_TEST_STRAP and _NOSEAL are for SENSEI_SSBL_RECOVERY_TEST=ON only")
+endif()
 
 # SENSEI_SSBL_BOOT_ONLY: the layout of the boot area alone (FSBL, SSBL, tables, no checkpoint and no slots): `flash` then
 # writes the first 64 KiB of the MRAM and leaves the slots as they are (board build).
@@ -52,8 +71,12 @@ endif()
 include($ENV{GAP_SDK_HOME}/utils/cmake/setup.cmake)
 project(${TARGET_NAME} C ASM)
 
-add_executable(${TARGET_NAME} ${CMAKE_CURRENT_LIST_DIR}/src/ssbl.c)
-target_include_directories(${TARGET_NAME} PRIVATE ${SENSEI_SDK_DIR}/lib/sensei_gap9/include)
+# The SSBL reads the checkpoint log (a slot that was sealed and never started is no fallback): the record format of the
+# writer and the CRC of the link layer, both plain C.
+add_executable(${TARGET_NAME} ${CMAKE_CURRENT_LIST_DIR}/src/ssbl.c ${SENSEI_SDK_DIR}/lib/sensei_gap9/src/g9ota_ckpt.c
+               ${SENSEI_SDK_DIR}/lib/sensei_link/src/crc.c)
+target_include_directories(${TARGET_NAME} PRIVATE ${SENSEI_SDK_DIR}/lib/sensei_gap9/include
+                           ${SENSEI_SDK_DIR}/lib/sensei_link/include)
 target_compile_options(${TARGET_NAME} PRIVATE -Os -std=gnu99)
 if(SENSEI_SSBL_RECOVERY)
     if("${SENSEI_SSBL_KIND}" STREQUAL "")
@@ -84,7 +107,7 @@ if(SENSEI_SSBL_RECOVERY)
         target_compile_definitions(${TARGET_NAME} PRIVATE SENSEI_SSBL_STRAP)
     endif()
     if(SENSEI_SSBL_RECOVERY_TEST)
-        target_compile_definitions(${TARGET_NAME} PRIVATE SENSEI_SSBL_RECOVERY_TEST)
+        target_compile_definitions(${TARGET_NAME} PRIVATE SENSEI_SSBL_RECOVERY_TEST SENSEI_SSBL_PLATFORM_GVSOC)
         if(SENSEI_SSBL_RECOVERY_TEST_STRAP)
             target_compile_definitions(${TARGET_NAME} PRIVATE SENSEI_SSBL_RECOVERY_TEST_STRAP)
         endif()
@@ -107,6 +130,9 @@ if(SENSEI_SSBL_SLOT_A)
 endif()
 if(SENSEI_SSBL_SLOT_B)
     list(APPEND GAPY_RUNNER_ARGS --flash-property=${SENSEI_SSBL_SLOT_B}@mram:slot_b:file)
+endif()
+if(SENSEI_SSBL_CKPT)
+    list(APPEND GAPY_RUNNER_ARGS --flash-property=${SENSEI_SSBL_CKPT}@mram:checkpoint:file)
 endif()
 
 setupos(${TARGET_NAME})

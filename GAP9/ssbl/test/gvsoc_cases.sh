@@ -12,7 +12,9 @@
 # Recovery cases (SSBL built with SENSEI_SSBL_RECOVERY and the test feed test/recovery_feed.c: GVSoC has no nRF5340 on
 # the SPI link, the jobs come from a packed image in the keep slot): rec_both_bad (neither slot boots: the writer writes
 # the other slot, seal, the SSBL boots it), rec_no_seal (no seal: the slot stays unbootable), rec_forced (the strap is high:
-# a good slot A boots after the recovery wrote slot B).
+# a good slot A boots after the recovery wrote slot B). A sealed slot that never started is no fallback (sealed_*): after the
+# recovery the SSBL tries the slot line's slot (damaged) and does not take slot B as the fallback; the test then sets the
+# slot line to B, as the nRF5340 does when it applies the update.
 set -uo pipefail
 
 SDK=/sensei-sdk
@@ -49,7 +51,21 @@ PY
 
 mk() { python3 -I "$PACK" --app $W/app_$1.bin --kind sensei-ssbl-test --version "$2" --damage "$3" -o $W/slot_$4.bin >/dev/null; }
 
+# The checkpoint sectors with one record: state DONE (sealed, never started) or CLEARED, for slot $2 (the record format of
+# g9ota_ckpt.c: "GOT1", seq, state, target, size, offset, SHA-256, first 16 bytes of the file, CRC-32 of the first 76 B).
+mk_ckpt() {
+    python3 -I - "$1" "$2" >$W/ckpt.bin <<'PY'
+import struct, sys, zlib
+state = {'done': 2, 'cleared': 3}[sys.argv[1]]
+rec = struct.pack('<IIBBxxII', 0x31544F47, 1, state, int(sys.argv[2]), 1000, 1000) + bytes(32) + bytes(16) + bytes(8)
+rec += struct.pack('<I', zlib.crc32(rec) & 0xFFFFFFFF)
+assert len(rec) == 80
+sys.stdout.buffer.write(rec + bytes([0xFF]) * (16384 - 80))
+PY
+}
+
 # case name | forced slot | slot A damage | slot B damage | must contain (in order) | must not contain
+# CKPT=<file>: the checkpoint sectors of the MRAM image (else they stay empty).
 run_case() {
     local name=$1 force=$2 da=$3 db=$4 want=$5 not=$6 extra=${7:-}
     mk A 1.0.0+1 "$da" a
@@ -58,7 +74,10 @@ run_case() {
     rm -rf $W/ssbl
     # shellcheck disable=SC2086
     cmake -S $SDK/GAP9/ssbl -B $W/ssbl -DSENSEI_PLATFORM=gvsoc -DSENSEI_SSBL_FORCE_SLOT=$force \
-        -DSENSEI_SSBL_SLOT_A=$W/slot_a.bin -DSENSEI_SSBL_SLOT_B=$W/slot_b.bin $extra >$W/ssbl.cmake.log 2>&1 &&
+        -DSENSEI_SSBL_RECOVERY=OFF -DSENSEI_SSBL_STRAP=OFF -DSENSEI_SSBL_RECOVERY_TEST=OFF \
+        -DSENSEI_SSBL_RECOVERY_TEST_STRAP=OFF -DSENSEI_SSBL_RECOVERY_TEST_NOSEAL=OFF \
+        -DSENSEI_SSBL_SLOT_A=$W/slot_a.bin -DSENSEI_SSBL_SLOT_B=$W/slot_b.bin ${CKPT:+-DSENSEI_SSBL_CKPT=$CKPT} \
+        $extra >$W/ssbl.cmake.log 2>&1 &&
         cmake --build $W/ssbl -j "$JOBS" >$W/ssbl.build.log 2>&1 || { echo "$name: SSBL build failed"; tail -20 $W/ssbl.*.log; fail=1; return; }
     timeout 120 cmake --build $W/ssbl -t run >$W/$name.log 2>&1
     local ok=1 pos=0
@@ -97,9 +116,20 @@ run_case b_partial 1 none trailer "slot B: not bootable (-77)|boot slot A|slot A
 run_case a_bad_crc 0 app none "slot A: app load failed|boot slot B|slot B running (42), hand-off B" "slot A running"
 run_case both_bad 0 header trailer "slot A: not bootable|slot B: not bootable|no bootable slot" "running"
 
+# A slot that was sealed and never started (checkpoint record DONE) boots only when the slot line names it.
+mk_ckpt done 1
+CKPT=$W/ckpt.bin
+run_case sealed_no_fallback 0 header none "slot A: not bootable|slot B: sealed, never started: not a fallback|no bootable slot" "boot slot B|running"
+run_case sealed_selected 1 header none "try slot B|boot slot B|slot B running (42), hand-off B" "not a fallback"
+mk_ckpt cleared 1
+run_case sealed_started_fallback 0 header none "slot A: not bootable|boot slot B|slot B running (42), hand-off B" "not a fallback"
+mk_ckpt done 0
+run_case sealed_other_slot 0 none header "boot slot A|slot A running (42), hand-off A" "not a fallback"
+CKPT=
+
 # Recovery. The kind of the test images is sensei-ssbl-test (the writer refuses another).
 REC="-DSENSEI_SSBL_RECOVERY=ON -DSENSEI_SSBL_KIND=sensei-ssbl-test -DSENSEI_SSBL_RECOVERY_TEST=ON"
-run_case rec_both_bad 0 header trailer "slot A: not bootable|slot B: not bootable|no bootable slot|recovery: both slots failed|recovery: keep slot A, reason 1|recovery feed: begin ok|recovery feed: finish ok, not sealed|recovery feed: sealed slot B|recovery feed: slot B parses|boot slot B|slot B running (42), hand-off B" "slot A running" "$REC"
+run_case rec_both_bad 0 header trailer "slot A: not bootable|slot B: not bootable|no bootable slot|recovery: both slots failed|recovery: keep slot A, reason 1|recovery feed: begin ok|recovery feed: finish ok, not sealed|recovery feed: sealed slot B|recovery feed: slot B parses|slot B: sealed, never started: not a fallback|apply: slot line B|boot slot B|slot B running (42), hand-off B" "slot A running" "$REC"
 run_case rec_no_seal 0 header trailer "recovery: both slots failed|recovery feed: begin ok|recovery feed: finish ok, not sealed|slot B: not bootable|no bootable slot" "sealed slot|boot slot B" "$REC -DSENSEI_SSBL_RECOVERY_TEST_NOSEAL=ON"
 run_case rec_forced 0 none none "recovery forced|recovery: keep slot A, reason 2|recovery feed: begin ok|recovery feed: sealed slot B|recovery feed: slot B parses|boot slot A|slot A running (42), hand-off A" "slot B running|no bootable slot" "$REC -DSENSEI_SSBL_RECOVERY_TEST_STRAP=ON"
 

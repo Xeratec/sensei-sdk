@@ -17,6 +17,10 @@
  * tests). With SENSEI_SSBL_RECOVERY_TEST_NOSEAL it stops before the seal: the slot must then stay unbootable. It prints
  * what it did, the test script looks for the lines. Returns 0 when it is done, and the SSBL tries the slots again. */
 
+#ifndef SENSEI_SSBL_PLATFORM_GVSOC
+#error "recovery_feed.c seals without a signature check: it is built only for the simulator (CMakeLists.txt)"
+#endif
+
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>

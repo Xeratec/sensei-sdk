@@ -13,11 +13,15 @@
  * SENSEI second stage bootloader. Starts the firmware of slot A or B of the MRAM (lib/sensei_gap9/include/sensei_gap9/
  * gap9_slot.h). The nRF5340 selects the slot with the level of GAP9 pad 56 (P1.04): low A, high B. A slot that is not
  * a complete image or whose app does not load (header, descriptor, CRC of the sections) is skipped: the other slot
- * boots. If both fail, GAP9 waits (the nRF5340 powers it off after its boot timeout; JTAG recovers it). Before the
- * launch it writes a hand-off record with the slot that started (the app cannot tell after a fallback).
+ * boots. If both fail, GAP9 waits (the nRF5340 powers it off after its boot timeout; JTAG recovers it), or, in a build
+ * with SENSEI_SSBL_RECOVERY, runs the update writer for the nRF5340 (recovery.c). Before the launch it writes a
+ * hand-off record with the slot that started (the app cannot tell after a fallback).
  *
  * Build flags: SENSEI_SSBL_FORCE_SLOT=0|1 uses that slot instead of the pad (GVSoC does not model it),
- * SENSEI_SSBL_BOOT_SAFETY_US is the watchdog the app disarms in its start-up (runtime system init).
+ * SENSEI_SSBL_BOOT_SAFETY_US is the watchdog the app disarms in its start-up (runtime system init),
+ * SENSEI_SSBL_RECOVERY the recovery with SENSEI_SSBL_KIND (board id of the images), SENSEI_SSBL_STRAP (pad 57 forces
+ * it, untested on hardware), SENSEI_SSBL_RECOVERY_TEST (the GVSoC test: the jobs come from the keep slot, recovery
+ * returns).
  */
 
 #include <pmsis.h>
@@ -27,6 +31,11 @@
 #include <bsp/bsp.h>
 
 #include "sensei_gap9/gap9_slot.h"
+
+#ifdef SENSEI_SSBL_RECOVERY
+#include "recovery.h"
+#include "sensei_gap9/gap9_link.h"
+#endif
 
 #define SLOT_PAD PI_PAD_056
 #define PAD_SAMPLES 5
@@ -98,15 +107,8 @@ static int load_slot(uint8_t slot) {
   return 0;
 }
 
-int main(void) {
-  uint8_t first;
-
-  printf("SENSEI SSBL\n");
-#ifdef SENSEI_SSBL_FORCE_SLOT
-  first = SENSEI_SSBL_FORCE_SLOT ? SENSEI_G9_SLOT_B : SENSEI_G9_SLOT_A;
-#else
-  first = read_slot_line();
-#endif
+/* Try `first`, then the other slot. Returns only if neither boots. */
+static void boot_slots(uint8_t first) {
   for (int i = 0; i < 2; i++) {
     uint8_t slot = i == 0 ? first : (uint8_t)(first ^ 1u);
 
@@ -124,7 +126,33 @@ int main(void) {
       pi_app_bin_launch(&app);
     }
   }
+}
+
+int main(void) {
+  uint8_t first;
+
+  printf("SENSEI SSBL\n");
+#ifdef SENSEI_SSBL_FORCE_SLOT
+  first = SENSEI_SSBL_FORCE_SLOT ? SENSEI_G9_SLOT_B : SENSEI_G9_SLOT_A;
+#else
+  first = read_slot_line();
+#endif
+#ifdef SENSEI_SSBL_RECOVERY
+  if (recovery_strap()) { /* a slot may boot but hang before its HELLO: the nRF5340 asked for recovery */
+    printf("recovery forced\n");
+    (void)recovery_run(first, G9L_RECOVERY_FORCED);
+  }
+#endif
+  boot_slots(first);
   printf("no bootable slot\n");
+#ifdef SENSEI_SSBL_RECOVERY
+  /* Serve the update writer. The production build does not return from here (the nRF5340 powers GAP9 off or on again);
+   * the test build comes back after its feed and tries the slots once more. */
+  printf("recovery: both slots failed\n");
+  (void)recovery_run(first, G9L_RECOVERY_BOTH_BAD);
+  boot_slots(first);
+  printf("no bootable slot\n");
+#endif
 #ifdef SENSEI_SSBL_FORCE_SLOT
   pmsis_exit(-1); /* test build: end the simulation */
 #endif

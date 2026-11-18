@@ -507,3 +507,30 @@ def test_layout_boot_area_and_slot_offsets_follow_the_header():
     # the sizes of the layout are those of the header
     assert size["checkpoint"] == define("SENSEI_G9_CKPT_SIZE")
     assert size["slot_a"] == size["slot_b"] == define("SENSEI_G9_SLOT_SIZE")
+
+
+def test_layout_sections_add_up_and_the_boot_only_layout_is_its_prefix():
+    """The boot area is 64 KiB (the SSBL section 48 KiB with room for the recovery, the volume table padded to what is
+    left), the checkpoint and the slots follow where gap9_slot.h says; sensei_ab_boot.json is the boot area alone."""
+    full = json.loads((SDK / "GAP9/layouts/sensei_ab.json").read_text())["flashes"][0]["sections"]
+    boot = json.loads((SDK / "GAP9/layouts/sensei_ab_boot.json").read_text())["flashes"][0]["sections"]
+    size = {sec["name"]: sec["properties"].get("size") for sec in full}
+    assert size["ssbl"] == 49152 and size["volume_table"] == 11536 and size["partition_table"] == 1024
+    assert [sec["name"] for sec in boot
+           ] == [sec["name"] for sec in full if sec["name"] not in ("checkpoint", "slot_a", "slot_b")]
+    assert size["checkpoint"] == 16384 and size["slot_a"] == size["slot_b"] == mk.SLOT_SIZE
+
+
+def test_shaped_signature_is_for_the_recovery_test_only(tmp_path):
+    """--test-signature: the unsigned slot gets a TLV of the shape of an ECDSA signature (the recovery writer of the SSBL
+    checks the shape; the nRF5340 refuses it). Without the option there is none."""
+    app, out = tmp_path / "app.bin", tmp_path / "slot.bin"
+    app.write_bytes(APP)
+    assert mk.main(["--app", str(app), "--kind", KIND, "--test-signature", "-o", str(out)]) == 0
+    data = out.read_bytes()
+    _, tlv, hdr, img, plen = mcuboot_tlvs(data)
+    assert tlv[0x10] == hashlib.sha256(data[:hdr + img + plen]).digest()
+    der = tlv[0x22]
+    assert der[0] == 0x30 and der[1] == len(der) - 2 and der[2:4] == b"\x02\x20" and der[36:38] == b"\x02\x20"
+    assert mk.main(["--app", str(app), "--kind", KIND, "--unsigned", "-o", str(out)]) == 0
+    assert 0x22 not in mcuboot_tlvs(out.read_bytes())[1]

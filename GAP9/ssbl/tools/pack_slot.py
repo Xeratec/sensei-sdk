@@ -228,9 +228,21 @@ def _tlv(kind: int, value: bytes) -> bytes:
     return struct.pack("<HH", kind, len(value)) + value
 
 
-def build_unsigned(container: bytes, version: str, kind: str) -> bytes:
+TLV_ECDSA_SIG = 0x22
+
+
+def shaped_signature_tlv() -> bytes:
+    """A TLV of the shape of an ECDSA P-256 signature (DER of two 32 byte integers) that is not one. The recovery writer
+    of the SSBL checks the shape only (the nRF5340 checks the signature): the GVSoC test feeds it images with this. The
+    nRF5340 refuses such an image."""
+    der = b"\x30\x44" + b"\x02\x20" + bytes(range(0x20, 0x40)) + b"\x02\x20" + bytes(range(0x40, 0x60))
+    return _tlv(TLV_ECDSA_SIG, der)
+
+
+def build_unsigned(container: bytes, version: str, kind: str, shaped_signature: bool = False) -> bytes:
     """The slot as imgtool would make it, without the signature: header, container, protected TLV with the kind,
-    TLV area with the SHA-256."""
+    TLV area with the SHA-256. `shaped_signature`: also a TLV that has the shape of a signature (tests of the recovery
+    writer only)."""
     major, minor, rev, build = parse_version(version)
     prot_body = _tlv(TLV_KIND, kind.encode())
     prot = struct.pack("<HH", TLV_PROT, 4 + len(prot_body)) + prot_body
@@ -238,7 +250,7 @@ def build_unsigned(container: bytes, version: str, kind: str) -> bytes:
                          0)
     header += bytes(HEADER_SIZE - len(header))
     digest = hashlib.sha256(header + container + prot).digest()
-    info_body = _tlv(TLV_SHA256, digest)
+    info_body = _tlv(TLV_SHA256, digest) + (shaped_signature_tlv() if shaped_signature else b"")
     info = struct.pack("<HH", TLV_INFO, 4 + len(info_body)) + info_body
     return header + container + prot + info
 
@@ -319,6 +331,11 @@ def main(argv: list[str] | None = None) -> int:
                     action = "store_true",
                     help = "write an unsigned slot image (SSBL tests, factory flash of a test board); needs no key")
     ap.add_argument("--imgtool", default = os.environ.get("IMGTOOL", "imgtool"))
+    ap.add_argument(
+        "--test-signature",
+        action = "store_true",
+        help = "unsigned slot with a TLV of the shape of a signature (for the GVSoC test of the SSBL recovery, "
+        "which checks the shape only; the nRF5340 refuses it)")
     ap.add_argument("--damage",
                     choices = ["none", "app", "header", "trailer"],
                     default = None,
@@ -371,11 +388,11 @@ def main(argv: list[str] | None = None) -> int:
             how = f"version {version}, kind {args.kind}, app {len(app)} B, readfs {len(readfs)} B"
             print(f"{args.out}: {how}, {args.out.stat().st_size} B of {SLOT_SIZE}")
             return 0
-        if not (args.unsigned or args.damage is not None):
+        if not (args.unsigned or args.damage is not None or args.test_signature):
             raise ImageError(
                 "no key: give --key (or $SENSEI_GAP9_KEY) or --dev to sign, or --unsigned for an image that "
                 "the writer and the nRF5340 refuse")
-        slot = bytearray(build_unsigned(container, version, args.kind))
+        slot = bytearray(build_unsigned(container, version, args.kind, args.test_signature))
         if len(slot) > SLOT_SIZE:
             raise ImageError(f"slot image is {len(slot)} B, a slot holds {SLOT_SIZE} B")
         damage(slot, args.damage or "none", len(app), len(container))

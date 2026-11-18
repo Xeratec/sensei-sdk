@@ -18,11 +18,13 @@
  * The link moves opaque job and result messages, described by a struct g9_codec. The app wraps
  * the calls with its own typed API and defines the storage with GAP9_LINK_STORAGE_DEFINE().
  * The devicetree needs lib/sensei_gap9/zephyr/gap9_link.overlay (aliases gap9-trigger,
- * gap9-spi-sel, gap9-i2c-sel, gap9-spis, gap9-slot-sel).
+ * gap9-spi-sel, gap9-i2c-sel, gap9-spis; gap9-slot-sel is used only with CONFIG_SENSEI_GAP9_OTA).
  *
  * Firmware slots: GAP9 holds two firmware images (slots A and B, lib/sensei_gap9/include/sensei_gap9/gap9_slot.h). The
  * slot line (alias gap9-slot-sel, nRF P1.04 to GAP9 pad 56) tells its SSBL which one to start (low A, high B). The link
- * sets it right after the GAP9 rail is on and keeps it low whenever GAP9 is off.
+ * sets it right after the GAP9 rail is on and keeps it low whenever GAP9 is off. The slot line, gap9_link_set_slot(),
+ * gap9_link_hold() and gap9_link_reboot() are built only with CONFIG_SENSEI_GAP9_OTA: without it the link does not
+ * touch the slot pin and the three functions do not exist.
  */
 
 #ifndef SENSEI_GAP9_ZEPHYR_H_

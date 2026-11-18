@@ -45,7 +45,8 @@ The firmware update of GAP9 over the air (A/B slots, signed images, trial boot) 
 - Firmware slots (A and B in the GAP9 MRAM, started by the SSBL in `GAP9/ssbl`): the alias `gap9-slot-sel` (P1.04 to GAP9
   pad 56) goes high only after the GAP9 rail is on (the SSBL reads it milliseconds later) and is low when GAP9 is off. `gap9_link_set_slot()` picks the slot of the next
   power-ups, `gap9_link_hold()` keeps GAP9 on for an update session, `gap9_link_reboot()` power cycles it into a slot and
-  reports its HELLO. Details in [PROTOCOL.md](PROTOCOL.md).
+  reports its HELLO. Details in [PROTOCOL.md](PROTOCOL.md). The slot line and these three functions are built only with
+  `CONFIG_SENSEI_GAP9_OTA`: without it the link does not touch the pin.
 - `CONFIG_SENSEI_GAP9_OTA=y` adds the update flow (selects `SETTINGS`, `SENSEI_CRYPTO_ECDSA`): the app fills a
   `struct sensei_gap9_ota_cfg` (public key, job callback, trial check, work queue), calls `sensei_gap9_ota_init()` after
   `gap9_link_init()` and forwards the host requests to `g9ota_flow_begin/_chunk/_command()` with `sensei_gap9_ota_flow()`. See OTA.md.

@@ -31,7 +31,9 @@ LOG_MODULE_REGISTER(gap9, CONFIG_SENSEI_GAP9_LOG_LEVEL);
 static const struct gpio_dt_spec trig_pin = GPIO_DT_SPEC_GET(DT_ALIAS(gap9_trigger), gpios);
 static const struct gpio_dt_spec spi_sel = GPIO_DT_SPEC_GET(DT_ALIAS(gap9_spi_sel), gpios);
 static const struct gpio_dt_spec i2c_sel = GPIO_DT_SPEC_GET(DT_ALIAS(gap9_i2c_sel), gpios);
+#ifdef CONFIG_SENSEI_GAP9_OTA
 static const struct gpio_dt_spec slot_sel = GPIO_DT_SPEC_GET(DT_ALIAS(gap9_slot_sel), gpios);
+#endif /* CONFIG_SENSEI_GAP9_OTA */
 #ifdef CONFIG_SENSEI_GAP9_SHARED_GPIOS
 static const struct gpio_dt_spec shared_sel = GPIO_DT_SPEC_GET(DT_ALIAS(gap9_shared_sel), gpios);
 #endif
@@ -47,10 +49,12 @@ static struct k_work spi_work;
 static struct k_work_delayable submit_work;
 static struct k_work shutdown_work;
 static struct k_work reset_work;
+#ifdef CONFIG_SENSEI_GAP9_OTA
 static struct k_work reboot_work;
 static struct k_work reboot_done_work;
 static struct k_work hold_work;
 static struct k_work_delayable hold_tick_work;
+#endif /* CONFIG_SENSEI_GAP9_OTA */
 
 static const struct gap9_link_cfg *lcfg;
 static const struct gap9_link_hooks *hooks;
@@ -63,7 +67,9 @@ static volatile bool spis_armed;
 static volatile int spis_rx_amount;
 static bool trig_want;
 static volatile bool link_ready; /* gap9_link_init() is done */
-static atomic_t boot_slot;       /* the level of the slot line at the next power-up: 0 = A, 1 = B */
+#ifdef CONFIG_SENSEI_GAP9_OTA
+static atomic_t boot_slot; /* the level of the slot line at the next power-up: 0 = A, 1 = B */
+#endif                     /* CONFIG_SENSEI_GAP9_OTA */
 
 static void report_error(void) {
   if (hooks != NULL && hooks->error != NULL) {
@@ -176,12 +182,16 @@ static void op_power(bool on) {
     gap9_spi_bus(true);
     spis_ensure_armed();
     gap9_pwr(true);
+#ifdef CONFIG_SENSEI_GAP9_OTA
     /* The slot line goes high only once the rail is on (a driven pad of an unpowered GAP9 would back-power it). The
      * SSBL reads it after ROM and FSBL, many milliseconds later. */
     gpio_pin_set_dt(&slot_sel, atomic_get(&boot_slot) != 0);
+#endif
   } else {
     gap9_pwr(false);
+#ifdef CONFIG_SENSEI_GAP9_OTA
     gpio_pin_set_dt(&slot_sel, 0); /* never drive the pad of an unpowered GAP9 */
+#endif
     gap9_spi_bus(false);
     gpio_pin_set_dt(&i2c_sel, 0);
     camera_clock(false);
@@ -290,6 +300,7 @@ static void op_marker(bool on) {
   }
 }
 
+#ifdef CONFIG_SENSEI_GAP9_OTA
 /* The end of a reboot goes to the delivery work queue: the callback may call into the link. */
 static struct {
   g9_reboot_fn fn;
@@ -326,6 +337,7 @@ static void op_reboot_done(g9_reboot_fn fn, void *user, int err, const sensei_Ve
     k_work_submit(&reboot_done_work);
   }
 }
+#endif /* CONFIG_SENSEI_GAP9_OTA */
 
 static const struct g9_ops ops = {
     .power = op_power,
@@ -336,7 +348,9 @@ static const struct g9_ops ops = {
     .deliver = op_deliver,
     .error = op_error,
     .marker = op_marker,
+#ifdef CONFIG_SENSEI_GAP9_OTA
     .reboot_done = op_reboot_done,
+#endif
 };
 
 /* ---- work handlers (all run on the link thread) ---- */
@@ -448,6 +462,7 @@ static void reset_handler(struct k_work *w) {
   link_sync();
 }
 
+#ifdef CONFIG_SENSEI_GAP9_OTA
 /* Reboot: the slot is set by gap9_link_reboot(). GAP9 needs SPI_A like for a job. */
 static g9_reboot_fn reboot_cb;
 static void *reboot_user;
@@ -510,12 +525,16 @@ static void hold_tick_handler(struct k_work *w) {
   bus_sync();
   k_work_reschedule_for_queue(&link_wq, &hold_tick_work, K_MSEC(HOLD_TICK_MS));
 }
+#endif /* CONFIG_SENSEI_GAP9_OTA */
 
 /* ---- public API (gap9_zephyr.h) ---- */
 
 int gap9_link_init(const struct gap9_link_cfg *cfg) {
   const struct gpio_dt_spec *outs[] = {
-      &trig_pin,   &spi_sel, &i2c_sel, &slot_sel,
+      &trig_pin,   &spi_sel, &i2c_sel,
+#ifdef CONFIG_SENSEI_GAP9_OTA
+      &slot_sel,
+#endif
 #ifdef CONFIG_SENSEI_GAP9_SHARED_GPIOS
       &shared_sel,
 #endif
@@ -550,10 +569,12 @@ int gap9_link_init(const struct gap9_link_cfg *cfg) {
   k_work_init_delayable(&submit_work, submit_handler);
   k_work_init(&shutdown_work, shutdown_handler);
   k_work_init(&reset_work, reset_handler);
+#ifdef CONFIG_SENSEI_GAP9_OTA
   k_work_init(&reboot_work, reboot_handler);
   k_work_init(&reboot_done_work, reboot_done_handler);
   k_work_init(&hold_work, hold_handler);
   k_work_init_delayable(&hold_tick_work, hold_tick_handler);
+#endif
   k_work_init(&deliver_work, deliver_handler);
   k_work_init_delayable(&timer_work, timer_handler);
   link_ready = true;
@@ -593,6 +614,7 @@ void gap9_link_reset(void) {
   }
 }
 
+#ifdef CONFIG_SENSEI_GAP9_OTA
 int gap9_link_set_slot(uint8_t slot) {
   if (slot > 1) {
     return -EINVAL;
@@ -634,6 +656,7 @@ int gap9_link_reboot(uint8_t slot, void (*cb)(int err, const sensei_gap9_hello *
   k_work_submit_to_queue(&link_wq, &reboot_work);
   return 0;
 }
+#endif /* CONFIG_SENSEI_GAP9_OTA */
 
 void gap9_link_status_get(struct gap9_link_status *st) {
   st->state = core.state;

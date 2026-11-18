@@ -129,8 +129,8 @@ without the library).
 --test-dir build`.
 
 - `test_secure` checks keys, envelopes (both directions), tampering, replay and counters against the vectors in
-  `tests/generated/vectors.h`. The vectors come from the Python implementation in the SENSEI IEQ node repository
-  (`python -m sensei_host.vectors`); do not edit the file by hand.
+  `tests/generated/vectors.h`. The vectors come from the Python implementation in `tools/python`
+  (`python -m sensei_sdk.vectors`, `make vectors`; CI checks that they are current); do not edit the file by hand.
 - `test_e2e` checks the key store (`sensei_e2e`) with a fake flash: first start, provisioning, key A then B then A,
   two senders, failing writes, full table of senders, clearing and the floor, reset, a damaged key.
 

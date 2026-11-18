@@ -1,0 +1,28 @@
+# SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+# SPDX-License-Identifier: Apache-2.0
+#
+# Authors:
+# - Philip Wiese <wiesep@iis.ee.ethz.ch>
+
+[project]
+name = "sensei-sdk"
+version = "0.1.0"
+description = "Host side of the SENSEI SDK: stream framing, end-to-end envelope, MCUboot SMP client, diagnostics"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.11"
+dependencies = ["cryptography>=43"]
+
+[project.optional-dependencies]
+serial = ["pyserial>=3.5"]
+ble = ["bleak>=0.22"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["sensei_sdk"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

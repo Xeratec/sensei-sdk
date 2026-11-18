@@ -51,7 +51,8 @@ scripts/twister.sh --host                    # no Docker: Linux with gcc, a west
 ```
 
 The script is described in its header. Docker needs the image `sensei-twister:ncs-3.4.1` (built on first use from
-`scripts/docker/twister.Dockerfile`; its base is `sensei-nrf:ncs-3.4.1` of the node repository; it adds the host compiler for
+`scripts/docker/build.sh twister`; its base is `sensei-nrf:ncs-3.4.1`, the toolchain image of this repository, built from
+`scripts/docker/nrf.Dockerfile` if it is missing; the twister image adds the host compiler for
 native_sim and QEMU for `qemu_cortex_m3` and `mps2/an521/cpu0`, and builds the ARM test with the Zephyr SDK of the base image) and an NCS v3.4.1
 west workspace (`SENSEI_NCS_WORKSPACE`, default `~/Documents/work/Tools/sensei-ncs-v3.4.1`), mounted read-only.
 Output goes to `build/twister`. A fresh workspace for the tests alone: `scripts/west-twister.yml`. CI does that:

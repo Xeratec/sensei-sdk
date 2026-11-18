@@ -159,6 +159,12 @@ Plain C libraries for nRF (Zephyr), GAP9 and host builds. Each folder has `inclu
 | [lib/sensei_diag](lib/sensei_diag/README.md) | `CONFIG_SENSEI_DIAG_CODEC` | Reset cause bits, fault record and boot state of the diagnostics module (byte layout, names) |
 | [lib/sensei_charge](lib/sensei_charge/README.md) | `CONFIG_SENSEI_CHARGE` | Software charge counter: states and events from a table, self-discharge, days left, retained record, swap rules |
 
+## Host tools: Python package (`tools/python`)
+[tools/python](tools/python/README.md) is the package `sensei_sdk` for the host side of every app: stream framing, the end-to-end envelope and key store, the MCUboot SMP client and simulator, fault record decoding and the serial and BLE transports. Each module mirrors one of the C libraries above, and the tests and the generated C test vectors keep the two in line (`make test-python`).
+
+## Docker images (`scripts/docker`)
+`scripts/docker/build.sh nrf` builds the toolchain image (nRF Connect SDK v3.4.1, Zephyr SDK) that the Twister runs and the apps' firmware builds in Docker use as a base; `build.sh twister` adds the host compiler and QEMU (`scripts/twister.sh` does that on first use). See [scripts/docker/README.md](scripts/docker/README.md).
+
 ## GAP9 bootloader (`GAP9/ssbl`, `GAP9/layouts`)
 Optional second stage bootloader for over-the-air updates of the GAP9 firmware: two firmware slots (A and B) in the MRAM, selected by the nRF5340 through one wire (P1.04 to GAP9 pad 56). Apps that keep the SDK bootloader and the default layout are not affected. See [GAP9/ssbl](GAP9/ssbl/README.md) and [GAP9/layouts](GAP9/layouts/README.md).
 

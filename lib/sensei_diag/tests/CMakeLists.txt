@@ -20,3 +20,9 @@ add_executable(test_diag test_diag.c)
 target_link_libraries(test_diag PRIVATE sensei_diag)
 target_compile_options(test_diag PRIVATE -Wall -Wextra -Werror)
 add_test(NAME diag COMMAND test_diag)
+
+# The Python codec (tools/python/sensei_sdk/diag.py) writes the vectors: python -m sensei_sdk.vectors
+add_executable(test_vectors test_vectors.c)
+target_link_libraries(test_vectors PRIVATE sensei_diag)
+target_compile_options(test_vectors PRIVATE -Wall -Wextra -Werror)
+add_test(NAME diag_vectors COMMAND test_vectors)

@@ -19,7 +19,7 @@ host tools use the same layout.
 - **Fault record** (`struct sensei_diag_fault`): reason, PC, LR, xPSR, uptime, image id, boot counter, last job id, thread
   name. `sensei_diag_fault_pack()` and `_unpack()` give the 52 B form that goes into the retained RAM and the settings
   (little endian, magic, version, CRC-32). The unpack tells a foreign RAM content (`-ENOMSG`) from a damaged record
-  (`-EBADMSG`). `tools/host/sensei_host/diag.py` reads the same bytes.
+  (`-EBADMSG`). `tools/python/sensei_sdk/diag.py` reads the same bytes (`tests/generated/vectors.h` checks both).
 - **Boot state**: `sensei_diag_boot_count_next()` counts a boot in a 12 B state (starts at 1 if the state is not valid).
 
 ## Use

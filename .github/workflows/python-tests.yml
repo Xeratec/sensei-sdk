@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 ---
 
-name: CI • Python tests (GAP9 image builder)
+name: CI • Python tests (sensei_sdk, GAP9 image builder)
 
 "on":
   push:
@@ -21,7 +21,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      # The test of the update writer builds lib/sensei_gap9 with nanopb (a submodule) and a C compiler.
+      # The test of the update writer builds lib/sensei_gap9 with nanopb (a submodule) and a C compiler. make
+      # test-python runs the tests of tools/python and of the GAP9 image builder, and checks that the C test vectors
+      # of lib/ are what tools/python writes.
       - name: Checkout code
         uses: actions/checkout@v4
         with:
@@ -35,8 +37,9 @@ jobs:
         with:
           python-version: "3.12"
 
-      # imgtool signs the test images. Pinned to the versions that the tests were run with.
-      # CI is set by GitHub Actions: the tests then fail instead of skipping (GAP9/ssbl/tools/conftest.py).
+      # imgtool signs the test images; cryptography is also the one dependency of tools/python. Pinned to the versions
+      # that the tests were run with. CI is set by GitHub Actions: the GAP9 tests then fail instead of skipping
+      # (GAP9/ssbl/tools/conftest.py).
       - name: Install test tools
         run: python -m pip install pytest==9.2.0 cryptography==50.0.2 imgtool==2.5.0
 

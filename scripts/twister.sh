@@ -10,9 +10,9 @@
 #
 #   scripts/twister.sh [--host] [--coverage] [-- <twister arguments>]
 #
-# Default: in Docker (image sensei-twister:ncs-3.4.1, built on first use from scripts/docker/twister.Dockerfile;
-# it has the Zephyr SDK for the ARM build and QEMU). native_sim needs Linux and a host compiler, so this works on
-# macOS too.
+# Default: in Docker (image sensei-twister:ncs-3.4.1, built on first use by scripts/docker/build.sh from
+# scripts/docker/twister.Dockerfile on top of the toolchain image of scripts/docker/nrf.Dockerfile; it has the Zephyr
+# SDK for the ARM build and QEMU). native_sim needs Linux and a host compiler, so this works on macOS too.
 # --host: run Twister directly (Linux with gcc and a west workspace; this is what CI does). Only native_sim runs
 # there unless TWISTER_PLATFORM adds a platform whose toolchain and emulator you have.
 # --coverage: line and branch coverage of the SDK sources on native_sim (gcc gcov, gcovr). This run is native_sim only
@@ -26,6 +26,7 @@
 #   TWISTER_PLATFORM      platforms, separated by spaces (default: native_sim/native/64 qemu_cortex_m3 mps2/an521/cpu0; with --host
 #                         or --coverage native_sim/native/64 only)
 #   TWISTER_IMAGE         Docker image (default sensei-twister:ncs-3.4.1)
+#   SENSEI_NRF_IMAGE      its base image, the toolchain (default sensei-nrf:ncs-3.4.1; scripts/docker/build.sh)
 #
 # Examples:
 #   scripts/twister.sh
@@ -100,11 +101,7 @@ if [ "$host" = 1 ]; then
 fi
 
 command -v docker >/dev/null || { echo "docker not found (or use --host)" >&2; exit 1; }
-if ! docker image inspect "$image" >/dev/null 2>&1; then
-  echo "Image $image missing: building it from scripts/docker/twister.Dockerfile" >&2
-  echo "(its base sensei-nrf:ncs-3.4.1 comes from firmware/scripts/docker/nrf.Dockerfile of the node repository)" >&2
-  docker build -f "$sdk/scripts/docker/twister.Dockerfile" -t "$image" "$sdk/scripts/docker"
-fi
+TWISTER_IMAGE="$image" "$sdk/scripts/docker/build.sh" twister --if-missing
 
 tw_args /sdk /out/twister-out
 # The Zephyr SDK builds the ARM tests; native_sim uses the host compiler of the image. The shell around Twister runs

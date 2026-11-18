@@ -26,8 +26,8 @@ short) and import `sensei/types.proto`, `sensei/lpwan.proto` and `sensei/gap9_ot
 
 ## Stream channels and limits
 
-`sensei_link.h` holds the constants that both ends of a link share (the node tools mirror them; the node repository
-checks that the copies agree).
+`sensei_link.h` holds the constants that both ends of a link share (`tools/python/sensei_sdk/framing.py` mirrors them, and
+`tools/python/tests/test_sdk_constants.py` checks that the copies agree).
 
 | Channel | Name | Carries |
 |---|---|---|

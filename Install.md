@@ -55,18 +55,18 @@ Details: [NRF/tests/README.md](NRF/tests/README.md).
 The GAP9 code (`GAP9/`, the GAP9 side of the examples) builds with **GAP SDK 5.22.3**, in a Docker image tagged
 `gap9:v5.22.3-sensei`. Other SDK versions are not supported.
 
-The SDK source is the branch `wiesep/sensei` of the gap-sdk (release-v5.22.3 plus three fixes for NNTool and the
-AutoTiler). The exact commit is pinned in `firmware/west.yml` of the node repository (project `gap-sdk`, group
-`gap9`, access to `pulp-platform/gap-sdk` needed):
+The SDK source is the branch `wiesep/sensei` of `pulp-platform/gap-sdk` (release-v5.22.3 plus three fixes for NNTool
+and the AutoTiler; access needed). Use the commit `6e89664e68a4951af3a97df00fa87d5ae4d56e61`. An app that has a west
+manifest can pin it there as a project of its own (`url: https://github.com/pulp-platform/gap-sdk.git`, a group that
+`west update` skips by default):
 
 ```bash
-west config manifest.group-filter -- +gap9
-west update gap-sdk
+git clone --branch wiesep/sensei https://github.com/pulp-platform/gap-sdk.git
+git -C gap-sdk checkout 6e89664e68a4951af3a97df00fa87d5ae4d56e61
 ```
 
-To build the image, see [GAP9.md](https://github.com/Xeratec/Deeploy/blob/pr/gap9/GAP9.md) of Deeploy and
-`firmware/scripts/docker/README.md` of the node repository (section "GAP9 image"). Build the SDK from the pinned
-commit in the image:
+The recipe of the image is not public. To build one, see [GAP9.md](https://github.com/Xeratec/Deeploy/blob/pr/gap9/GAP9.md) of
+Deeploy. Build the SDK from the pinned commit in the image:
 
 ```bash
 cd $GAP_SDK_HOME

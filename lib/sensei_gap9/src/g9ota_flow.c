@@ -47,6 +47,42 @@ static bool in_recovery(const struct g9ota_flow *f) { return f->ops->recovery !=
 
 /* ---- settings ---- */
 
+/* The record of version 2 (before min_version). */
+struct g9ota_record_v2 {
+  uint8_t version;
+  struct {
+    struct sensei_gap9_trial trial;
+    uint32_t known[2];
+  } store;
+};
+
+bool g9ota_record_decode(const void *buf, size_t len, struct g9ota_store *out) {
+  if (len == sizeof(struct g9ota_record)) {
+    struct g9ota_record r;
+
+    memcpy(&r, buf, sizeof(r));
+    if (r.version != G9OTA_RECORD_VERSION || r.store.trial.confirmed > 1 || r.store.trial.trial > 1) {
+      return false;
+    }
+    *out = r.store;
+    return true;
+  }
+  if (len == sizeof(struct g9ota_record_v2)) {
+    struct g9ota_record_v2 r;
+
+    memcpy(&r, buf, sizeof(r));
+    if (r.version != 2u || r.store.trial.confirmed > 1 || r.store.trial.trial > 1) {
+      return false;
+    }
+    memset(out, 0, sizeof(*out));
+    out->trial = r.store.trial;
+    out->known[0] = r.store.known[0];
+    out->known[1] = r.store.known[1];
+    return true; /* min_version 0: the flow seeds it from the confirmed slot */
+  }
+  return false;
+}
+
 static int persist_try(struct g9ota_flow *f) {
   struct g9ota_store st = {.trial = f->trial, .known = {f->known[0], f->known[1]}, .min_version = f->min_version};
   int rc = -EIO;

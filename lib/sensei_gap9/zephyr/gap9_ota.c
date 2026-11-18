@@ -27,43 +27,24 @@
 LOG_MODULE_REGISTER(sensei_gap9_ota, CONFIG_SENSEI_GAP9_LOG_LEVEL);
 
 #define SETTINGS_KEY "sensei_gap9/trial"
-#define STORE_VERSION 3u /* 3: min_version (2: trial and known only; a v2 record is read as it is, min_version 0) */
 
 static const struct sensei_gap9_ota_cfg *cfg;
 static struct g9ota_flow flow;
 static struct k_work_delayable poll_work;
 
-/* The stored trial state. */
-static struct {
-  uint8_t version;
-  struct g9ota_store store;
-} stored;
+/* The stored state: the record of g9ota_flow.h (a record of version 2 is read as well). */
+static struct g9ota_store stored;
 static bool stored_valid;
 
-/* The record of version 2 (before min_version): the confirmed slot and the known ids survive an update of the nRF5340
- * firmware; losing them would send the node into the lost-settings probe (slot A is confirmed, whatever was). */
-static struct {
-  uint8_t version;
-  struct {
-    struct sensei_gap9_trial trial;
-    uint32_t known[2];
-  } store;
-} stored_v2;
-
 static int store_set(const char *name, size_t len, settings_read_cb read_cb, void *cb_arg) {
-  if (strcmp(name, "trial") != 0) {
-    return 0;
-  }
-  if (len == sizeof(stored) && read_cb(cb_arg, &stored, sizeof(stored)) == (ssize_t)sizeof(stored) &&
-      stored.version == STORE_VERSION && stored.store.trial.confirmed < 2 && stored.store.trial.trial < 2) {
+  union {
+    struct g9ota_record v3;
+    uint8_t raw[sizeof(struct g9ota_record) + 8];
+  } rec;
+
+  if (strcmp(name, "trial") == 0 && len <= sizeof(rec.raw) && read_cb(cb_arg, rec.raw, len) == (ssize_t)len &&
+      g9ota_record_decode(rec.raw, len, &stored)) {
     stored_valid = true;
-  } else if (len == sizeof(stored_v2) && read_cb(cb_arg, &stored_v2, sizeof(stored_v2)) == (ssize_t)sizeof(stored_v2) &&
-             stored_v2.version == 2u && stored_v2.store.trial.confirmed < 2 && stored_v2.store.trial.trial < 2) {
-    memset(&stored, 0, sizeof(stored));
-    stored.version = STORE_VERSION;
-    stored.store.trial = stored_v2.store.trial;
-    memcpy(stored.store.known, stored_v2.store.known, sizeof(stored.store.known));
-    stored_valid = true; /* min_version 0: the flow seeds it from the confirmed slot */
   }
   return 0;
 }
@@ -140,9 +121,9 @@ static int op_verify(const uint8_t hash[32], const uint8_t sig[64], const uint8_
 }
 
 static int op_persist(const struct g9ota_store *st) {
-  stored.version = STORE_VERSION;
-  stored.store = *st;
-  return settings_save_one(SETTINGS_KEY, &stored, sizeof(stored)) < 0 ? -EIO : 0;
+  struct g9ota_record rec = {.version = G9OTA_RECORD_VERSION, .store = *st};
+
+  return settings_save_one(SETTINGS_KEY, &rec, sizeof(rec)) < 0 ? -EIO : 0;
 }
 
 static uint32_t op_now(void) { return k_uptime_get_32(); }
@@ -191,7 +172,7 @@ int sensei_gap9_ota_init(const struct sensei_gap9_ota_cfg *c) {
   cfg = c;
   k_work_init_delayable(&poll_work, poll_fn);
   (void)settings_load_subtree("sensei_gap9");
-  if (g9ota_flow_init(&flow, &ops, stored_valid ? &stored.store : NULL) != 0) {
+  if (g9ota_flow_init(&flow, &ops, stored_valid ? &stored : NULL) != 0) {
     return -EINVAL;
   }
   LOG_DBG("GAP9 slot %c", 'A' + g9ota_flow_slot(&flow)); /* debug only: the Status message has the slot */

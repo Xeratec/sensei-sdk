@@ -1995,6 +1995,61 @@ static void test_min_version_seed(void) {
         R()->fail == sensei_Gap9OtaFail_GAP9_OTA_FAIL_ROLLBACK);
 }
 
+/* ---- the record in the settings ---- */
+
+static void test_record_migration(void) {
+  struct g9ota_store out;
+  struct g9ota_record v3 = {.version = G9OTA_RECORD_VERSION};
+  /* the layout of version 2: a record of the flow before min_version (the glue read it as `{version, g9ota_store}`) */
+  struct {
+    uint8_t version;
+    struct {
+      struct sensei_gap9_trial trial;
+      uint32_t known[2];
+    } store;
+  } v2;
+  uint8_t buf[64];
+
+  /* version 3 is read as it is */
+  v3.store.trial = closed(1);
+  v3.store.known[0] = 0x11223344;
+  v3.store.known[1] = 0x55667788;
+  v3.store.min_version = (1u << 24) | (4u << 16);
+  CHECK(g9ota_record_decode(&v3, sizeof(v3), &out) && out.trial.confirmed == 1 && out.known[0] == 0x11223344 &&
+        out.known[1] == 0x55667788 && out.min_version == v3.store.min_version);
+
+  /* version 2 (the layout is the old one, shorter by min_version): trial and ids survive, min_version 0 */
+  memset(&v2, 0, sizeof(v2));
+  v2.version = 2;
+  v2.store.trial = closed(1);
+  v2.store.trial.open = true;
+  v2.store.trial.trial = 0;
+  v2.store.known[0] = 0xAABBCCDD;
+  v2.store.known[1] = 0x01020304;
+  CHECK(sizeof(v2) == 20 && sizeof(struct g9ota_record) == 24); /* the sizes the stored records have */
+  CHECK(g9ota_record_decode(&v2, sizeof(v2), &out));
+  CHECK(out.trial.confirmed == 1 && out.trial.open && out.trial.trial == 0 && out.known[0] == 0xAABBCCDD &&
+        out.known[1] == 0x01020304 && out.min_version == 0);
+
+  /* the flow takes it: node with the confirmed slot B stays on B, no probe */
+  setup(&out.trial, 1, 1, 3);
+  g9ota_flow_init(&flow, cur_ops, &out);
+  CHECK(!flow.probe_pending && flow.known[1] == 0x01020304);
+
+  /* anything else is no record */
+  v2.version = 3;
+  CHECK(!g9ota_record_decode(&v2, sizeof(v2), &out));
+  v2.version = 1;
+  CHECK(!g9ota_record_decode(&v2, sizeof(v2), &out));
+  v3.store.trial.confirmed = 2;
+  CHECK(!g9ota_record_decode(&v3, sizeof(v3), &out));
+  v3.store.trial.confirmed = 0;
+  v3.version = 2;
+  CHECK(!g9ota_record_decode(&v3, sizeof(v3), &out));
+  memset(buf, 0, sizeof(buf));
+  CHECK(!g9ota_record_decode(buf, 7, &out) && !g9ota_record_decode(buf, sizeof(buf), &out));
+}
+
 int main(void) {
   test_update_and_trial(0);
   test_update_and_trial(1);
@@ -2030,5 +2085,6 @@ int main(void) {
   test_force_failures();
   test_job_meets_other_program();
   test_min_version_seed();
+  test_record_migration();
   DONE();
 }

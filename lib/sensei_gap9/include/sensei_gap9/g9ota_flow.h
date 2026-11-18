@@ -84,6 +84,18 @@ struct g9ota_store {
   uint32_t min_version;
 };
 
+/** The record of the settings (the Zephyr glue stores it under "sensei_gap9/trial"). Version 3 added `min_version`. */
+#define G9OTA_RECORD_VERSION 3u
+struct g9ota_record {
+  uint8_t version;
+  struct g9ota_store store;
+};
+
+/** Read a stored record of `len` bytes: version 3 as it is, version 2 (before `min_version`: trial and image ids only)
+ * with `min_version` 0, so that an update of the nRF5340 firmware does not send the node into the lost-settings probe.
+ * False for anything else (another length, version or slot numbers that are no slots). */
+bool g9ota_record_decode(const void *buf, size_t len, struct g9ota_store *out);
+
 /** Result of a job: `info` is GAP9's answer when `err` is 0. Errors: -ENOTSUP (a GAP9 build without the update, one
  * that is not armed, or one that does not know the job: the host must not retry), -EPROTO (an answer that is no
  * Gap9OtaInfo), -EIO (the job failed), -ETIMEDOUT, -ECANCELED, -EBUSY ... */

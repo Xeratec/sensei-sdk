@@ -212,7 +212,7 @@ static inline int sensei_g9_slot_parse(sensei_g9_read_fn rd, void *ctx, uint32_t
 #define SENSEI_G9_HANDOFF_MAGIC 0x4F483953U /* "S9HO" */
 
 /* The record lies in L2 priv0 (0x1C000000 ... 0x1C010000), below its end. GAP9 apps check at build time that nothing of
- * theirs lands on it: CONFIG_MALLOC_NO_L2_PRIV=y and no section over it (firmware/gap9/tools/check_handoff.py). */
+ * theirs lands on it: CONFIG_MALLOC_NO_L2_PRIV=y and no section over it (GAP9/ssbl/tools/check_handoff.py). */
 _Static_assert(SENSEI_G9_HANDOFF_ADDR >= SENSEI_G9_L2_BASE &&
                    SENSEI_G9_HANDOFF_ADDR + SENSEI_G9_HANDOFF_SIZE <= SENSEI_G9_L2_BASE + 0x10000u,
                "the hand-off record must lie in L2 priv0");

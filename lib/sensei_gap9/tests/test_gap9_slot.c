@@ -64,7 +64,7 @@ static void area(unsigned i, uint32_t start, uint32_t ptr, uint32_t size, uint32
   put32(a + 16, flags);
 }
 
-/* A complete slot, like tools/make_gap9_ota.py builds it. */
+/* A complete slot, like GAP9/ssbl/tools/pack_slot.py builds it. */
 static void build(void) {
   memset(slot, 0xff, sizeof(slot));
   put32(slot, SENSEI_G9_MCUBOOT_MAGIC);

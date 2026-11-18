@@ -45,10 +45,19 @@ jobs:
       - name: Cache west workspace
         uses: actions/cache@v4
         with:
+          # ws/* and not ws: the exclusion only works against a glob, otherwise the cache restores an old SDK copy
           path: |
-            ws
+            ws/*
             !ws/sensei-sdk
-          key: twister-ws-${{ runner.os }}-${{ hashFiles('ws/sensei-sdk/scripts/west-twister.yml') }}
+          key: twister-ws2-${{ runner.os }}-${{ hashFiles('ws/sensei-sdk/scripts/west-twister.yml') }}
+
+      - name: Checkout code again (after the cache restore)
+        uses: actions/checkout@v4
+        with:
+          path: ws/sensei-sdk
+
+      - name: Check that the tested code is the pushed commit
+        run: test "$(git -C ws/sensei-sdk rev-parse HEAD)" = "$GITHUB_SHA" && git -C ws/sensei-sdk diff --quiet
 
       - name: West workspace
         working-directory: ws

@@ -28,6 +28,7 @@ target_link_libraries(sensei_gap9_core PUBLIC sensei_link)
 # the image helpers of NRF/system/ota (header only).
 add_library(sensei_gap9_ota STATIC
   ${CMAKE_CURRENT_LIST_DIR}/src/g9ota.c
+  ${CMAKE_CURRENT_LIST_DIR}/src/g9rec.c
   ${CMAKE_CURRENT_LIST_DIR}/src/g9ota_flow.c)
 target_include_directories(sensei_gap9_ota PUBLIC
   ${CMAKE_CURRENT_LIST_DIR}/include

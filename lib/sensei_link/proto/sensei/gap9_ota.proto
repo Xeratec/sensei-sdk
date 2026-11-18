@@ -54,6 +54,8 @@ enum Gap9OtaFail {
   GAP9_OTA_FAIL_RATE = 10;     // too many new transfers in a short time: wait and ask again (result BUSY)
   GAP9_OTA_FAIL_BOOT = 11;     // nRF5340: the new image did not start, spoke another protocol or failed its check
   GAP9_OTA_FAIL_NO_SLOT = 12;  // nRF5340: revert, but the other slot holds no image
+  GAP9_OTA_FAIL_ROLLBACK = 13; // nRF5340: older than the highest version this node ever confirmed
+  GAP9_OTA_FAIL_KEEP = 14;     // nRF5340: GAP9 is in recovery and keeps another slot than the confirmed one
 }
 
 // One slot as GAP9 finds it.
@@ -70,6 +72,10 @@ message Gap9OtaBegin {
   // Keep an open transfer (also one saved before GAP9 lost power) of the same size and SHA-256 and answer its offset.
   // Else, or if there is none, a new transfer starts at 0.
   bool resume = 4;
+  // Host to nRF5340 only: power GAP9 with the recovery strap, so that its boot loader enters recovery although a slot
+  // boots (a signed image that hangs before its HELLO). Once per session, never while a transfer is open. Needs a
+  // build with recovery; GAP9 ignores the field. Untested on hardware (OTA.md, "Recovery").
+  bool force_recovery = 5;
 }
 
 // nRF5340 to GAP9: the bytes arrive in order, `offset` is where `data` goes (the offset of the last answer).
@@ -115,6 +121,9 @@ message Gap9OtaInfo {
   bytes signature = 13;
   bytes key_hash = 14;
   bool sealed = 15; // the slot of the transfer has its magic (seal done): the SSBL may start it
+  // After a successful finish: the version in the MCUboot header of the image (the signature covers it); the nRF5340
+  // checks it against the highest version it confirmed (rollback).
+  Version version = 16;
 }
 
 // Host to nRF5340: bytes of the image. Flow: Gap9OtaBegin, Gap9OtaChunk until the end, GAP9_OTA_ACTION_FINISH,
@@ -152,4 +161,38 @@ message Gap9OtaReply {
   Gap9Slot slot_a = 10;
   Gap9Slot slot_b = 11;
   uint32 slot_size = 12; // bytes a slot holds: the largest image
+  // GAP9 is in recovery: its boot loader found no bootable slot (or was forced) and runs the update writer.
+  // `booted_slot` is the slot it keeps (the confirmed one), the transfer goes into the other. 1: both slots failed, 2:
+  // forced.
+  bool recovery = 13;
+  uint32 recovery_reason = 14;
+}
+
+// ---- recovery: the update writer in the boot loader (GAP9/ssbl, lib/sensei_gap9/OTA.md, "Recovery") ----
+//
+// When no slot boots, the SSBL does not stop: it sends a HELLO with major 0xFFFF (minor: this protocol, patch: the
+// reason) and serves these jobs over the same SPI link. The writer is the one of the update (g9ota.h) with
+// `booted` = the slot on the slot line (the keep slot, never written). It checks no signature: the nRF5340 does and
+// then sends `seal`.
+enum Gap9RecoveryStatus {
+  GAP9_RECOVERY_OK = 0;      // `info` is the answer of the writer (its `result` is the verdict)
+  GAP9_RECOVERY_BAD_JOB = 1; // not a job of this protocol
+}
+
+message Gap9RecoveryJob {
+  uint32 seq = 1;
+  oneof body {
+    Gap9OtaBegin begin = 2;
+    Gap9OtaData chunk = 3;
+    Gap9OtaStatus status = 4; // with `verify` and a slot: check that slot like finish does
+    Empty finish = 5;
+    Empty abort = 6;
+    Gap9OtaSeal seal = 7;
+  }
+}
+
+message Gap9RecoveryResult {
+  uint32 seq = 1;
+  Gap9RecoveryStatus status = 2;
+  Gap9OtaInfo info = 3;
 }

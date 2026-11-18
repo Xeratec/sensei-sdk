@@ -476,6 +476,8 @@ static sensei_Gap9OtaResult done(struct g9ota *o, sensei_Gap9OtaInfo *info, bool
       info->key_hash.size = 32;
       memcpy(info->key_hash.bytes, o->key_hash, 32);
     }
+    info->has_version = true;
+    info->version = o->image_version;
   }
   return res;
 }
@@ -826,6 +828,7 @@ sensei_Gap9OtaResult g9ota_finish(struct g9ota *o, sensei_Gap9OtaInfo *info) {
   memcpy(o->signature, pf.sig, 64);
   memcpy(o->key_hash, pf.key_hash, 32);
   o->have_key_hash = pf.have_key_hash;
+  o->image_version = (sensei_Version){si.ver_major, si.ver_minor, si.ver_revision, 0};
 
   /* 5. Not older than the image that runs (the same version is allowed). The running slot may
    * hold no image (a development flash): then there is nothing to compare with. */
@@ -921,6 +924,8 @@ sensei_Gap9OtaResult g9ota_verify(struct g9ota *o, uint8_t slot, sensei_Gap9OtaI
   }
   fill_state(o, info, sensei_Gap9OtaResult_GAP9_OTA_OK);
   fill_slots(o, info);
+  info->has_version = true;
+  info->version = (sensei_Version){si.ver_major, si.ver_minor, si.ver_revision, 0};
   info->image_hash.size = 32;
   memcpy(info->image_hash.bytes, pf.hash, 32);
   info->signature.size = 64;

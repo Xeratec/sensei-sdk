@@ -11,3 +11,4 @@ sensei.Gap9OtaInfo.signature  max_size:64
 sensei.Gap9OtaInfo.key_hash   max_size:32
 sensei.Gap9OtaChunk.data      max_size:188
 sensei.Gap9OtaSeal.image_hash max_size:32 fixed_length:true
+sensei.Gap9RecoveryJob anonymous_oneof:true

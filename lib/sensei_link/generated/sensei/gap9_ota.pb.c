@@ -41,6 +41,14 @@ PB_BIND(sensei_Gap9OtaCommand, sensei_Gap9OtaCommand, AUTO)
 PB_BIND(sensei_Gap9OtaReply, sensei_Gap9OtaReply, AUTO)
 
 
+PB_BIND(sensei_Gap9RecoveryJob, sensei_Gap9RecoveryJob, 2)
+
+
+PB_BIND(sensei_Gap9RecoveryResult, sensei_Gap9RecoveryResult, 2)
+
+
+
+
 
 
 

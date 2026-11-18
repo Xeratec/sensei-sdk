@@ -16,6 +16,7 @@
 
 #include "bsp/bsp.h"
 #include "bsp/fs.h"
+#include "sensei_gap9/g9ota_mram_ops.h"
 #include "sensei_gap9/gap9_side.h"
 #include "sensei_gap9/gap9_slot.h"
 
@@ -29,66 +30,12 @@
 /* The slot line (GAP9 pad 56, driven by the nRF5340 P1.04): low A, high B. */
 #define SLOT_PAD PI_PAD_056
 
-static struct pi_device ota_flash_dev;
-static struct pi_mram_conf ota_conf;
-static bool ota_flash_open;
 static struct g9ota g_ota; /* 8 KiB buffer: in .bss, not in the image */
 static bool ready;
 static uint8_t booted;
 static bool from_slot;
 static uint32_t readfs_off = 0xFFFFFFFFu;
-
-/* ---- MRAM operations (blocking) ---- */
-
-/* Reads go through a small buffer in L2 on a 16 byte window: the uDMA wants aligned L2 addresses
- * and the parsers read 4 and 32 bytes at any offset. Whole aligned blocks go straight to the
- * caller's buffer. */
-static PI_L2 uint8_t bounce[256 + 32];
-
-static int mram_read(void *ctx, uint32_t addr, void *buf, uint32_t len) {
-  uint8_t *out = buf;
-
-  (void)ctx;
-  if (!ota_flash_open) {
-    return -ENODEV;
-  }
-  if ((addr & 15u) == 0 && (len & 15u) == 0 && (((uintptr_t)buf) & 3u) == 0) {
-    pi_flash_read(&ota_flash_dev, addr, buf, len);
-    return 0;
-  }
-  while (len > 0) {
-    uint32_t a0 = addr & ~15u;
-    uint32_t head = addr - a0;
-    uint32_t n = len < sizeof(bounce) - 32u ? len : (uint32_t)sizeof(bounce) - 32u;
-    uint32_t span = (head + n + 15u) & ~15u;
-
-    pi_flash_read(&ota_flash_dev, a0, bounce, span);
-    memcpy(out, bounce + head, n);
-    out += n;
-    addr += n;
-    len -= n;
-  }
-  return 0;
-}
-
-static int mram_erase(void *ctx, uint32_t addr) {
-  (void)ctx;
-  if (!ota_flash_open) {
-    return -ENODEV;
-  }
-  pi_flash_erase_sector(&ota_flash_dev, addr);
-  return 0;
-}
-
-static int mram_program(void *ctx, uint32_t addr, const void *buf, uint32_t len) {
-  (void)ctx;
-  if (!ota_flash_open) {
-    return -ENODEV;
-  }
-  return pi_flash_program(&ota_flash_dev, addr, buf, len) == 0 ? 0 : -EIO;
-}
-
-static const struct g9ota_flash mram_ops = {mram_read, mram_erase, mram_program};
+#define mram_ops (g9ota_mram_flash())
 
 /* ---- Which slot ---- */
 
@@ -116,7 +63,7 @@ struct slot_ctx {
 };
 
 static int slot_rd(void *c, uint32_t off, void *buf, size_t len) {
-  return mram_read(NULL, ((const struct slot_ctx *)c)->base + off, buf, (uint32_t)len);
+  return mram_ops->read(NULL, ((const struct slot_ctx *)c)->base + off, buf, (uint32_t)len);
 }
 
 /* The slot is a complete image with a container: this application was started from it. */
@@ -145,13 +92,10 @@ int g9ota_mram_init(const char *kind, const struct g9ota_cfg *test_area) {
   const char *why = "";
   int h, run, sel, rc = 0;
 
-  pi_mram_conf_init(&ota_conf);
-  pi_open_from_conf(&ota_flash_dev, &ota_conf);
-  if (pi_flash_open(&ota_flash_dev)) {
+  if (g9ota_mram_open() != 0) {
     LOG_ERR("MRAM does not open\n");
     return -EIO;
   }
-  ota_flash_open = true;
   /* The slot this application runs from is the one in the hand-off record of the SSBL, and only
    * that. The writer is armed with a record that names a slot holding a complete image: there
    * the other slot is free to write. Without one (single-image layout from `make flash`, JTAG
@@ -159,7 +103,7 @@ int g9ota_mram_init(const char *kind, const struct g9ota_cfg *test_area) {
    * lie where the checkpoint and slot A are: nothing is written and the update jobs answer
    * NOT_BUILT. */
   h = sensei_g9_handoff_decode((const volatile uint32_t *)SENSEI_G9_HANDOFF_ADDR);
-  run = g9ota_arm(&mram_ops, NULL, &real, h);
+  run = g9ota_arm(mram_ops, NULL, &real, h);
   if (run >= 0) {
     booted = (uint8_t)run;
     (void)slot_is_image(booted, &si);
@@ -170,12 +114,12 @@ int g9ota_mram_init(const char *kind, const struct g9ota_cfg *test_area) {
   /* A test area (local test on the single-image layout, whose readfs and app lie where the checkpoint and slot A
    * would be: the test uses its own area and writes only there) is used only in a build with
    * G9OTA_MRAM_TEST_AREA and only when no hand-off record exists. Otherwise it is refused and nothing is written. */
-  sel = g9ota_select(&mram_ops, NULL, &real, test_area, TEST_AREA_ALLOWED, h, &cfg);
+  sel = g9ota_select(mram_ops, NULL, &real, test_area, TEST_AREA_ALLOWED, h, &cfg);
   if (sel >= 0) {
     if (test_area != NULL) {
       booted = 0;
     }
-    if (g9ota_init(&g_ota, &mram_ops, NULL, &cfg, booted) == 0) {
+    if (g9ota_init(&g_ota, mram_ops, NULL, &cfg, booted) == 0) {
       from_slot = true;
       g9ota_boot_note(&g_ota);
       ready = true;

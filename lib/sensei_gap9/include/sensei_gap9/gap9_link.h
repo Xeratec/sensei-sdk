@@ -38,6 +38,26 @@
 #define G9L_TX_CAP (SENSEI_SPI_HEADER_SIZE + SENSEI_SPI_MAX_PAYLOAD)
 #define G9L_RX_CAP G9L_TX_CAP
 
+/* Recovery: the SSBL (GAP9/ssbl) serves the update writer when no slot boots. Its HELLO has Version.major
+ * G9L_RECOVERY_MAJOR, minor = the protocol of the recovery jobs (Gap9RecoveryJob), patch = the reason. The version
+ * check of an app (codec gap9_major) never matches that major: an nRF5340 without recovery support refuses the HELLO
+ * (-EPROTO) and powers GAP9 off. */
+#define G9L_RECOVERY_MAJOR 0xFFFFu
+#define G9L_RECOVERY_PROTO 1u
+#define G9L_RECOVERY_BOTH_BAD 1u /* neither slot booted */
+#define G9L_RECOVERY_FORCED 2u   /* the strap was high (an image that hangs before its HELLO) */
+
+/* GAP9 pads (pi_pad_e numbers) of the link as the SSBL uses them in recovery; an app may use others. The slot line
+ * selects the slot, the strap (pad 57, nRF5340 P1.06 EXT_RX_SPI) forces recovery. The strap is UNVERIFIED hardware. */
+#define G9L_PAD_SCK 33u
+#define G9L_PAD_MOSI 38u
+#define G9L_PAD_MISO 39u
+#define G9L_PAD_CS 34u
+#define G9L_PAD_TRIGGER 58u
+#define G9L_PAD_SLOT 56u
+#define G9L_PAD_STRAP 57u
+#define G9L_SPI_ITF 1u
+
 /* SPI settings of the GAP9 master: mode 3, 8 bit, MSB first. */
 #define G9L_SPI_HZ_DEFAULT 2000000u
 

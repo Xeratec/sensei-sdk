@@ -132,7 +132,8 @@ struct g9ota {
   uint8_t signature[64];
   uint8_t key_hash[32];
   bool have_key_hash;
-  bool sealed; /* the magic is written */
+  sensei_Version image_version; /* from the header of the finished image (the signature covers it) */
+  bool sealed;                  /* the magic is written */
 
   bool timed;
   bool opened;

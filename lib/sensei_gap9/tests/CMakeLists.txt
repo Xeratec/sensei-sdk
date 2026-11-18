@@ -47,3 +47,10 @@ add_executable(test_g9ota_flow test_g9ota_flow.c)
 target_link_libraries(test_g9ota_flow PRIVATE sensei_gap9_ota)
 target_compile_options(test_g9ota_flow PRIVATE -Wall -Wextra -Werror)
 add_test(NAME g9ota_flow COMMAND test_g9ota_flow)
+
+# The recovery job server (src/g9rec.c): the writer behind Gap9RecoveryJob on a RAM MRAM with both slots bad: a transfer
+# into the other slot, finish, seal, the keep slot and the boot area never written, a power cut at every write.
+add_executable(test_g9rec test_g9rec.c)
+target_link_libraries(test_g9rec PRIVATE sensei_gap9_ota)
+target_compile_options(test_g9rec PRIVATE -Wall -Wextra -Werror)
+add_test(NAME g9rec COMMAND test_g9rec)

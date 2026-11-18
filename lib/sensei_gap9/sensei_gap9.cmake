@@ -25,6 +25,13 @@ set(SENSEI_GAP9_SIDE_INCLUDE_DIRS ${SENSEI_GAP9_DIR}/include)
 #   target_sources(app PRIVATE ${SENSEI_GAP9_OTA_SIDE_SOURCES})
 #   target_include_directories(app PRIVATE ${SENSEI_GAP9_OTA_INCLUDE_DIRS})
 #   target_link_options(app PRIVATE ${SENSEI_GAP9_OTA_LINK_OPTIONS})
-set(SENSEI_GAP9_OTA_SIDE_SOURCES ${SENSEI_GAP9_DIR}/src/g9ota.c ${SENSEI_GAP9_DIR}/gap9/g9ota_mram.c)
+set(SENSEI_GAP9_OTA_SIDE_SOURCES ${SENSEI_GAP9_DIR}/src/g9ota.c ${SENSEI_GAP9_DIR}/gap9/g9ota_mram_ops.c
+    ${SENSEI_GAP9_DIR}/gap9/g9ota_mram.c)
 set(SENSEI_GAP9_OTA_INCLUDE_DIRS ${SENSEI_GAP9_DIR}/include ${SENSEI_GAP9_DIR}/../../NRF/system/ota)
 set(SENSEI_GAP9_OTA_LINK_OPTIONS -Wl,--wrap=pi_fs_conf_init)
+
+# Recovery in the boot loader (GAP9/ssbl, OTA.md "Recovery"): the writer without the hand-off arming and the readfs
+# wrapper of an app, and the recovery job server. The SSBL also needs the link side (SENSEI_GAP9_SIDE_SOURCES) and
+# sensei_link.
+set(SENSEI_GAP9_RECOVERY_SOURCES ${SENSEI_GAP9_DIR}/src/g9ota.c ${SENSEI_GAP9_DIR}/src/g9rec.c
+    ${SENSEI_GAP9_DIR}/gap9/g9ota_mram_ops.c)

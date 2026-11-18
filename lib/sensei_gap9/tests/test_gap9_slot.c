@@ -30,7 +30,7 @@ static int fails, checks;
 #define TLVS 40u
 #define APP_OFF 0x20u
 #define NAREAS 2u
-#define APP_SIZE (SENSEI_G9_APP_HDR_SIZE + NAREAS * SENSEI_G9_APP_AREA_SIZE + 0x400u)
+#define APP_SIZE (SENSEI_G9_APP_HDR_SIZE + NAREAS * SENSEI_G9_APP_AREA_SIZE + 0x600u)
 #define RFS_OFF 0x1000u
 #define RFS_SIZE 0x800u
 #define IMG (RFS_OFF + RFS_SIZE)
@@ -219,7 +219,7 @@ static void test_app_check(void) {
   put32(slot + a + 32, 4); /* XIP */
   CHECK(sensei_g9_app_check(rd, NULL, a, APP_SIZE) == -EINVAL);
   build();
-  put32(slot + a + 4, 30); /* more areas than the app holds */
+  put32(slot + a + 4, 32); /* more areas than the app holds */
   CHECK(sensei_g9_app_check(rd, NULL, a, APP_SIZE) == -EINVAL);
 
   /* section data outside the app */
@@ -234,11 +234,43 @@ static void test_app_check(void) {
   area(1, 0x900, SENSEI_G9_SSBL_HI - 0x10, 0x100, 0);
   CHECK(sensei_g9_app_check(rd, NULL, a, APP_SIZE) == -EINVAL);
   build();
-  area(1, 0x900, SENSEI_G9_SSBL_HI, 0x100, 0); /* just above it is fine */
+  area(1, 0x900, SENSEI_G9_SSBL_HI, 0x100, 0); /* above the physical L2 (the loader would still write it) */
+  CHECK(sensei_g9_app_check(rd, NULL, a, APP_SIZE) == -EINVAL);
+  build();
+  area(1, 0x900, SENSEI_G9_L2_LOADER_END - 0x100, 0x100, 0);
+  CHECK(sensei_g9_app_check(rd, NULL, a, APP_SIZE) == -EINVAL);
+  build();
+  area(1, 0x900, SENSEI_G9_SSBL_LO - 0x100, 0x100, 0); /* ends at the SSBL */
   CHECK(sensei_g9_app_check(rd, NULL, a, APP_SIZE) == 0);
   build();
   area(1, 0x900, SENSEI_G9_L2_END - 0x10, 0x100, 0); /* past the L2 */
   CHECK(sensei_g9_app_check(rd, NULL, a, APP_SIZE) == -EINVAL);
+  /* data that runs over the end of the app */
+  build();
+  area(0, APP_SIZE - 0x100, 0x1c000100, 0x300, 0);
+  CHECK(sensei_g9_app_check(rd, NULL, a, APP_SIZE) == -EINVAL);
+  build();
+  area(0, APP_SIZE - 0x300, 0x1c000100, 0x300, 0); /* ends at the end of the app */
+  CHECK(sensei_g9_app_check(rd, NULL, a, APP_SIZE) == 0);
+  /* LZ4 blocks: sizes in the blocks must add up and stay in the app */
+  {
+    uint8_t *blk = slot + a + 0x700;
+
+    build();
+    put16(blk, 0x1FF);    /* 0x200 bytes decompressed */
+    put16(blk + 2, 0x7F); /* 0x80 compressed */
+    put16(blk + 0x84, 0xFF);
+    put16(blk + 0x86, 0x7F);
+    area(0, 0x700, 0x1c000100, 0x300, SENSEI_G9_APP_FLAG_LZ4 | (2u << 24));
+    CHECK(sensei_g9_app_check(rd, NULL, a, APP_SIZE) == 0);
+    area(0, 0x700, 0x1c000100, 0x2FF, SENSEI_G9_APP_FLAG_LZ4 | (2u << 24)); /* blocks add up to another size */
+    CHECK(sensei_g9_app_check(rd, NULL, a, APP_SIZE) == -EINVAL);
+    area(0, 0x700, 0x1c000100, 0x300, SENSEI_G9_APP_FLAG_LZ4); /* no blocks */
+    CHECK(sensei_g9_app_check(rd, NULL, a, APP_SIZE) == -EINVAL);
+    put16(blk + 2, 0xFFF); /* a block that runs out of the app */
+    area(0, 0x700, 0x1c000100, 0x300, SENSEI_G9_APP_FLAG_LZ4 | (2u << 24));
+    CHECK(sensei_g9_app_check(rd, NULL, a, APP_SIZE) == -EINVAL);
+  }
   /* over the hand-off record */
   {
     uint32_t h = SENSEI_G9_HANDOFF_ADDR;
@@ -250,7 +282,7 @@ static void test_app_check(void) {
     area(1, 0x900, h + SENSEI_G9_HANDOFF_SIZE - 4, 0x100, 0);
     CHECK(sensei_g9_app_check(rd, NULL, a, APP_SIZE) == -EINVAL);
     build();
-    area(1, 0x900, 0x1C000004, 0x2000, 0); /* the usual FC data below it */
+    area(1, 0x900, 0x1C000004, 0x200, 0); /* the usual FC data below it */
     area(0, 0x600, h + SENSEI_G9_HANDOFF_SIZE, 0x100, 0);
     CHECK(sensei_g9_app_check(rd, NULL, a, APP_SIZE) == 0);
     build();

@@ -148,8 +148,9 @@ GAP9 can hold two firmware images (slots A and B in the MRAM, `include/sensei_ga
 image or fails its CRC is skipped and the other one starts. The nRF5340 decides which slot is good (trial boot and
 confirm, `NRF/system/ota/sensei_gap9_trial.h`); the SSBL only follows the line.
 
-- The line is set before the GAP9 rail comes on (`op_power()`), and low whenever GAP9 is off, also while the nRF5340
-  boots (`pwr_boot_hook`): a high pin must never feed an unpowered GAP9. Untested on hardware: level at power-up.
+- The line is set right after the GAP9 rail comes on (`op_power()`; the SSBL reads it milliseconds later), and low
+  whenever GAP9 is off, also while the nRF5340 boots (`pwr_boot_hook`): a high pin must never feed an unpowered GAP9.
+  Untested on hardware: level at power-up.
 - `gap9_link_set_slot(slot)` chooses the slot of every later power-up (default A; the app sets it from its stored
   state). A GAP9 that is on is not touched.
 - `gap9_link_hold(true)` keeps GAP9 powered and SPI_A claimed between jobs, for an update session: it takes the bus like

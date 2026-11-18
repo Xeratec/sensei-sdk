@@ -182,9 +182,12 @@ static inline int sensei_g9_slot_parse(sensei_g9_read_fn rd, void *ctx, uint32_t
 #define SENSEI_G9_APP_HDR_SIZE 1332u /* sizeof(app_bin_desc_header_t) */
 #define SENSEI_G9_APP_AREA_SIZE 52u  /* sizeof(app_bin_desc_mem_area_t) */
 #define SENSEI_G9_APP_FLAG_OVERLAY 1u
-/** L2 and the part of it that the SSBL uses itself (linker script gap_mem_upper.ld): sections must not land there. */
+#define SENSEI_G9_APP_FLAG_LZ4 2u /* flags >> 24: number of blocks */
+/** The loader treats 0x1C000000 ... 0x1D000000 as L2 (pi_app_bin_load); the physical L2 ends at 0x1C190000. */
 #define SENSEI_G9_L2_BASE 0x1C000000U
-#define SENSEI_G9_L2_END 0x1D000000U
+#define SENSEI_G9_L2_LOADER_END 0x1D000000U
+#define SENSEI_G9_L2_END 0x1C190000U
+/** The part of L2 that the SSBL uses itself (linker script gap_mem_upper.ld): sections must not land there. */
 #define SENSEI_G9_SSBL_LO 0x1C100000U
 #define SENSEI_G9_SSBL_HI 0x1C190000U
 
@@ -208,6 +211,12 @@ static inline int sensei_g9_slot_parse(sensei_g9_read_fn rd, void *ctx, uint32_t
 #define SENSEI_G9_HANDOFF_SIZE 16u          /* no app section may cover it (sensei_g9_app_check) */
 #define SENSEI_G9_HANDOFF_MAGIC 0x4F483953U /* "S9HO" */
 
+/* The record lies in L2 priv0 (0x1C000000 ... 0x1C010000), below its end. GAP9 apps check at build time that nothing of
+ * theirs lands on it: CONFIG_MALLOC_NO_L2_PRIV=y and no section over it (firmware/gap9/tools/check_handoff.py). */
+_Static_assert(SENSEI_G9_HANDOFF_ADDR >= SENSEI_G9_L2_BASE &&
+                   SENSEI_G9_HANDOFF_ADDR + SENSEI_G9_HANDOFF_SIZE <= SENSEI_G9_L2_BASE + 0x10000u,
+               "the hand-off record must lie in L2 priv0");
+
 /** Fill the record for `slot`. */
 static inline void sensei_g9_handoff_encode(volatile uint32_t rec[4], uint8_t slot) {
   rec[1] = slot;
@@ -226,7 +235,8 @@ static inline int sensei_g9_handoff_decode(const volatile uint32_t rec[4]) {
 
 /**
  * Check the descriptor of the app at `app_off` (size `app_size`) before pi_app_bin_load() trusts it: magic, number of
- * areas, no XIP, every area inside the app, no L2 area over the SSBL or the hand-off record. The CRC of the section
+ * areas, no XIP, every area (and every LZ4 block) inside the app, no L2 area beyond the physical L2, over the SSBL or
+ * the hand-off record. The CRC of the section
  * data is not checked here. Returns 0, -EBADMSG (not an app binary), -EINVAL (damaged descriptor) or -EIO.
  */
 static inline int sensei_g9_app_check(sensei_g9_read_fn rd, void *ctx, uint32_t app_off, uint32_t app_size) {
@@ -268,8 +278,40 @@ static inline int sensei_g9_app_check(sensei_g9_read_fn rd, void *ctx, uint32_t 
     if (start >= app_size) {
       return -EINVAL;
     }
-    if (ptr >= SENSEI_G9_L2_BASE && ptr < SENSEI_G9_L2_END) {
-      if (size > SENSEI_G9_L2_END - ptr || (ptr < SENSEI_G9_SSBL_HI && ptr + size > SENSEI_G9_SSBL_LO) ||
+    if ((flags & SENSEI_G9_APP_FLAG_LZ4) != 0) {
+      /* Blocks: 2 x u16 (decompressed - 1, compressed - 1), then the compressed bytes. The loader trusts them. */
+      uint32_t blocks = flags >> 24, cur = 0, total = 0;
+
+      if (blocks == 0) {
+        return -EINVAL;
+      }
+      for (uint32_t b = 0; b < blocks; b++) {
+        uint8_t bh[4];
+        uint32_t dec, comp;
+
+        if (app_size - start < cur || app_size - start - cur < 4) {
+          return -EINVAL;
+        }
+        if (rd(ctx, app_off + start + cur, bh, 4) != 0) {
+          return -EIO;
+        }
+        dec = (uint32_t)sensei_g9_le16(bh) + 1u;
+        comp = (uint32_t)sensei_g9_le16(bh + 2) + 1u;
+        if (comp > app_size - start - cur - 4) {
+          return -EINVAL;
+        }
+        cur += 4 + comp;
+        total += dec;
+      }
+      if (total != size) {
+        return -EINVAL;
+      }
+    } else if (size > app_size - start) {
+      return -EINVAL;
+    }
+    if (ptr >= SENSEI_G9_L2_BASE && ptr < SENSEI_G9_L2_LOADER_END) {
+      if (ptr >= SENSEI_G9_L2_END || size > SENSEI_G9_L2_END - ptr ||
+          (ptr < SENSEI_G9_SSBL_HI && ptr + size > SENSEI_G9_SSBL_LO) ||
           (ptr < SENSEI_G9_HANDOFF_ADDR + SENSEI_G9_HANDOFF_SIZE && ptr + size > SENSEI_G9_HANDOFF_ADDR)) {
         return -EINVAL;
       }

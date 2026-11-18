@@ -168,8 +168,6 @@ static void link_sync(void) {
 
 static void op_power(bool on) {
   if (on) {
-    /* The slot line is read by the SSBL right after power-up: set it first. */
-    gpio_pin_set_dt(&slot_sel, atomic_get(&boot_slot) != 0);
     camera_clock(true);
     gpio_pin_set_dt(&i2c_sel, 1);
 #ifdef CONFIG_SENSEI_GAP9_SHARED_GPIOS
@@ -178,6 +176,9 @@ static void op_power(bool on) {
     gap9_spi_bus(true);
     spis_ensure_armed();
     gap9_pwr(true);
+    /* The slot line goes high only once the rail is on (a driven pad of an unpowered GAP9 would back-power it). The
+     * SSBL reads it after ROM and FSBL, many milliseconds later. */
+    gpio_pin_set_dt(&slot_sel, atomic_get(&boot_slot) != 0);
   } else {
     gap9_pwr(false);
     gpio_pin_set_dt(&slot_sel, 0); /* never drive the pad of an unpowered GAP9 */

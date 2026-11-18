@@ -36,7 +36,7 @@ numbers, status to errno, which job needs the camera bus), so any message schema
   marker, the work queue for the result callbacks. The codec also names the GAP9 firmware major version it needs
   (`gap9_major`, checked against HELLO).
 - Firmware slots (A and B in the GAP9 MRAM, started by the SSBL in `GAP9/ssbl`): the alias `gap9-slot-sel` (P1.04 to GAP9
-  pad 56) is driven before GAP9 is powered and low when it is off. `gap9_link_set_slot()` picks the slot of the next
+  pad 56) goes high only after the GAP9 rail is on (the SSBL reads it milliseconds later) and is low when GAP9 is off. `gap9_link_set_slot()` picks the slot of the next
   power-ups, `gap9_link_hold()` keeps GAP9 on for an update session, `gap9_link_reboot()` power cycles it into a slot and
   reports its HELLO. Details in [PROTOCOL.md](PROTOCOL.md).
 - `gap9_link_submit()` returns `-ENOMEM` when all staging slots are taken; every other error comes through the callback

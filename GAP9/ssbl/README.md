@@ -21,7 +21,8 @@ and the launch are the same SDK calls. The partition and volume table, the boot 
 2. Try that slot, then the other one. A slot is tried as follows:
    - the MCUboot header, the TLV areas behind the image (a slot whose write stopped early has none) and the container
      ([`gap9_slot.h`](../../lib/sensei_gap9/include/sensei_gap9/gap9_slot.h), host tested);
-   - the app descriptor (area count, no XIP, no section over the SSBL in the upper L2);
+   - the app descriptor (area count, no XIP, every section and LZ4 block inside the app, no section beyond the physical L2
+     (0x1C190000), over the SSBL or over the hand-off record);
    - `pi_app_bin_load()` with the CRC32 of every section.
 3. Write the hand-off record: magic, slot, ~slot at `SENSEI_G9_HANDOFF_ADDR` (L2 priv0, 0x1C00FF00,
    [`gap9_slot.h`](../../lib/sensei_gap9/include/sensei_gap9/gap9_slot.h)). It names the slot that started, after any fallback; the app
@@ -29,6 +30,8 @@ and the launch are the same SDK calls. The partition and volume table, the boot 
    The app check refuses a section that covers the record.
 4. Arm the 200 ms boot watchdog and launch the app. The SDK runtime disarms it in its start-up, the app needs no code.
 5. If neither slot boots, print and wait. The nRF5340 powers GAP9 off after its boot timeout. JTAG recovers the board.
+   The SDK SSBL has a recovery CLI on the UART (pads 60 and 61) for this case; this one does not (out of scope): two bad
+   slots need a JTAG flash.
 
 The signature and the SHA-256 of the image are not checked here: the nRF5340 checks them before an update goes live. A
 slot that was damaged later fails its section CRC or its header and is skipped. A running firmware that hangs is not the
@@ -76,10 +79,14 @@ The slot checks without GVSoC are in `lib/sensei_gap9/tests`.
 
 ## Hardware checks (untested on hardware)
 
-- Pad 56 against P1.04: scope P1.04 and pad 56 during power-up. P1.04 must be at its level before the GAP9 rail rises, the
-  SSBL reads it a few ms after the reset.
+- Pad 56 against P1.04: scope P1.04 and pad 56 during power-up. P1.04 goes to its level right after the GAP9 rail is on (the
+  SSBL reads it a few ms after the reset): check that the level is there in time.
 - No back-powering: with GAP9 off (rail off), P1.04 must be low and the rail must stay at 0 V, also during the nRF5340 boot
   (`pwr_boot_hook`).
 - Fallback: damage slot B (erase its first sector over JTAG), set the line high: GAP9 must come up on A (HELLO of A).
-- Recovery: with both slots damaged GAP9 waits. Reflash through JTAG (`make flash-factory` of the node).
+- Recovery: with both slots damaged GAP9 waits and there is no UART CLI. Reflash through JTAG (`make flash-factory` of the
+  node).
+- Boot config of the factory flash: the SSBL config uses `CONFIG_BOOT_DEVICE_MRAM=y` (the GAP SDK's flashing guide: the boot
+  device selects where the flash writes; the files in the MRAM are those of the layout either way). Check that the board
+  boots from the MRAM after `make flash-factory` (boot pins select MRAM).
 - Boot time and idle current of the new SSBL compared with the SDK SSBL.

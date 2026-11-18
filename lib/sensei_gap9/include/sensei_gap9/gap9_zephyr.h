@@ -22,7 +22,7 @@
  *
  * Firmware slots: GAP9 holds two firmware images (slots A and B, lib/sensei_gap9/include/sensei_gap9/gap9_slot.h). The
  * slot line (alias gap9-slot-sel, nRF P1.04 to GAP9 pad 56) tells its SSBL which one to start (low A, high B). The link
- * drives it before it powers GAP9 and low whenever GAP9 is off.
+ * sets it right after the GAP9 rail is on and keeps it low whenever GAP9 is off.
  */
 
 #ifndef SENSEI_GAP9_ZEPHYR_H_

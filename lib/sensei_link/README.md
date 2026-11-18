@@ -24,6 +24,25 @@ Apps add their own messages in their own `.proto` files (same package `sensei`, 
 short) and import `sensei/types.proto` and `sensei/lpwan.proto`. The SENSEI IEQ node does that
 (`firmware/proto`). The GAP9 and LPWAN libraries (`sensei_gap9`, `sensei_lpwan`) build on this one.
 
+## Stream channels and limits
+
+`sensei_link.h` holds the constants that both ends of a link share (the node tools mirror them; the node repository
+checks that the copies agree).
+
+| Channel | Name | Carries |
+|---|---|---|
+| `0x00` | | invalid |
+| `0x01` | `SENSEI_CH_HOST_TO_NODE` | protobuf stream, host to device (the app's request message) |
+| `0x02` | `SENSEI_CH_NODE_TO_HOST` | protobuf stream, device to host (the app's reply and event message) |
+| `0x03`, `0x04` | `SENSEI_CH_UPLINK`, `_DOWNLINK` | uplink and downlink message, whole |
+| `0x05`, `0x06` | `SENSEI_CH_UPLINK_CHUNK`, `_DOWNLINK_CHUNK` | one fragment (`frag.h`) |
+| `0x07` | `SENSEI_CH_SEALED` | sealed envelope (`sensei_secure`) |
+| `0x08` - `0x3F` | | reserved for later SDK channels (link control, log, ...) |
+| `0x40` - `0xFF` | `SENSEI_CH_APP_FIRST` - `_LAST` | the app: its own values, same on both ends, never used by the SDK |
+
+The values are on the wire and never change. `SENSEI_STREAM_MAX_MSG` (2144) is the largest message on a byte stream;
+`SENSEI_MTU_LORA`, `_BLE` and `_LTE` (222, 244, 1024 B) are the radio payload limits, chunk header included.
+
 ## Use it
 
 - Zephyr: `CONFIG_SENSEI_LINK=y` (needs the SDK as module: `-DEXTRA_ZEPHYR_MODULES=$SENSEI_SDK_ROOT/NRF`).

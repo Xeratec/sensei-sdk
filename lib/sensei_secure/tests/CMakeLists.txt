@@ -26,3 +26,8 @@ target_include_directories(test_secure PRIVATE ${CMAKE_CURRENT_LIST_DIR}/generat
 target_link_libraries(test_secure PRIVATE sensei_secure)
 target_compile_options(test_secure PRIVATE -Wall -Wextra -Werror)
 add_test(NAME test_secure COMMAND test_secure)
+
+add_executable(test_e2e test_e2e.c)
+target_link_libraries(test_e2e PRIVATE sensei_secure)
+target_compile_options(test_e2e PRIVATE -Wall -Wextra -Werror)
+add_test(NAME test_e2e COMMAND test_e2e)

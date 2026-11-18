@@ -20,7 +20,10 @@ that is built in.
 ## Boot
 
 1. Read pad 56 with the internal pull-down, five samples, majority. A line that nobody drives selects A.
-2. Try that slot, then the other one. A slot is tried as follows:
+2. Try that slot, then the other one, except that the other one is skipped when its image was sealed and never started
+   (the newest record of the checkpoint log is DONE for it, `g9ota_ckpt_sealed_waiting()`, read only): such a slot starts
+   when the slot line names it, which the nRF5340 does when it applies the update, never as the fallback. A slot is tried
+   as follows:
    - the MCUboot header, the TLV areas behind the image (a slot whose write stopped early has none) and the container
      ([`gap9_slot.h`](../../lib/sensei_gap9/include/sensei_gap9/gap9_slot.h), host tested);
    - the app descriptor (area count, no XIP, every section and LZ4 block inside the app, no section beyond the physical L2
@@ -105,11 +108,19 @@ they fail; the workflow `python-tests.yml` installs them). See [`lib/sensei_gap9
 `tools/ssbl_docker.sh test` runs `test/gvsoc_cases.sh` in Docker: it builds a test app twice, packs two slots, builds the SSBL
 with a forced slot (GVSoC does not model the pad) and runs it. Cases: slot A boots, slot B boots, B with a wrong section CRC,
 B erased, B without TLV areas fall back to A, A with a wrong CRC falls back to B, both damaged. The test app prints the slot of
-the hand-off record: after a fallback it names the slot that started. It also checks the layout offsets. Prints `SSBL TEST PASS`.
+the hand-off record: after a fallback it names the slot that started. The `sealed_*` cases put a checkpoint record into the MRAM
+image (`-DSENSEI_SSBL_CKPT=<file>`): DONE for B (sealed, never started) is no fallback for a damaged A, but starts when the slot
+line names B; CLEARED (it ran once) is a fallback again; DONE for the slot that is not the fallback changes nothing. It also
+checks the layout offsets. Prints `SSBL TEST PASS`.
+The recovery test build exists only with `-DSENSEI_PLATFORM=gvsoc` and `SENSEI_SSBL_RECOVERY=ON` (CMake stops otherwise, and
+`recovery_feed.c` does not compile without the simulator define): it seals without a signature check and must never reach a
+board. The options are CMake cache options, so a build directory keeps them: the node Makefile passes `ON` or `OFF` for all of
+them, and so does the test script.
 Recovery cases: GVSoC has no nRF5340, so the test build (`SENSEI_SSBL_RECOVERY_TEST`, `test/recovery_feed.c`) takes the jobs from a
 packed image that the script put into the keep slot, 512 KiB behind its own image (`pack_slot.py --test-signature` makes an image whose
 signature TLV has the right shape; the writer checks the shape, the nRF5340 the signature) and sends begin, chunks, finish and seal
-through the same job server. `rec_both_bad`: neither slot boots, the writer fills slot B, the SSBL boots it (hand-off B).
+through the same job server. `rec_both_bad`: neither slot boots, the writer fills slot B, the SSBL does not take the sealed slot
+B as the fallback of the damaged slot A, and boots it when the test sets the slot line to B (the apply; hand-off B).
 `rec_no_seal`: no seal, slot B never parses. `rec_forced`: the strap is high (test define), slot A boots after the recovery wrote
 slot B.
 The slot checks without GVSoC are in `lib/sensei_gap9/tests`.

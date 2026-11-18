@@ -112,10 +112,13 @@ that there is nothing to do. The nRF5340 drives it low whenever GAP9 is off.
 
 ### Version check
 
-`Version.major` in HELLO is the job protocol version of the GAP9 firmware. The app gives the major it needs
-(`g9_codec.gap9_major`). Another major (or a HELLO that does not decode) counts as an error: GAP9 is powered off and
-the queued jobs fail with `-EPROTO`. Raise the major of the GAP9 firmware when the frames, `Gap9Job` or
-`Gap9Result` change so that old firmware cannot follow.
+`Version.major` in HELLO is the job protocol version of the GAP9 firmware. The app gives the newest major it speaks
+(`g9_codec.gap9_major`) and the oldest it still takes for its normal jobs (`gap9_major_min`, 0: only `gap9_major`). A major
+outside that range (or a HELLO that does not decode) counts as an error: GAP9 is powered off and the queued jobs fail
+with `-EPROTO`. A job that needs a newer major than the GAP9 reported (`g9_codec.job_min_major()`, for example the update
+jobs, which need the deferred sealing of major 2) fails with `-EPROTONOSUPPORT` before it is sent; the other jobs run.
+Raise the major of the GAP9 firmware when the frames, `Gap9Job` or `Gap9Result` change so that old firmware cannot follow;
+when only jobs are added, the nRF5340 can keep accepting the old major (OTA.md, "Compatibility").
 
 ### Recovery HELLO
 
@@ -126,12 +129,14 @@ was high), `git` = the hash of the SSBL. An nRF5340 without recovery support ans
 and GAP9 off. One with it (`CONFIG_SENSEI_GAP9_RECOVERY`) switches to the second codec of the link
 (`Gap9RecoveryJob` and `Gap9RecoveryResult` in `gap9_ota.proto`, frames as above) and latches "recovery":
 
-- jobs of the app (`gap9_link_submit()`) fail at once with `-ENOEXEC`, GAP9 is not powered for them;
+- jobs of the app (`gap9_link_submit()`) fail at once with `-ENOEXEC` (the return value, nothing is staged, no SPI_A, no
+  error count), GAP9 is not powered for them;
 - recovery jobs (`gap9_link_submit_recovery()`) run on GAP9: begin, chunk, status (verify), finish, seal, abort. The
   writer is the one of the update, with the slot on the slot line as the keep slot (never written);
 - a reboot callback gets `-ENOEXEC` with the HELLO (a trial or probe that lands in recovery is a boot failure);
-- every `CONFIG_SENSEI_GAP9_RECOVERY_REPROBE_H` hours the latch is cleared and GAP9 is powered once to look again;
-  a HELLO of the app clears it too.
+- every `CONFIG_SENSEI_GAP9_RECOVERY_REPROBE_H` hours, if GAP9 is off and no job is waiting, the latch is cleared and
+  GAP9 is powered once to look again (otherwise a minute later); a HELLO of the app clears it too, and so does a
+  power-off after a forced recovery (the strap goes with the power).
 
 The strap (nRF5340 P1.06 `EXT_RX_SPI` to GAP9 pad 57) forces recovery when a slot boots but hangs before its HELLO.
 It is built only with `CONFIG_SENSEI_GAP9_RECOVERY_STRAP`. Untested on hardware: that the line is a free direct wire.

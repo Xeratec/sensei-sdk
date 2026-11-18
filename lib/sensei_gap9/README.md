@@ -43,8 +43,8 @@ The firmware update of GAP9 over the air (A/B slots, signed images, trial boot) 
   `gap9-i2c-sel`, `gap9-spis` (SPIS3 on P0.08 to P0.11, trigger P1.05), `gap9-slot-sel` (P1.04).
 - The app defines the storage with `GAP9_LINK_STORAGE_DEFINE(name, job_t, result_t)`, fills `struct gap9_link_cfg` (codec, hooks,
   storage) and calls `gap9_link_init()`, then `gap9_link_submit()`. Hooks: camera bus lock, camera clock, error counter, energy
-  marker, the work queue for the result callbacks. The codec also names the GAP9 firmware major version it needs
-  (`gap9_major`, checked against HELLO).
+  marker, the work queue for the result callbacks. The codec also names the GAP9 firmware major versions it takes
+  (`gap9_major`, `gap9_major_min`, checked against HELLO) and optionally the oldest major per job (`job_min_major`).
 - Firmware slots (A and B in the GAP9 MRAM, started by the SSBL in `GAP9/ssbl`): the alias `gap9-slot-sel` (P1.04 to GAP9
   pad 56) goes high only after the GAP9 rail is on (the SSBL reads it milliseconds later) and is low when GAP9 is off. `gap9_link_set_slot()` picks the slot of the next
   power-ups, `gap9_link_hold()` keeps GAP9 on for an update session, `gap9_link_reboot()` power cycles it into a slot and

@@ -41,6 +41,7 @@ Untested on hardware. Tested on the host (`make test-host`, `make test-python`) 
 - **nRF5340 app:** `CONFIG_SENSEI_GAP9_OTA=y` and a `struct sensei_gap9_ota_cfg`: the public key of the signature
   (P-256 point and its SHA-256), a `job` callback that sends a `struct g9ota_req` as a job of the app's format and
   returns the `Gap9OtaInfo` of the answer (errors: `-ENOTSUP` for a GAP9 that cannot be updated, `-EPROTO`, `-EIO` ...),
+  a codec that gives `job_min_major` = `G9OTA_APP_MAJOR_MIN` for the six update jobs (see "Compatibility"),
   an optional `trial_check` (the app's own checks of a new image: self-test, a detect job), and the work queue (needed).
   The flow has no context pointer in its operations: one flow per app. The app
   forwards its host requests to `g9ota_flow_begin/_chunk/_command(sensei_gap9_ota_flow(), ...)` and sends the `Gap9OtaReply` that the flow
@@ -125,6 +126,14 @@ The chunk size 188 B is for a host message of 212 B (a receive buffer of 256 B).
    back (`Gap9OtaStatus` with `verify`) and the nRF5340 checks the signature as after `finish`; a slot that fails is
    refused (`FAIL_SIGNATURE`). The old image stays in its slot until the next `begin` writes over it.
 
+**A slot runs that is not the confirmed one.** The SSBL starts the other slot when the one on the slot line does not
+load. If that happens (a damaged confirmed slot, an image of a recovery that was never on trial), GAP9 answers with a
+booted slot that differs from `confirmed_slot`. The flow treats the confirmed slot as bad: a transfer goes into it (the
+writer writes the slot that does not run), and `apply` of that slot makes the slot that runs the one to go back to; if
+the new image fails its trial, that slot starts again. `revert` starts the slot that runs on trial, so it is checked and
+confirmed like any image (a host that finds `booted_slot != confirmed_slot` sends `revert`). A forced recovery is refused
+in this state (`FAIL_KEEP`): the boot loader would keep the damaged slot and write the one image that works.
+
 **Resume.** A request without an answer (link down, GAP9 power cycled) is repeated, then the host asks `status` and
 `begin` with `resume`. GAP9 answers the offset of its last checkpoint, a multiple of 8 KiB; a chunk below the wanted offset
 is acknowledged and changes nothing. A `begin` with `resume` after a finished transfer (checked, sealed or not) makes
@@ -150,15 +159,19 @@ nRF5340 updates GAP9 through it: no debug probe in the field.
   the reason (1: both slots failed, 2: the strap was high). An nRF5340 without recovery refuses the major (`-EPROTO`) and
   powers GAP9 off: safe. With recovery, the link (`gap9_core.c`) switches to the second codec (`Gap9RecoveryJob`,
   `Gap9RecoveryResult`) and latches recovery. App jobs fail at once with `-ENOEXEC` and GAP9 is not powered for them; the
-  link powers it once every `CONFIG_SENSEI_GAP9_RECOVERY_REPROBE_H` hours to look again. A HELLO of the app clears the latch.
-  The reply and the Status message report recovery and its reason.
+  link powers it once every `CONFIG_SENSEI_GAP9_RECOVERY_REPROBE_H` hours to look again, only while GAP9 is off and no
+  job is waiting (a session has GAP9 on: the look is tried again a minute later, it never cuts a transfer). A HELLO of
+  the app clears the latch. So does a power-off after a forced recovery (reason 2): the strap goes with the power and the
+  next boot is a normal one. After "both slots failed" the latch stays through a power-off. The reply and the Status
+  message report recovery and its reason.
 - **Writer.** The one of this document (`g9ota.c`, behind `g9rec.c`), with the slot on the slot line as the booted slot:
   the keep slot. The nRF5340 drives the slot line to its confirmed slot, so keep = confirmed; the flow checks it
   (`FAIL_KEEP`) before a transfer starts, and nothing is written otherwise. The guard never writes the keep slot, the
   boot area or anything outside the other slot and the checkpoint sectors. The SSBL checks no signature: the nRF5340
   does and then seals, as in the normal update.
 - **Flow.** The same requests: `begin`, `chunk`, `finish`, `apply`. The flow sends them as recovery jobs when the link
-  says recovery, and sends the first job again as a recovery job if it met the boot loader before the latch was set.
+  says recovery. A job that met the other program of GAP9 (an app job and the boot loader came up, or a recovery job and
+  the app) fails with `-ENOEXEC` and is sent once more the other way.
   `apply` power cycles GAP9 with the slot line at the new slot; the SSBL starts it (the keep slot is bad), the app
   arms the writer, which drops the record of the transfer, the trial confirms it and the latch goes. A trial or the
   lost-settings probe that lands in recovery is a failed boot, and the flow never writes by itself.
@@ -166,13 +179,24 @@ nRF5340 updates GAP9 through it: no debug probe in the field.
   image (`FAIL_ROLLBACK`) before it seals, in recovery and in the normal mode: in recovery the keep slot cannot tell what
   was running. A revert to the old slot is not a transfer and is not checked.
 - **Rate limits.** The rules of the normal update hold: a new transfer at least 10 s after the last, a session ends after
-  120 s without a request or 45 min, a forced recovery once per session.
+  120 s without a request or 45 min, a forced recovery once per session and, like a new transfer, at least 10 s after the
+  last one (each resets GAP9, `resume` or not). The strap is disarmed on every way out of a forced boot (refused or
+  busy reboot, no HELLO), so it never waits for the next power-up.
 - **Strap.** `Gap9OtaBegin.force_recovery` powers GAP9 with P1.06 (pad 57) high, for a GAP9 that boots an image but hangs
-  before its HELLO. Only with `CONFIG_SENSEI_GAP9_RECOVERY_STRAP`, and not while a transfer is open. That P1.06 is a free
+  before its HELLO. Only with `CONFIG_SENSEI_GAP9_RECOVERY_STRAP`, and not while a transfer is open, not when an app that
+  answered has a job protocol older than `G9OTA_APP_MAJOR_MIN`, and not while the app runs from the slot that is not the
+  confirmed one. That P1.06 is a free
   direct wire to pad 57 is UNVERIFIED (`TESTING.md`, T18.18): off by default.
 
-Seal and power: after `seal` the new slot is the only one that boots. A power cycle of GAP9 between `seal` and `apply`
-starts it as the fallback, without a trial; send `apply` right after the check.
+Seal and power: a slot whose image was sealed and never started (the newest checkpoint record is DONE) is no fallback
+for the SSBL: it starts only when the slot line names it, which is what `apply` does. A power cycle of GAP9 between `seal`
+and `apply` therefore ends in recovery again (the keep slot is bad), the host runs `begin` with `resume`, the image is
+checked and sealed again (nothing is written twice) and `apply` goes on. A boot loader without this rule (a board with an
+older SSBL, `flash-boot` brings the new one) starts the image as the fallback without a trial: the flow then sees a booted
+slot that is not the confirmed one, and `revert` confirms it. The record is dropped when the image starts (`g9ota_boot_note`),
+so an image that ran once is a fallback like any other: the app must be built with `SENSEI_OTA` (it arms the writer and
+drops the record), as the recovery needs it anyway. The SSBL reads the log with `g9ota_ckpt_sealed_waiting()` and writes
+nothing.
 
 ## Keys
 
@@ -182,16 +206,42 @@ other boards.
 
 ## Compatibility
 
-Deferred sealing changed the job protocol: the nRF5340 sends the `seal` job, and the GAP9 writer no longer writes the
-magic in `finish`. An app takes the change with a new major version of its job protocol (the SENSEI IEQ node: 2): a new
-nRF5340 refuses an old GAP9 application (HELLO with the old major, `-EPROTO`, GAP9 powered off) and an old nRF5340 refuses
-a new one, so the two never talk with different rules. An old writer sealed in `finish`, before the nRF5340 checked the
-signature; it must not stay in the field. A node that has such an image takes the new one over JTAG once.
+The job protocol major (`Version.major` in the HELLO of the GAP9 app) says which jobs the app runs. The nRF5340 accepts
+majors 1 and 2 for the normal jobs (occupancy, forecast, audio, self-test) and needs major 2 for update requests (the six
+update jobs, the update flow, the recovery flow with a forced strap). Major 2 is deferred sealing: the nRF5340 sends the
+`seal` job and the writer no longer writes the magic in `finish`. An older writer sealed in `finish`, before the nRF5340
+checked the signature; the nRF5340 does not talk to it for updates.
+
+| nRF5340 firmware | GAP9 app | Normal jobs | Update, recovery |
+|---|---|---|---|
+| this one (majors 1 and 2) | major 2 (`SENSEI_OTA=ON`) | run | run |
+| this one | major 1 (`SENSEI_OTA=OFF`, or built before deferred sealing) | run | refused: `-EPROTONOSUPPORT`, "GAP9 firmware too old for the update"; a forced recovery too (when the app answered) |
+| older, major 1 only | major 1 | run | no update code |
+| older, major 1 only | major 2 | refused (`-EPROTO`, GAP9 off) | - |
+
+So an nRF5340-only DFU of a deployed node keeps its GAP9 jobs running with a major-1 app; the GAP9 app of such a node needs
+one JTAG flash (`make flash-factory` with `SENSEI_OTA=ON`) before it takes updates, and a major-2 GAP9 app needs the new
+nRF5340 image first. An app of the SDK reports its major in the codec: `gap9_major` (newest), `gap9_major_min` (oldest
+that runs the normal jobs; 0: only `gap9_major`) and `job_min_major()` (per job; a job that needs more than the app has
+fails before it is sent). The SENSEI IEQ node: `SENSEI_GAP9_PROTO_MAJOR` 2, `_MIN` 1, the GAP9 app built with
+`SENSEI_OTA=ON` reports 2, without it 1. A major outside the accepted range is a mismatch as before (`-EPROTO`).
+
+A trial of an image whose app has major 1 fails (its status job is refused): it is never confirmed. After a confirmed
+major-2 image, a major-1 image is also a rollback (`min_version`).
+
+Settings: the stored record of version 2 (before `min_version`) is read as it is (confirmed slot, trial, image ids), so an
+update of the nRF5340 firmware does not send the node into the lost-settings probe. `min_version` starts at 0 and is set
+from the confirmed slot when it answers with an image that the node verified, and by every confirm.
+
+Boards that ran the older writer (it sealed in `finish`) may hold an image in the non-confirmed slot whose signature the
+node never checked. The new SSBL does not start it as a fallback (its record is DONE) and a `revert` checks its signature
+first, but `flash-boot` keeps the slots: use `flash-factory`, or erase the non-confirmed slot (`begin` followed by `abort`
+drops a record that the writer knows), before such a board gets the recovery.
 
 ## Not covered
 
 The SSBL and FSBL (JTAG only, also with the recovery: it writes the slots, never the boot area), a GAP9 firmware with
-another job protocol major (it needs a new nRF5340 image first), no authentication of the ROM boot, a node whose nRF5340
+a job protocol major outside 1 and 2 (it needs a new nRF5340 image first), no authentication of the ROM boot, a node whose nRF5340
 settings are lost while a trial is open may keep an image that was not confirmed (the probe confirms what answers). A board
 that has no A/B layout needs one JTAG flash first, and so does a board flashed before the recovery (the SSBL section grew
 from 28 to 48 KiB; the slots did not move).

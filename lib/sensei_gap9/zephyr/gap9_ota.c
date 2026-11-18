@@ -122,7 +122,7 @@ int sensei_gap9_ota_init(const struct sensei_gap9_ota_cfg *c) {
   if (g9ota_flow_init(&flow, &ops, stored_valid ? &stored.store : NULL) != 0) {
     return -EINVAL;
   }
-  LOG_INF("GAP9 slot %c", 'A' + g9ota_flow_slot(&flow));
+  LOG_DBG("GAP9 slot %c", 'A' + g9ota_flow_slot(&flow)); /* debug only: the Status message has the slot */
   if (g9ota_flow_needs_poll(&flow)) {
     op_wake();
   }

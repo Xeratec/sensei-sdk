@@ -126,15 +126,24 @@ static bool slot_is_image(uint8_t slot, struct sensei_g9_slot_info *si) {
   return sensei_g9_slot_parse(slot_rd, &c, SENSEI_G9_SLOT_SIZE, si) == 0;
 }
 
+/* The test area is honoured only in a build that asks for it (-DG9OTA_MRAM_TEST_AREA=1, the local test of the app). */
+#ifdef G9OTA_MRAM_TEST_AREA
+#define TEST_AREA_ALLOWED true
+#else
+#define TEST_AREA_ALLOWED false
+#endif
+
 int g9ota_mram_init(const char *kind, const struct g9ota_cfg *test_area) {
-  struct g9ota_cfg cfg = {
+  struct g9ota_cfg real = {
       .slot_base = {SENSEI_G9_SLOT_A_OFF, SENSEI_G9_SLOT_B_OFF},
       .slot_size = SENSEI_G9_SLOT_SIZE,
       .ckpt_base = {SENSEI_G9_CKPT_OFF, SENSEI_G9_CKPT_OFF + G9OTA_SECTOR},
       .kind = kind,
   };
+  struct g9ota_cfg cfg;
   struct sensei_g9_slot_info si;
-  int h;
+  const char *why = "";
+  int h, run, sel, rc = 0;
 
   pi_mram_conf_init(&ota_conf);
   pi_open_from_conf(&ota_flash_dev, &ota_conf);
@@ -150,33 +159,48 @@ int g9ota_mram_init(const char *kind, const struct g9ota_cfg *test_area) {
    * lie where the checkpoint and slot A are: nothing is written and the update jobs answer
    * NOT_BUILT. */
   h = sensei_g9_handoff_decode((const volatile uint32_t *)SENSEI_G9_HANDOFF_ADDR);
-  from_slot = g9ota_arm(&mram_ops, NULL, &cfg, h) >= 0;
-  if (from_slot) {
-    booted = (uint8_t)h;
+  run = g9ota_arm(&mram_ops, NULL, &real, h);
+  if (run >= 0) {
+    booted = (uint8_t)run;
     (void)slot_is_image(booted, &si);
+    if (si.readfs_size != 0) {
+      readfs_off = sensei_g9_slot_offset(booted) + si.readfs_off;
+    }
   }
-  if (from_slot && si.readfs_size != 0) {
-    readfs_off = sensei_g9_slot_offset(booted) + si.readfs_off;
-  }
-  if (test_area != NULL) {
-    /* Local mode runs from the single-image layout, whose readfs and app lie where the checkpoint
-     * and slot A would be: the test uses its own area and writes only there. */
-    cfg = *test_area;
-    cfg.kind = kind;
-    booted = 0;
-    from_slot = true;
+  /* A test area (local test on the single-image layout, whose readfs and app lie where the checkpoint and slot A
+   * would be: the test uses its own area and writes only there) is used only in a build with
+   * G9OTA_MRAM_TEST_AREA and only when no hand-off record exists. Otherwise it is refused and nothing is written. */
+  sel = g9ota_select(&mram_ops, NULL, &real, test_area, TEST_AREA_ALLOWED, h, &cfg);
+  if (sel >= 0) {
+    if (test_area != NULL) {
+      booted = 0;
+    }
+    if (g9ota_init(&g_ota, &mram_ops, NULL, &cfg, booted) == 0) {
+      from_slot = true;
+      g9ota_boot_note(&g_ota);
+      ready = true;
+    } else {
+      rc = -EINVAL;
+    }
+  } else if (test_area != NULL || sel == -EINVAL) {
+    rc = sel; /* a test area that is not allowed, or a layout that is wrong: a mistake of the build */
   }
   if (from_slot) {
-    g9ota_init(&g_ota, &mram_ops, NULL, &cfg, booted);
-    g9ota_boot_note(&g_ota);
-    ready = true;
+    why = "update writer armed";
+  } else if (rc == -EPERM) {
+    why = "test area refused: updates refused";
+  } else if (rc != 0) {
+    why = "layout is wrong: updates refused";
+  } else if (h >= 0) {
+    why = "record names a slot without an image: updates refused";
+  } else {
+    why = "no hand-off record: updates refused";
   }
-  LOG_INF("running from %s (%s), slot line %s\n", booted ? "slot B" : "slot A",
-          from_slot ? "update writer armed"
-                    : (h >= 0 ? "record names a slot without an image: updates refused"
-                              : "no hand-off record: updates refused"),
-          read_slot_line() ? "high" : "low");
-  return 0;
+  LOG_INF("running from %s (%s), slot line %s\n", booted ? "slot B" : "slot A", why, read_slot_line() ? "high" : "low");
+  if (rc != 0) {
+    LOG_ERR("update writer not started: %d\n", rc);
+  }
+  return rc;
 }
 
 struct g9ota *g9ota_mram_get(void) { return ready ? &g_ota : NULL; }

@@ -35,10 +35,16 @@ extern "C" {
 
 /**
  * Open the MRAM, find the slot this application runs from and set up the writer. Call once at start-up, before
- * any job. `kind` is the board id of the images (the kind TLV), valid for the life of the program. `test_area`
- * is for the local test on a single-image layout: the writer then uses this area (slots, checkpoint sectors) as
- * if it ran from slot A, and writes nowhere else; NULL for the real A/B layout. Returns 0, or a negative value
- * if the MRAM does not open (the update jobs then answer an error).
+ * any job. `kind` is the board id of the images (the kind TLV), valid for the life of the program.
+ *
+ * `test_area` is for the local test on a single-image layout: the writer then uses this area (slots, checkpoint
+ * sectors) as if it ran from slot A, and writes nowhere else. It is used only if the app is built with
+ * -DG9OTA_MRAM_TEST_AREA=1 and no hand-off record exists; in every other case it is refused (-EPERM), nothing is
+ * written and the update jobs answer NOT_BUILT. An area whose sectors are not aligned or overlap is refused with
+ * -EINVAL (g9ota_cfg_check). NULL for the real A/B layout.
+ *
+ * Returns 0 (also when the writer is not armed for lack of a record), -EIO if the MRAM does not open, or the error
+ * of a refused test area or layout. The update jobs answer an error then.
  */
 int g9ota_mram_init(const char *kind, const struct g9ota_cfg *test_area);
 

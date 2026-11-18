@@ -31,12 +31,17 @@ Untested on hardware. Tested on the host (`make test-host`, `make test-python`) 
 - **GAP9 app:** the job that carries the five update requests (`G9OTA_OP_*` of `struct g9ota_req`, answered with a
   `Gap9OtaInfo`) in the app's own job message, with
   `g9ota_dispatch()`. The MRAM backend: `g9ota_mram_init(kind, NULL)` at start-up; link with
-  `SENSEI_GAP9_OTA_LINK_OPTIONS` (the wrapper of `pi_fs_conf_init`). `kind` is the board id of the images.
+  `SENSEI_GAP9_OTA_LINK_OPTIONS` (the wrapper of `pi_fs_conf_init`). `kind` is the board id of the images (at most 48
+  bytes). `g9ota_init()` refuses a layout whose slots and checkpoint sectors are not sector aligned or overlap, or
+  that has no flash operation. The second argument of `g9ota_mram_init()` is a test area for a local test on a
+  single-image layout; it is used only in a build with `-DG9OTA_MRAM_TEST_AREA=1` and only when no hand-off record
+  exists (see "Which slot starts"), else it is refused.
   The A/B layout of `GAP9/layouts/sensei_ab.json` and the SSBL of `GAP9/ssbl`. See [README.md](README.md).
 - **nRF5340 app:** `CONFIG_SENSEI_GAP9_OTA=y` and a `struct sensei_gap9_ota_cfg`: the public key of the signature
   (P-256 point and its SHA-256), a `job` callback that sends a `struct g9ota_req` as a job of the app's format and
   returns the `Gap9OtaInfo` of the answer (errors: `-ENOTSUP` for a GAP9 that cannot be updated, `-EPROTO`, `-EIO` ...),
-  an optional `trial_check` (the app's own checks of a new image: self-test, a detect job), and the work queue (needed). The app
+  an optional `trial_check` (the app's own checks of a new image: self-test, a detect job), and the work queue (needed).
+  The flow has no context pointer in its operations: one flow per app. The app
   forwards its host requests to `g9ota_flow_begin/_chunk/_command(sensei_gap9_ota_flow(), ...)` and sends the `Gap9OtaReply` that the flow
   gives to its reply callback (the app copies it into its host message).
 - **Host:** an image made by `pack_slot.py --kind <board>`, and the host messages in its own protocol.
@@ -62,7 +67,9 @@ The pad can be wrong after a fallback. The SSBL writes a hand-off record (`SENSE
 magic, slot, ~slot, in L2 priv0) before it starts the app. The app takes its slot from the record and from nothing else.
 The writer is armed only if there is a record and the slot it names holds a complete image (`g9ota_arm`). Otherwise (the
 single-image layout of a development flash, a JTAG load, a reset without the SSBL) nothing is written and the update
-jobs answer `NOT_BUILT`. The hand-off record must not be covered by a section of the app: `check_handoff.py` checks the
+jobs answer `NOT_BUILT`. The test area of `g9ota_mram_init()` follows the same rule the other way round: it needs the
+build switch and no record, because a record proves that the app runs from a slot of the A/B layout, where the area
+could lie on the running slot. The hand-off record must not be covered by a section of the app: `GAP9/ssbl/tools/check_handoff.py` checks the
 ELF after the link (GAP9 needs `CONFIG_MALLOC_NO_L2_PRIV=y` and the default linker script).
 
 **Weights.** The readfs is read from the slot the app runs from. The wrapper of `pi_fs_conf_init` sets the volume `app`
@@ -144,4 +151,4 @@ was not confirmed (the probe confirms what answers). A board that has no A/B lay
 `tests/test_g9ota.c` (the writer on a RAM MRAM: transfer, resume, a power cut at every write, the running slot never
 written, the checks of `finish`, the address guard), `tests/test_g9ota_flow.c` (the flow against a fake link whose GAP9
 runs the real writer: transfer, signature, trial, revert, reset in a trial, lost settings), `tests/test_gap9_trial.c`,
-`GAP9/ssbl/tools/test_pack_slot.py` (the builder, and an imgtool image through the writer).
+`GAP9/ssbl/tools/test_pack_slot.py` (the builder, and an imgtool image through the writer; CI fails if these skip).

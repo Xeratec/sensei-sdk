@@ -654,6 +654,98 @@ static void test_arming(void) {
   }
 }
 
+/* ---- the layout: g9ota_init refuses a wrong one, and the test area is allowed in few cases only ---- */
+
+static void test_layout(void) {
+  struct g9ota_cfg l = fake_layout();
+  struct g9ota_cfg bad, out;
+  struct g9ota o;
+  /* the node's local test area: the end of the MRAM, away from the boot area */
+  struct g9ota_cfg area = {
+      .slot_base = {0x100000, 0x17C000}, .slot_size = 0x7C000, .ckpt_base = {0x1FC000, 0x1FE000}, .kind = NULL};
+
+  CHECK(g9ota_cfg_check(&l, 0) == 0 && g9ota_cfg_check(&l, 1) == 0);
+  CHECK(g9ota_cfg_check(&l, 2) != 0 && g9ota_cfg_check(NULL, 0) != 0);
+  CHECK(g9ota_cfg_check(&area, 0) == 0);
+  CHECK(g9ota_init(&o, &fake_ops, &mram, &l, 0) == 0 && o.target == 1);
+  /* sector alignment: target, booted slot, checkpoints, size */
+  for (int i = 0; i < 4; i++) {
+    bad = l;
+    if (i < 2) {
+      bad.slot_base[i] += 16;
+    } else {
+      bad.ckpt_base[i - 2] += 16;
+    }
+    CHECK(g9ota_cfg_check(&bad, 0) != 0);
+    CHECK(g9ota_init(&o, &fake_ops, &mram, &bad, 0) != 0 && o.fl == NULL);
+  }
+  bad = l;
+  bad.slot_size -= 16;
+  CHECK(g9ota_init(&o, &fake_ops, &mram, &bad, 0) != 0);
+  bad.slot_size = 0;
+  CHECK(g9ota_init(&o, &fake_ops, &mram, &bad, 0) != 0);
+  /* overlap: a checkpoint sector in the booted slot, in the target, the slots over each other, the sectors over each
+   * other */
+  for (uint8_t booted = 0; booted < 2; booted++) {
+    for (int c = 0; c < 2; c++) {
+      bad = l;
+      bad.ckpt_base[c] = l.slot_base[booted] + 5 * G9OTA_SECTOR; /* in the running slot */
+      CHECK(g9ota_init(&o, &fake_ops, &mram, &bad, booted) != 0);
+      bad.ckpt_base[c] = l.slot_base[1 - booted] + 5 * G9OTA_SECTOR; /* in the target */
+      CHECK(g9ota_init(&o, &fake_ops, &mram, &bad, booted) != 0);
+    }
+  }
+  bad = l;
+  bad.slot_base[1] = l.slot_base[0] + G9OTA_SECTOR;
+  CHECK(g9ota_init(&o, &fake_ops, &mram, &bad, 0) != 0);
+  bad = l;
+  bad.ckpt_base[1] = bad.ckpt_base[0];
+  CHECK(g9ota_init(&o, &fake_ops, &mram, &bad, 0) != 0);
+  /* the kind: up to 48 bytes (what the kind TLV reader takes), NULL refuses every image */
+  bad = l;
+  bad.kind = "0123456789012345678901234567890123456789012345678"; /* 49 */
+  CHECK(g9ota_init(&o, &fake_ops, &mram, &bad, 0) != 0);
+  bad.kind = "012345678901234567890123456789012345678901234567"; /* 48 */
+  CHECK(g9ota_init(&o, &fake_ops, &mram, &bad, 0) == 0);
+  bad.kind = NULL;
+  CHECK(g9ota_init(&o, &fake_ops, &mram, &bad, 0) == 0);
+  /* the operations are required */
+  {
+    struct g9ota_flash nofn = {fm_read, fm_erase, NULL};
+
+    CHECK(g9ota_init(&o, &nofn, &mram, &l, 0) != 0);
+    CHECK(g9ota_init(&o, NULL, &mram, &l, 0) != 0);
+  }
+
+  /* g9ota_select: the real layout needs a record whose slot holds an image */
+  fresh_mram();
+  install_running(1, 1, 0, 0);
+  CHECK(g9ota_select(&fake_ops, &mram, &l, NULL, false, 1, &out) == 1 && out.slot_base[1] == l.slot_base[1]);
+  CHECK(g9ota_select(&fake_ops, &mram, &l, NULL, false, 0, &out) < 0); /* record for the empty slot */
+  CHECK(g9ota_select(&fake_ops, &mram, &l, NULL, false, -1, &out) < 0);
+  bad = l;
+  bad.ckpt_base[0] = l.slot_base[0] + G9OTA_SECTOR; /* a layout whose checkpoint lies in the target */
+  CHECK(g9ota_select(&fake_ops, &mram, &bad, NULL, false, 1, &out) == -EINVAL);
+
+  /* the test area: not in a build without the local test, not with a record (the area lies on the slot B of the real
+   * layout: started from slot B it would write the running slot), only without a record */
+  fresh_mram();
+  install_running(1, 1, 0, 0);
+  CHECK(g9ota_select(&fake_ops, &mram, &l, &area, false, -1, &out) == -EPERM);
+  CHECK(g9ota_select(&fake_ops, &mram, &l, &area, true, 1, &out) == -EPERM);
+  CHECK(g9ota_select(&fake_ops, &mram, &l, &area, true, 0, &out) == -EPERM);
+  CHECK(g9ota_select(&fake_ops, &mram, &l, &area, true, -1, &out) == 0);
+  CHECK(out.slot_base[0] == area.slot_base[0] && out.ckpt_base[1] == area.ckpt_base[1] && out.kind == l.kind);
+  CHECK(mram.writes == 0);
+  /* a test area that is not a valid layout */
+  bad = area;
+  bad.ckpt_base[0] = area.slot_base[1] + G9OTA_SECTOR;
+  CHECK(g9ota_select(&fake_ops, &mram, &l, &bad, true, -1, &out) == -EINVAL);
+  bad = area;
+  bad.slot_base[1] += 4;
+  CHECK(g9ota_select(&fake_ops, &mram, &l, &bad, true, -1, &out) == -EINVAL);
+}
+
 /* ---- the record of a finished transfer: an abort drops it until the image runs ---- */
 
 static void test_done_record(void) {
@@ -968,6 +1060,7 @@ int main(int argc, char **argv) {
   test_app_check();
   test_verify();
   test_arming();
+  test_layout();
   test_done_record();
   test_log_wrap();
   test_power_cuts(0, 3 * G9OTA_SECTOR + 4000, 188, 3, 0);

@@ -124,9 +124,12 @@ static inline uint32_t sensei_image_id(sensei_image_read_fn rd, void *ctx) {
   return sensei_image_tlv(rd, ctx, SENSEI_IMAGE_TLV_SHA256, false, sha, sizeof(sha)) == 32 ? sensei_image_le32(sha) : 0;
 }
 
+/** Longest kind string (the kind TLV is read into a buffer of this size): a longer `kind` matches no image. */
+#define SENSEI_IMAGE_KIND_MAX 48u
+
 /** The image is for `kind`: the protected kind TLV holds exactly that string. */
 static inline bool sensei_image_kind_is(sensei_image_read_fn rd, void *ctx, const char *kind) {
-  uint8_t v[48];
+  uint8_t v[SENSEI_IMAGE_KIND_MAX];
   size_t n = 0;
   int r;
 

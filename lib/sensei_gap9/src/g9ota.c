@@ -295,16 +295,81 @@ int g9ota_arm(const struct g9ota_flash *fl, void *ctx, const struct g9ota_cfg *c
   return sensei_g9_slot_parse(slot_read, &r, cfg->slot_size, &si) == 0 ? handoff : -ENOENT;
 }
 
-void g9ota_init(struct g9ota *o, const struct g9ota_flash *fl, void *ctx, const struct g9ota_cfg *cfg,
-                uint8_t booted_slot) {
+int g9ota_cfg_check(const struct g9ota_cfg *cfg, uint8_t booted_slot) {
+  uint32_t base[4];
+  uint64_t len[4];
+
+  if (cfg == NULL || booted_slot > 1 || cfg->slot_size == 0 || (cfg->slot_size % G9OTA_SECTOR) != 0) {
+    return -EINVAL;
+  }
+  if (cfg->kind != NULL) {
+    size_t n = 0;
+
+    while (n <= SENSEI_IMAGE_KIND_MAX && cfg->kind[n] != '\0') {
+      n++;
+    }
+    if (n > SENSEI_IMAGE_KIND_MAX) {
+      return -EINVAL; /* sensei_image_kind_is() would match no image */
+    }
+  }
+  base[0] = cfg->slot_base[0];
+  base[1] = cfg->slot_base[1];
+  base[2] = cfg->ckpt_base[0];
+  base[3] = cfg->ckpt_base[1];
+  len[0] = len[1] = cfg->slot_size;
+  len[2] = len[3] = G9OTA_SECTOR;
+  for (int i = 0; i < 4; i++) {
+    if ((base[i] % G9OTA_SECTOR) != 0) {
+      return -EINVAL;
+    }
+    for (int j = 0; j < i; j++) {
+      /* the booted slot, the target and the two checkpoint sectors must not share a byte */
+      if ((uint64_t)base[i] < (uint64_t)base[j] + len[j] && (uint64_t)base[j] < (uint64_t)base[i] + len[i]) {
+        return -EINVAL;
+      }
+    }
+  }
+  return 0;
+}
+
+int g9ota_select(const struct g9ota_flash *fl, void *ctx, const struct g9ota_cfg *real,
+                 const struct g9ota_cfg *test_area, bool test_allowed, int handoff, struct g9ota_cfg *out) {
+  int slot;
+
+  if (test_area != NULL) {
+    /* The test area is for a build that runs from the single-image layout, where no SSBL left a record. Any record
+     * proves that the app runs from a slot of the A/B layout: the area could lie on that slot or on the checkpoint
+     * sectors. */
+    if (!test_allowed || handoff >= 0) {
+      return -EPERM;
+    }
+    *out = *test_area;
+    out->kind = real->kind;
+    return g9ota_cfg_check(out, 0) == 0 ? 0 : -EINVAL;
+  }
+  slot = g9ota_arm(fl, ctx, real, handoff);
+  if (slot < 0) {
+    return slot;
+  }
+  *out = *real;
+  return g9ota_cfg_check(out, (uint8_t)slot) == 0 ? slot : -EINVAL;
+}
+
+int g9ota_init(struct g9ota *o, const struct g9ota_flash *fl, void *ctx, const struct g9ota_cfg *cfg,
+               uint8_t booted_slot) {
   memset(o, 0, sizeof(*o));
+  if (fl == NULL || fl->read == NULL || fl->erase == NULL || fl->program == NULL ||
+      g9ota_cfg_check(cfg, booted_slot) != 0) {
+    return -EINVAL; /* `o` stays zero: the caller must not use it */
+  }
   o->fl = fl;
   o->ctx = ctx;
   o->cfg = *cfg;
-  o->booted = booted_slot & 1u;
+  o->booted = booted_slot;
   o->target = 1u - o->booted;
   o->stage = sensei_Gap9OtaStage_GAP9_OTA_STAGE_IDLE;
   o->ck_sector = -1;
+  return 0;
 }
 
 void g9ota_touch(struct g9ota *o, uint32_t now_ms) {

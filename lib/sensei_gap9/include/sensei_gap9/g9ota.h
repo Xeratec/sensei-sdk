@@ -41,6 +41,7 @@
 #ifndef SENSEI_GAP9_G9OTA_H_
 #define SENSEI_GAP9_G9OTA_H_
 
+#include <errno.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -69,8 +70,9 @@ struct g9ota_flash {
 
 /** Where things are in the MRAM (sensei_gap9/gap9_slot.h): two slots and two checkpoint sectors; and
  * the board id that an image must carry in its kind TLV (MCUboot TLV 0xa0, for example
- * "sensei-ieq-gap9"). An image of another kind is refused (GAP9_OTA_FAIL_KIND). `kind` stays valid
- * for the life of the writer. */
+ * "sensei-ieq-gap9"). An image of another kind is refused (GAP9_OTA_FAIL_KIND). `kind` is at most
+ * SENSEI_IMAGE_KIND_MAX (48) bytes long (g9ota_init() refuses a longer one) and stays valid for the life of the
+ * writer; NULL refuses every image. */
 struct g9ota_cfg {
   uint32_t slot_base[2];
   uint32_t slot_size;
@@ -140,8 +142,23 @@ struct g9ota {
  * Returns the slot this application runs from (0 or 1), or a negative errno. */
 int g9ota_arm(const struct g9ota_flash *fl, void *ctx, const struct g9ota_cfg *cfg, int handoff);
 
-void g9ota_init(struct g9ota *o, const struct g9ota_flash *fl, void *ctx, const struct g9ota_cfg *cfg,
-                uint8_t booted_slot);
+/** Check a layout: `kind` is NULL or at most SENSEI_IMAGE_KIND_MAX bytes, the slot size is a multiple of G9OTA_SECTOR,
+ * the two slots and the two checkpoint sectors are sector aligned and share no byte (so the checkpoint sectors and the
+ * target never overlap the booted slot), and `booted_slot` is 0 or 1. Returns 0 or -EINVAL. */
+int g9ota_cfg_check(const struct g9ota_cfg *cfg, uint8_t booted_slot);
+
+/** Choose the layout for the writer. `real` is the A/B layout, `test_area` a layout for the local test or NULL.
+ * Without `test_area` this is g9ota_arm() plus g9ota_cfg_check(); it fills `out` with `real` and returns the slot
+ * this application runs from. With `test_area` it returns 0 and fills `out` with the area (and the kind of `real`)
+ * only if `test_allowed` (the build has the local test: a compile-time choice of the app) and `handoff` is < 0
+ * (no record: the single-image layout); else -EPERM. A layout that fails g9ota_cfg_check() is -EINVAL. */
+int g9ota_select(const struct g9ota_flash *fl, void *ctx, const struct g9ota_cfg *real,
+                 const struct g9ota_cfg *test_area, bool test_allowed, int handoff, struct g9ota_cfg *out);
+
+/** Set up the writer. `fl` needs all three operations. Returns 0, or -EINVAL for a missing operation or a layout that
+ * fails g9ota_cfg_check(); `o` is then not usable. */
+int g9ota_init(struct g9ota *o, const struct g9ota_flash *fl, void *ctx, const struct g9ota_cfg *cfg,
+               uint8_t booted_slot);
 
 /** Tell the core the time (any ms clock, wraps after 49 days) before each request; without it the
  * rate rule is off. */

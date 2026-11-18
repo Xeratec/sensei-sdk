@@ -48,7 +48,7 @@
  * below the collector's LORA_REASSEMBLY_TIMEOUT (700 s in the SENSEI collector): keep it so.
  *
  * A plain message (us_submit_plain) goes through ops->prepare when it starts, if the radio asks for
- * it (uplink_radio.node_id_prefix). The node adds Uplink.node_id there, for the radio the message
+ * it (uplink_radio.prepare). The node adds Uplink.node_id there, for the radio the message
  * is sent on.
  *
  * The radio is told which chunk is the last of the session (uplink_radio.send_last): the last chunk
@@ -144,7 +144,7 @@ struct us_ops {
    * unconfirmed); else it was dropped (evicted, too large, too many failed sessions). */
   void (*msg_end)(void *ctx, uint8_t flags, bool delivered);
   /** Optional: change a message in buf (len bytes, room for cap) when it is loaded to be sent. Called for a message
-   * with MQ_FLAG_PLAIN on a radio with node_id_prefix, each time the message is loaded from the queue (the queued copy
+   * with MQ_FLAG_PLAIN on a radio with prepare, each time the message is loaded from the queue (the queued copy
    * stays as it was). Returns the new length (at most cap), or 0 if it cannot be done (the message is dropped). NULL:
    * no change. */
   size_t (*prepare)(void *ctx, uint8_t *buf, size_t len, size_t cap, const struct uplink_radio *radio);
@@ -250,7 +250,7 @@ const struct uplink_radio *us_select(const struct uplink_sched *s);
 int us_submit(struct uplink_sched *s, const uint8_t *enc, size_t len, bool alert);
 
 /**
- * Like us_submit() for a plain (not sealed) message. When it goes out on a radio with node_id_prefix, the scheduler
+ * Like us_submit() for a plain (not sealed) message. When it goes out on a radio with prepare, the scheduler
  * calls ops->prepare then (the node adds Uplink.node_id), so the radio that sends it decides, not the radio at submit
  * time.
  */

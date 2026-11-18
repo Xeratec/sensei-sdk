@@ -63,7 +63,7 @@ static void test_vectors(void) {
     CHECK(len == vec_len(i) && memcmp(msg, vec_msg(i), len) == 0);
     fitted++;
   }
-  CHECK(fitted >= 3);
+  CHECK(fitted == 5); /* 5 of the 9 sensei_link vectors fit RX_CAP */
   /* a buffer that holds every vector */
   for (int i = 0; i < VEC_FRAG_COUNT; i++) {
     const uint8_t *msg = NULL;

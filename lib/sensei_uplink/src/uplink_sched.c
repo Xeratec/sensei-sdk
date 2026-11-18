@@ -465,10 +465,13 @@ static void begin_next(struct uplink_sched *s) {
       return;
     }
     s->cur_len = mq_peek(q, s->cur, US_MAX_MSG);
-    if (s->cur_len && r->node_id_prefix && mq_peek_flag(q) && s->ops->prepare != NULL) {
+    if (s->cur_len && r->prepare && mq_peek_flag(q) && s->ops->prepare != NULL) {
       /* A plain message on a radio that asks for it (the node: Uplink.node_id on plain LTE): the app changes
        * it now, for the radio it is sent on. */
       s->cur_len = s->ops->prepare(s->ctx, s->cur, s->cur_len, sizeof(s->cur), r);
+      if (s->cur_len > sizeof(s->cur)) {
+        s->cur_len = 0; /* a length over the buffer is a failed prepare: drop the message below */
+      }
     }
     s->chunk_cnt = s->cur_len ? sensei_frag_count(s->cur_len, mtu) : 0;
     if (s->chunk_cnt == 0) {

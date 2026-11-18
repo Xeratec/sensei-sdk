@@ -10,7 +10,8 @@ Authors:
 
 Uplink scheduling for an app with one or more radios: two queues, one chunk in flight, retries, deferral and the receive
 side of a downlink. Plain C, no Zephyr, no locking: the app serialises the calls (the node: one work queue) and brings
-the clock, a timer, the queue memory and the radios. It is its own library, not part of `sensei_lpwan`, because it does
+the clock, a timer, the queue memory and the radios. One scheduler per program: the radios' `done()` callbacks find it through a
+static pointer, so a second `us_init()` takes over from the first. It is its own library, not part of `sensei_lpwan`, because it does
 not know the shield: any radio (BLE, LoRa, LTE-M, a test fake) fits behind `struct uplink_radio`. The radios of
 `sensei_lpwan` plug into it.
 
@@ -48,7 +49,7 @@ us_start(&sched);                                   /* at the uplink time; also 
   `US_SENT_UNCONFIRMED` from `done()`: the last chunk is sent once more, then the message counts as sent.
 - `send_last()` tells the radio which chunk ends the session (the last chunk of the last queued message), for the RAI flag
   of LTE. `link_check()` lets a radio hold data on a bad link up to `us_set_defer()` ms; alerts are never held.
-- `MQ_FLAG_PLAIN` marks an unsealed message. With `us_ops.prepare` and `uplink_radio.node_id_prefix` the app can change it
+- `MQ_FLAG_PLAIN` marks an unsealed message. With `us_ops.prepare` and `uplink_radio.prepare` the app can change it
   when it starts on that radio (the node adds `Uplink.node_id` on plain LTE). `prepare` returns the new length, at most
   `cap`, or 0 to drop the message. `MQ_FLAG_REPORT` calls `us_ops.msg_end` when the message is sent or dropped.
 - `us_node_offset_s()` and `us_next_tick_ms()`: the per-node offset in the uplink period and the delay to the next tick.
@@ -71,7 +72,8 @@ The scheduler and the radios must keep two times below what the collector expect
 `dl_rx` joins the chunks (`msg_id | index | count | data`) that the collector or TTN sends, also for a message of one chunk.
 The app gives the buffer for the largest message (the node: a `Downlink` at its generated maximum inside the largest
 envelope, 337 B) and one receiver per radio. A 3-byte acknowledgement is dropped and counted (`n_acks`); a copy of a finished
-message inside the timeout, a bad chunk and a message over the buffer give no message (`n_bad`).
+message inside the timeout gives no message and is not counted; a bad chunk and a message over the buffer give no message and
+count in `n_bad`.
 
 ## Configuration
 

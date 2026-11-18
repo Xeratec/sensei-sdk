@@ -46,7 +46,7 @@ struct uplink_radio {
   uint32_t chunk_timeout_ms;
   /** The app wants to change a plain (unsealed) message before it goes out on this radio: the scheduler calls
    * us_ops.prepare for it (the node adds Uplink.node_id on plain LTE). */
-  bool node_id_prefix;
+  bool prepare;
   /** The collector keeps the chunks of a partly received message while this radio pauses (-EAGAIN, -ENOTCONN). LoRa:
    * yes, TTN uplinks are joined per device for the collector's LORA_REASSEMBLY_TIMEOUT (default 700 s). LTE: no, a new
    * connection comes from a new source address and the collector starts a new message. Only a radio with this flag

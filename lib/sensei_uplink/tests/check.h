@@ -6,8 +6,8 @@
  * - Philip Wiese <wiesep@iis.ee.ethz.ch>
  */
 
-#ifndef COMM_TEST_CHECK_H_
-#define COMM_TEST_CHECK_H_
+#ifndef SENSEI_UPLINK_TEST_CHECK_H_
+#define SENSEI_UPLINK_TEST_CHECK_H_
 
 #include <stdio.h>
 

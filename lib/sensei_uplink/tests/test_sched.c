@@ -271,14 +271,23 @@ static size_t op_prepare_fail(void *c, uint8_t *buf, size_t len, size_t cap, con
   (void)r;
   return 0;
 }
+/* A hook that reports a length over the buffer (cap + 1): as a failed prepare. */
+static size_t op_prepare_over(void *c, uint8_t *buf, size_t len, size_t cap, const struct uplink_radio *r) {
+  (void)c;
+  (void)buf;
+  (void)len;
+  (void)r;
+  return cap + 1;
+}
+static const struct us_ops ops_prep_over = {op_now, op_schedule, op_error, op_rand, op_msg_end, op_prepare_over};
 static const struct us_ops ops_prep_fail = {op_now, op_schedule, op_error, op_rand, op_msg_end, op_prepare_fail};
 static const struct us_ops ops_prep = {op_now, op_schedule, op_error, op_rand, op_msg_end, op_prepare};
 
 /* The prepare hook runs when the message goes out, for the radio it goes out on: a message queued under another radio,
- * or sealed (not plain), or sent on a radio without node_id_prefix, is not changed. */
+ * or sealed (not plain), or sent on a radio without prepare, is not changed. */
 static void test_prepare_at_send_time(void) {
   static const struct uplink_radio r_tag = {
-      .id = sensei_Radio_RADIO_LTEM, .mtu = 1024, .ready = ready2, .send = send2, .node_id_prefix = true};
+      .id = sensei_Radio_RADIO_LTEM, .mtu = 1024, .ready = ready2, .send = send2, .prepare = true};
   uint8_t msg[300], tagged[300 + 9];
   struct fake *f = &fk[2];
 
@@ -370,6 +379,17 @@ static void test_prepare_at_send_time(void) {
   CHECK(us_submit(&s, msg, 10, false) == 0);
   us_start(&s);
   CHECK(s.stats.msgs_dropped == 1 && err_count[US_ERR_RADIO] == 1 && f->n == 1 && s.q.count == 1);
+
+  /* a hook that returns more than the buffer holds (cap + 1): the same, nothing is sent from the over-long length */
+  reset();
+  us_init(&s, qbuf, sizeof(qbuf), abuf, sizeof(abuf), &ops_prep_over, NULL);
+  us_register(&s, &r_tag);
+  us_set_config(&s, sensei_Radio_RADIO_LTEM, 0);
+  CHECK(us_submit_plain(&s, msg, sizeof(msg), false) == 0);
+  CHECK(us_submit(&s, msg, 10, false) == 0);
+  us_start(&s);
+  CHECK(s.stats.msgs_dropped == 1 && err_count[US_ERR_RADIO] == 1 && f->n == 1 && s.q.count == 1);
+  CHECK(s.cur_len == 10);
 }
 
 static void test_multiple_messages(void) {

@@ -786,6 +786,42 @@ static void test_event_reserve(void) {
 
 /* ---- state machine: events of the wrong radio, stale tx_done, undo (B10, A3, A7, B19) ---- */
 
+/* The client hands TxDone.attempts of the send that ended to its callback (sensei_lpwan_send_attempts()): the state
+ * machine keeps it for the send in flight only. */
+static void test_sm_attempts(void) {
+  lpwan_sm_t sm;
+  sensei_LpwanRequest rq = sensei_LpwanRequest_init_zero;
+  sensei_LpwanEvent ev = sensei_LpwanEvent_init_zero;
+
+  lpwan_sm_init(&sm);
+  CHECK(sm.send_attempts == 0);
+  rq.which_body = sensei_LpwanRequest_lora_join_tag;
+  CHECK(lpwan_sm_admit(&sm, &rq) == sensei_LpwanResult_LPWAN_OK);
+  ev.which_body = sensei_LpwanEvent_joined_tag;
+  ev.joined.radio = sensei_Radio_RADIO_LORA;
+  CHECK(lpwan_sm_event(&sm, &ev));
+  rq.which_body = sensei_LpwanRequest_send_tag;
+  rq.send.radio = sensei_Radio_RADIO_LORA;
+  rq.seq = 7;
+  CHECK(lpwan_sm_admit(&sm, &rq) == sensei_LpwanResult_LPWAN_OK && sm.send_attempts == 0);
+  ev.which_body = sensei_LpwanEvent_tx_done_tag;
+  ev.tx_done.seq = 8; /* another seq: ignored */
+  ev.tx_done.attempts = 5;
+  CHECK(!lpwan_sm_event(&sm, &ev) && sm.send_attempts == 0);
+  ev.tx_done.seq = 7;
+  CHECK(lpwan_sm_event(&sm, &ev) && sm.send_attempts == 5 && sm.state == LPWAN_ST_CONNECTED);
+  ev.tx_done.attempts = 9; /* a second result for the same send: ignored */
+  CHECK(!lpwan_sm_event(&sm, &ev) && sm.send_attempts == 5);
+  rq.seq = 9; /* the next send starts from 0; a send that is given up has none */
+  CHECK(lpwan_sm_admit(&sm, &rq) == sensei_LpwanResult_LPWAN_OK && sm.send_attempts == 0);
+  ev.tx_done.seq = 9;
+  ev.tx_done.attempts = 0; /* the shield sent nothing */
+  CHECK(lpwan_sm_event(&sm, &ev) && sm.send_attempts == 0);
+  CHECK(lpwan_sm_admit(&sm, &rq) == sensei_LpwanResult_LPWAN_OK);
+  lpwan_sm_abort_send(&sm);
+  CHECK(sm.send_attempts == 0 && sm.state == LPWAN_ST_CONNECTED);
+}
+
 static void test_sm_events(void) {
   lpwan_sm_t sm, before, admitted;
   sensei_LpwanRequest rq = sensei_LpwanRequest_init_zero;
@@ -959,6 +995,7 @@ int main(void) {
   test_failures_and_version();
   test_event_reserve();
   test_sm_events();
+  test_sm_attempts();
   test_sm_send_results();
   printf("%s\n", check_failures ? "FAILED" : "ok");
   return check_failures ? 1 : 0;

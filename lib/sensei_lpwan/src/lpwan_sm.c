@@ -14,6 +14,7 @@ void lpwan_sm_init(lpwan_sm_t *sm) {
   sm->state = LPWAN_ST_IDLE;
   sm->tech = LPWAN_TECH_NONE;
   sm->send_seq = 0;
+  sm->send_attempts = 0;
 }
 
 lpwan_tech_t lpwan_tech_of_radio(sensei_Radio r) {
@@ -90,6 +91,7 @@ sensei_LpwanResult lpwan_sm_admit(lpwan_sm_t *sm, const sensei_LpwanRequest *req
     }
     sm->state = LPWAN_ST_SENDING;
     sm->send_seq = req->seq;
+    sm->send_attempts = 0;
     return sensei_LpwanResult_LPWAN_OK;
   }
 
@@ -177,6 +179,7 @@ bool lpwan_sm_event(lpwan_sm_t *sm, const sensei_LpwanEvent *evt) {
     }
     sm->state = LPWAN_ST_CONNECTED;
     sm->send_seq = 0; /* each send has one result: a second tx_done for it is ignored */
+    sm->send_attempts = evt->tx_done.attempts;
     return true;
   case sensei_LpwanEvent_error_tag:
     if (sm->state == LPWAN_ST_CONNECTING) {
@@ -198,6 +201,7 @@ void lpwan_sm_abort_send(lpwan_sm_t *sm) {
   if (sm->state == LPWAN_ST_SENDING) {
     sm->state = LPWAN_ST_CONNECTED;
     sm->send_seq = 0;
+    sm->send_attempts = 0;
   }
 }
 

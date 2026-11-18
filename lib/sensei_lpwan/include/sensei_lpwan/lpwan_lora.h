@@ -72,6 +72,14 @@ uint32_t lpwan_lora_airtime_ms(uint8_t data_rate, uint32_t phy_len);
  */
 uint32_t lpwan_lora_tx_ms(uint8_t data_rate, bool adr, uint32_t app_len, uint32_t nb_trans, bool confirmed);
 
+/**
+ * Transmissions of one LoRa uplink, as the shield reports them in TxDone.attempts: `nb_trans` (1 to 15, else 1) for an
+ * unconfirmed one; a confirmed one counts 1 if it was acknowledged and `nb_trans` + 1 if not (the missing ack repeats
+ * it, like lpwan_lora_tx_ms()). The LR1121 does not say how many frames it sent: this is the same model as the time
+ * estimate, and a lower bound for an acknowledged uplink (it may have taken several tries).
+ */
+uint32_t lpwan_lora_tx_attempts(uint32_t nb_trans, bool confirmed, bool acked);
+
 /** What the shield read from the LR1121 for a send. A call that failed is `*_known == false`. */
 struct lpwan_lora_est_in {
   uint8_t data_rate;

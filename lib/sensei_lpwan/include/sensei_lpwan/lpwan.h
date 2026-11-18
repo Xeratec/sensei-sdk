@@ -155,6 +155,16 @@ int sensei_lpwan_radio_send_ex(sensei_Radio radio, const uint8_t *chunk, size_t 
  */
 bool sensei_lpwan_send_unconfirmed(void);
 
+/**
+ * How often the shield transmitted the chunk whose done() runs now (call it inside the callback): TxDone.attempts of
+ * its result. LoRa: the transmissions of the uplink, NbTrans times and one more if a confirmed uplink got no ack (the
+ * shield counts them by this model: the LR1121 does not report them); LTE: the datagrams. 0 if the shield sent nothing
+ * (a refusal, a reset of the LR1121) or the send ended without a result (a timeout, a lost link), and for a shield that
+ * reports none. A caller that counts the transmissions (the charge counter of the SENSEI IEQ node) counts this, not the
+ * calls of send(): a repeated frame costs the energy again.
+ */
+uint32_t sensei_lpwan_send_attempts(void);
+
 /** Sends since boot that the shield sent, waited for the answer of the server (LTE_RAI_ONE_RESP) and got none: the
  * number of times sensei_lpwan_send_unconfirmed() was true. It counts sends, so a last chunk that the app sends again
  * after "unconfirmed" counts twice; an app that wants a count per message counts where it gives up (the SENSEI IEQ node

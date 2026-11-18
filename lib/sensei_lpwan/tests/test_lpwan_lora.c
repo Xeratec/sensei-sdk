@@ -209,6 +209,17 @@ static void test_chunk_and_limits(void) {
   CHECK(lpwan_lora_tx_ms(5, false, 10, 2, true) == lpwan_lora_tx_ms(5, false, 10, 3, false));
   CHECK(lpwan_lora_tx_ms(5, false, 10, 0, false) == lpwan_lora_tx_ms(5, false, 10, 1, false));
   CHECK(lpwan_lora_tx_ms(5, false, 10, 16, false) == lpwan_lora_tx_ms(5, false, 10, 1, false));
+  /* TxDone.attempts: the same count as the time estimate */
+  CHECK(lpwan_lora_tx_attempts(1, false, false) == 1 && lpwan_lora_tx_attempts(3, false, false) == 3);
+  CHECK(lpwan_lora_tx_attempts(3, false, true) == 3); /* no ack is asked for */
+  CHECK(lpwan_lora_tx_attempts(3, true, false) == 4 && lpwan_lora_tx_attempts(1, true, false) == 2);
+  CHECK(lpwan_lora_tx_attempts(3, true, true) == 1); /* acknowledged: at least one */
+  CHECK(lpwan_lora_tx_attempts(0, false, false) == 1 && lpwan_lora_tx_attempts(16, false, false) == 1);
+  CHECK(lpwan_lora_tx_attempts(0, true, false) == 2 && lpwan_lora_tx_attempts(15, false, false) == 15);
+  for (uint32_t nb = 0; nb < LPWAN_LORA_NB_TRANS_MAX; nb++) { /* the count and the time of the estimate agree */
+    CHECK(lpwan_lora_tx_ms(5, false, 10, nb, true) ==
+          lpwan_lora_tx_ms(5, false, 10, lpwan_lora_tx_attempts(nb, true, false), false));
+  }
   /* every repeat waits for the duty cycle: at DR0 about 100 x 2.8 s apart */
   CHECK(lpwan_lora_tx_ms(0, false, 51, 3, false) > 2 * 277000);
   CHECK(lpwan_lora_tx_ms(0, false, 51, 2, false) < LPWAN_SEND_MAX_MS); /* 2 transmissions of a full chunk fit */

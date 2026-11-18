@@ -436,7 +436,7 @@ static void handle_event(const lr1121_modem_event_fields_t *e) {
     break;
   case LR1121_MODEM_LORAWAN_EVENT_TX_DONE: {
     bool ok = cur_confirmed ? status == TX_CONFIRMED : status != TX_NOT_SENT;
-    uint8_t next_max = 0;
+    uint8_t next_max = 0, nb = 0;
 
     if (state != L_SENDING) {
       break; /* the empty uplink of a time request, or a stray event */
@@ -450,7 +450,12 @@ static void handle_event(const lr1121_modem_event_fields_t *e) {
     if (lr1121_modem_get_next_tx_max_payload(ctx, &next_max) != RC_OK) {
       next_max = 0;
     }
-    svc_emit_tx_done(cur_seq, ok, 1, next_max);
+    /* The LR1121 does not count its frames: NbTrans of them, one more for a confirmed uplink that got no ack. */
+    if (lr1121_modem_get_nb_trans(ctx, &nb) != RC_OK) {
+      nb = 0;
+    }
+    svc_emit_tx_done(cur_seq, ok, lpwan_lora_tx_attempts(nb, cur_confirmed, cur_confirmed && status == TX_CONFIRMED),
+                     next_max);
     break;
   }
   case LR1121_MODEM_LORAWAN_EVENT_DOWN_DATA:

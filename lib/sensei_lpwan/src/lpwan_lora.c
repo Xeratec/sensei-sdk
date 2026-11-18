@@ -62,6 +62,15 @@ uint32_t lpwan_lora_airtime_ms(uint8_t data_rate, uint32_t phy_len) {
 
 static uint32_t sat32(uint64_t v) { return v > UINT32_MAX ? UINT32_MAX : (uint32_t)v; }
 
+uint32_t lpwan_lora_tx_attempts(uint32_t nb_trans, bool confirmed, bool acked) {
+  uint32_t nb = nb_trans >= 1 && nb_trans <= LPWAN_LORA_NB_TRANS_MAX ? nb_trans : 1u;
+
+  if (!confirmed) {
+    return nb;
+  }
+  return acked ? 1u : nb + 1u;
+}
+
 uint32_t lpwan_lora_tx_ms(uint8_t data_rate, bool adr, uint32_t app_len, uint32_t nb_trans, bool confirmed) {
   uint64_t n = (nb_trans >= 1 && nb_trans <= LPWAN_LORA_NB_TRANS_MAX ? nb_trans : 1u) + (confirmed ? 1u : 0u);
   uint64_t air = lpwan_lora_airtime_ms(adr ? 0 : data_rate, app_len + LPWAN_LORA_PHY_OVERHEAD);

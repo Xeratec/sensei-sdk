@@ -291,6 +291,7 @@ static struct lpwan_held held;         /* LoRa frame the shield took and has no 
 static struct lpwan_held held_prev;    /* `held` before the request in progress */
 static volatile int64_t lora_retry_at; /* the shield refuses LoRa sends until this uptime (duty cycle), 0: no */
 static struct k_work_delayable retry_work;
+static uint32_t send_attempts;         /* transmissions of the send that just ended (TxDone.attempts), 0: not known */
 static volatile uint8_t lora_next_max; /* payload the LR1121 reported for the next LoRa uplink, 0: not known */
 static uint8_t send_buf[LTE_MTU];
 static size_t send_len;
@@ -635,6 +636,7 @@ static void op_on_event(void *c, const sensei_LpwanEvent *evt) {
       finish_send(-EBUSY);
       break;
     }
+    send_attempts = sm.send_attempts;
     finish_send(evt->tx_done.ok ? 0 : -EIO);
     break;
   case sensei_LpwanEvent_downlink_rx_tag: {
@@ -1854,6 +1856,7 @@ int sensei_lpwan_radio_send_ex(sensei_Radio r, const uint8_t *chunk, size_t len,
   send_radio = r;
   send_last = last;
   send_unconfirmed = false;
+  send_attempts = 0;
   send_done = done;
   send_user = user;
   if (post(CMD_SEND, r, false) != 0) {
@@ -1866,6 +1869,8 @@ int sensei_lpwan_radio_send_ex(sensei_Radio r, const uint8_t *chunk, size_t len,
 /* ---- API ---- */
 
 bool sensei_lpwan_send_unconfirmed(void) { return send_unconfirmed; }
+
+uint32_t sensei_lpwan_send_attempts(void) { return send_attempts; }
 
 uint32_t sensei_lpwan_lte_no_answer(void) { return lte_noack; }
 

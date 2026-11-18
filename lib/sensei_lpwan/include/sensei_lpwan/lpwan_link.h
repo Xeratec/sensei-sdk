@@ -97,7 +97,8 @@ typedef enum {
 typedef struct {
   lpwan_state_t state;
   lpwan_tech_t tech;
-  uint32_t send_seq; /* seq of the send in flight (0: none): only its tx_done ends SENDING */
+  uint32_t send_seq;      /* seq of the send in flight (0: none): only its tx_done ends SENDING */
+  uint32_t send_attempts; /* TxDone.attempts of the send that ended last (0: it has no tx_done, or none yet) */
 } lpwan_sm_t;
 
 void lpwan_sm_init(lpwan_sm_t *sm);

@@ -18,7 +18,8 @@ Untested on hardware. Tested on the host (`make test-host`, `make test-python`) 
 | Part | Where | Runs on |
 |---|---|---|
 | Writer: one transfer into the other slot, checkpoints, checks | `src/g9ota.c`, `include/sensei_gap9/g9ota.h` | GAP9, host tests (no OS, no GAP SDK) |
-| MRAM backend, slot detection, readfs of the slot | `gap9/g9ota_mram.c`, `g9ota_mram.h` | GAP9 (GAP SDK) |
+| Recovery: the writer in the SSBL behind a job server | `src/g9rec.c`, `GAP9/ssbl/src/recovery*.c` | GAP9 (SSBL), host tests, GVSoC |
+| MRAM operations (shared with the SSBL); hand-off arming, slot detection and readfs of the slot (app only) | `gap9/g9ota_mram_ops.c`; `gap9/g9ota_mram.c`, `g9ota_mram.h` | GAP9 (GAP SDK) |
 | Flow: session, signature, trial boot, revert | `src/g9ota_flow.c`, `g9ota_flow.h` | nRF5340, host tests (no OS) |
 | Trial rule | `include/sensei_gap9/gap9_trial.h` | nRF5340, host tests |
 | Zephyr glue: settings, signature check, link, timer | `zephyr/gap9_ota.c`, `gap9_ota_zephyr.h` | nRF5340 |
@@ -189,9 +190,11 @@ signature; it must not stay in the field. A node that has such an image takes th
 
 ## Not covered
 
-The SSBL and FSBL (JTAG only), a GAP9 firmware with another job protocol major (it needs a new nRF5340 image first), no
-authentication of the ROM boot, a node whose nRF5340 settings are lost while a trial is open may keep an image that
-was not confirmed (the probe confirms what answers). A board that has no A/B layout needs one JTAG flash first.
+The SSBL and FSBL (JTAG only, also with the recovery: it writes the slots, never the boot area), a GAP9 firmware with
+another job protocol major (it needs a new nRF5340 image first), no authentication of the ROM boot, a node whose nRF5340
+settings are lost while a trial is open may keep an image that was not confirmed (the probe confirms what answers). A board
+that has no A/B layout needs one JTAG flash first, and so does a board flashed before the recovery (the SSBL section grew
+from 28 to 48 KiB; the slots did not move).
 
 ## Tests
 

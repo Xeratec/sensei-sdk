@@ -53,6 +53,10 @@ The firmware update of GAP9 over the air (A/B slots, signed images, trial boot) 
 - `CONFIG_SENSEI_GAP9_OTA=y` adds the update flow (selects `SETTINGS`, `SENSEI_CRYPTO_ECDSA`): the app fills a
   `struct sensei_gap9_ota_cfg` (public key, job callback, trial check, work queue), calls `sensei_gap9_ota_init()` after
   `gap9_link_init()` and forwards the host requests to `g9ota_flow_begin/_chunk/_command()` with `sensei_gap9_ota_flow()`. See OTA.md.
+- `CONFIG_SENSEI_GAP9_RECOVERY=y` (needs the update) adds the recovery of GAP9 through its boot loader: the link understands the
+  recovery HELLO (`gap9_core.h`: `g9_set_recovery()`, the recovery codec `g9rec_codec`), app jobs fail with `-ENOEXEC` while it
+  lasts, `gap9_link_recovery()`, `gap9_link_submit_recovery()`, `gap9_link_reprobe()`, and the flow writes through it. The strap
+  (`CONFIG_SENSEI_GAP9_RECOVERY_STRAP`, `gap9-recovery` alias, P1.06) is off by default and untested on hardware. See OTA.md, "Recovery".
 - `gap9_link_submit()` returns `-ENOMEM` when all staging slots are taken; every other error comes through the callback
   (`final` is set on the last call of a job). `gap9_link_reset()` is for the user button.
 - SPI_A is shared with the LPWAN shield (`sensei_busarb`): GAP9 starts only when the shield holds neither the bus nor an LTE transmission.

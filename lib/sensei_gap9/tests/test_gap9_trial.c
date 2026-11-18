@@ -10,7 +10,7 @@
 
 #include <stdio.h>
 
-#include "sensei_gap9_trial.h"
+#include "sensei_gap9/gap9_trial.h"
 
 static int fails, checks;
 #define CHECK(c)                                                                                                       \

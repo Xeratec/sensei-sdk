@@ -10,7 +10,7 @@
 #define SENSEI_GAP9_TRIAL_H_
 
 /**
- * @file sensei_gap9_trial.h
+ * @file gap9_trial.h
  * @brief Trial boot of a GAP9 firmware slot as a pure function (no Zephyr, host-testable).
  *
  * The nRF5340 owns the decision (the GAP9 SSBL only follows the slot line). State: the confirmed slot (known good),

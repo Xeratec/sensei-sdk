@@ -83,12 +83,8 @@ ignores it.
 
 ## GAP9 firmware slots
 
-[`sensei_gap9_trial.h`](sensei_gap9_trial.h) is the pure rule for the trial boot of a GAP9 firmware slot (A or B in the
-GAP9 MRAM, started by the SSBL in `GAP9/ssbl`): state (confirmed slot, slot on trial, boots tried), events (HELLO ok or
-bad, no HELLO, status ok or bad, nRF5340 reset during the trial) and actions (boot a slot, confirm it, revert to the
-confirmed slot). It has the same shape as the nRF5340 rule above: the app stores the state (NVS) and acts on the result with
-`gap9_link_reboot()` and `gap9_link_set_slot()` of `lib/sensei_gap9`. It also covers lost settings (probe A, then B). Host
-test: `tests/test_gap9_trial.c`.
+The trial rule, the writer and the update flow for the GAP9 firmware slots (A or B in the GAP9 MRAM) are in
+[`lib/sensei_gap9`](../../../lib/sensei_gap9/OTA.md).
 
 ## Tests
 

@@ -146,7 +146,7 @@ during an LPWAN exchange, are in the node's `docs/TESTING.md` (T7.14).
 GAP9 can hold two firmware images (slots A and B in the MRAM, `include/sensei_gap9/gap9_slot.h`). Its SSBL
 (`GAP9/ssbl`) reads the slot line (pad 56) a few ms after power-up and starts that slot; a slot that is not a complete
 image or fails its CRC is skipped and the other one starts. The nRF5340 decides which slot is good (trial boot and
-confirm, `NRF/system/ota/sensei_gap9_trial.h`); the SSBL only follows the line.
+confirm, `lib/sensei_gap9/include/sensei_gap9/gap9_trial.h`); the SSBL only follows the line.
 
 - The line is set right after the GAP9 rail comes on (`op_power()`; the SSBL reads it milliseconds later), and low
   whenever GAP9 is off, also while the nRF5340 boots (`pwr_boot_hook`): a high pin must never feed an unpowered GAP9.

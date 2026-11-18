@@ -77,10 +77,14 @@ static const struct spi_config spi_cfg = {
 static volatile bool spis_armed;
 static volatile int spis_rx_amount;
 static bool trig_want;
-static volatile bool link_ready; /* gap9_link_init() is done */
+static volatile bool link_ready;  /* gap9_link_init() is done */
+static volatile bool app_refused; /* mirror of the recovery latch: the app's jobs fail at once, from any thread */
 #ifdef CONFIG_SENSEI_GAP9_OTA
 static atomic_t boot_slot; /* the level of the slot line at the next power-up: 0 = A, 1 = B */
 #endif                     /* CONFIG_SENSEI_GAP9_OTA */
+
+/* A job that GAP9 could not take because of what it runs (boot loader, old app) is no link error. */
+static bool is_link_error(int err) { return err != -ENOEXEC && err != -EPROTONOSUPPORT; }
 
 static void report_error(void) {
   if (hooks != NULL && hooks->error != NULL) {
@@ -183,6 +187,7 @@ static void reprobe_arm(void) {
 #endif
 
 static void link_sync(void) {
+  app_refused = g9_recovery(&core, NULL);
   bus_sync();
 #ifdef CONFIG_SENSEI_GAP9_RECOVERY_STRAP
   if (strap_active && core.state == G9_RUN) { /* the HELLO came: the SSBL has read the strap long ago */
@@ -442,7 +447,10 @@ static void submit_handler(struct k_work *w) {
     }
     int ret = 0;
 
-    if (!bus_held && !bus_take()) {
+    if (!s->rec && g9_recovery(&core, NULL)) {
+      /* The boot loader runs: the app's job fails at once, without SPI_A and without a power-up. */
+      ret = -ENOEXEC;
+    } else if (!bus_held && !bus_take()) {
       /* LPWAN holds SPI_A or an LTE transmission runs: wait, then give up. */
       int64_t now = k_uptime_get();
 
@@ -469,7 +477,9 @@ static void submit_handler(struct k_work *w) {
 #endif
     }
     if (ret != 0) {
-      report_error();
+      if (is_link_error(ret)) {
+        report_error();
+      }
       op_deliver(s->done, s->user, ret, NULL, true);
     }
     k = k_spin_lock(&stage_lock);
@@ -638,6 +648,11 @@ int gap9_link_init(const struct gap9_link_cfg *cfg) {
 }
 
 int gap9_link_submit(const void *job, g9_done_fn done, void *user) {
+#ifdef CONFIG_SENSEI_GAP9_RECOVERY
+  if (app_refused) {
+    return -ENOEXEC; /* GAP9 is in recovery: no staging, no SPI_A, no error count */
+  }
+#endif
   k_spinlock_key_t k = k_spin_lock(&stage_lock);
 
   if (stage_head - stage_tail >= STAGE_DEPTH) {
@@ -657,7 +672,7 @@ int gap9_link_submit(const void *job, g9_done_fn done, void *user) {
 }
 
 #ifdef CONFIG_SENSEI_GAP9_RECOVERY
-int gap9_link_submit_recovery(const void *job, g9_done_fn done, void *user) {
+int gap9_link_submit_recovery(const struct g9ota_req *req, g9_done_fn done, void *user) {
   k_spinlock_key_t k = k_spin_lock(&stage_lock);
 
   if (stage_head - stage_tail >= STAGE_DEPTH) {
@@ -666,7 +681,11 @@ int gap9_link_submit_recovery(const void *job, g9_done_fn done, void *user) {
   }
   struct stage *s = &stages[stage_head % STAGE_DEPTH];
 
-  memcpy(stage_job(stage_head), job, sizeof(sensei_Gap9RecoveryJob));
+  /* The request becomes the recovery job in the staging slot itself (no second copy of the 1 kB job). */
+  if (g9rec_job_from_req(req, stage_job(stage_head)) != 0) {
+    k_spin_unlock(&stage_lock, k);
+    return -EINVAL;
+  }
   s->done = done;
   s->user = user;
   s->rec = true;
@@ -678,11 +697,18 @@ int gap9_link_submit_recovery(const void *job, g9_done_fn done, void *user) {
 
 bool gap9_link_recovery(uint32_t *reason) { return g9_recovery(&core, reason); }
 
-/* The look: GAP9 needs SPI_A like for a job; if it is busy, try again in a minute. */
+bool gap9_link_app_major(uint32_t *major) { return g9_app_major(&core, major); }
+
+/* The look: only while GAP9 is off (a session or a job has it on: the boot loader is in use, a power cycle would cut
+ * the transfer) and with SPI_A like for a job; if either is busy, try again in a minute. */
 static void reprobe_handler(struct k_work *w) {
   ARG_UNUSED(w);
   if (!g9_recovery(&core, NULL)) {
     reprobe_scheduled = false;
+    return;
+  }
+  if (core.state != G9_OFF || stage_head != stage_tail) {
+    k_work_reschedule_for_queue(&link_wq, &reprobe_work, K_SECONDS(60));
     return;
   }
   if (!bus_held && !bus_take()) {
@@ -701,12 +727,12 @@ void gap9_link_reprobe(void) {
   }
 }
 
-int gap9_link_force_recovery(void) {
+int gap9_link_force_recovery(bool on) {
 #ifdef CONFIG_SENSEI_GAP9_RECOVERY_STRAP
-  atomic_set(&strap_next, 1);
+  atomic_set(&strap_next, on ? 1 : 0);
   return 0;
 #else
-  return -ENOTSUP;
+  return on ? -ENOTSUP : 0;
 #endif
 }
 #endif /* CONFIG_SENSEI_GAP9_RECOVERY */

@@ -27,7 +27,7 @@
 LOG_MODULE_REGISTER(sensei_gap9_ota, CONFIG_SENSEI_GAP9_LOG_LEVEL);
 
 #define SETTINGS_KEY "sensei_gap9/trial"
-#define STORE_VERSION 3u /* 3: min_version */
+#define STORE_VERSION 3u /* 3: min_version (2: trial and known only; a v2 record is read as it is, min_version 0) */
 
 static const struct sensei_gap9_ota_cfg *cfg;
 static struct g9ota_flow flow;
@@ -40,11 +40,30 @@ static struct {
 } stored;
 static bool stored_valid;
 
+/* The record of version 2 (before min_version): the confirmed slot and the known ids survive an update of the nRF5340
+ * firmware; losing them would send the node into the lost-settings probe (slot A is confirmed, whatever was). */
+static struct {
+  uint8_t version;
+  struct {
+    struct sensei_gap9_trial trial;
+    uint32_t known[2];
+  } store;
+} stored_v2;
+
 static int store_set(const char *name, size_t len, settings_read_cb read_cb, void *cb_arg) {
-  if (strcmp(name, "trial") == 0 && len == sizeof(stored) &&
-      read_cb(cb_arg, &stored, sizeof(stored)) == (ssize_t)sizeof(stored) && stored.version == STORE_VERSION &&
-      stored.store.trial.confirmed < 2 && stored.store.trial.trial < 2) {
+  if (strcmp(name, "trial") != 0) {
+    return 0;
+  }
+  if (len == sizeof(stored) && read_cb(cb_arg, &stored, sizeof(stored)) == (ssize_t)sizeof(stored) &&
+      stored.version == STORE_VERSION && stored.store.trial.confirmed < 2 && stored.store.trial.trial < 2) {
     stored_valid = true;
+  } else if (len == sizeof(stored_v2) && read_cb(cb_arg, &stored_v2, sizeof(stored_v2)) == (ssize_t)sizeof(stored_v2) &&
+             stored_v2.version == 2u && stored_v2.store.trial.confirmed < 2 && stored_v2.store.trial.trial < 2) {
+    memset(&stored, 0, sizeof(stored));
+    stored.version = STORE_VERSION;
+    stored.store.trial = stored_v2.store.trial;
+    memcpy(stored.store.known, stored_v2.store.known, sizeof(stored.store.known));
+    stored_valid = true; /* min_version 0: the flow seeds it from the confirmed slot */
   }
   return 0;
 }
@@ -54,9 +73,8 @@ SETTINGS_STATIC_HANDLER_DEFINE(sensei_gap9, "sensei_gap9", NULL, store_set, NULL
 /* ---- the world of the flow ---- */
 
 #ifdef CONFIG_SENSEI_GAP9_RECOVERY
-/* Recovery: the request goes to the boot loader of GAP9 as a Gap9RecoveryJob (gap9_ota.proto). One job at a time, like
- * the app's jobs of the flow. */
-static sensei_Gap9RecoveryJob rec_job;
+/* Recovery: the request goes to the boot loader of GAP9 as a Gap9RecoveryJob (gap9_ota.proto), made in the staging slot
+ * of the link. One job at a time, like the app's jobs of the flow. */
 static g9ota_job_cb rec_cb;
 static void *rec_user;
 
@@ -79,12 +97,9 @@ static int rec_submit(const struct g9ota_req *req, g9ota_job_cb cb, void *user) 
   if (rec_cb != NULL) {
     return -EBUSY;
   }
-  if (g9rec_job_from_req(req, &rec_job) != 0) {
-    return -EINVAL;
-  }
   rec_cb = cb;
   rec_user = user;
-  int rc = gap9_link_submit_recovery(&rec_job, rec_done, NULL);
+  int rc = gap9_link_submit_recovery(req, rec_done, NULL); /* converted in the staging slot */
 
   if (rc != 0) {
     rec_cb = NULL;
@@ -93,6 +108,8 @@ static int rec_submit(const struct g9ota_req *req, g9ota_job_cb cb, void *user) 
 }
 
 static bool op_recovery(uint32_t *reason) { return gap9_link_recovery(reason); }
+
+static bool op_app_major(uint32_t *major) { return gap9_link_app_major(major); }
 #endif /* CONFIG_SENSEI_GAP9_RECOVERY */
 
 static int op_job(const struct g9ota_req *req, g9ota_job_cb cb, void *user) {
@@ -154,6 +171,7 @@ static const struct g9ota_ops ops = {
 #ifdef CONFIG_SENSEI_GAP9_RECOVERY
     .recovery = op_recovery,
     .force_recovery = gap9_link_force_recovery,
+    .app_major = op_app_major,
 #endif
     .wake = op_wake,
 };

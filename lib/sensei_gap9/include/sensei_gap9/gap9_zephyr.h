@@ -36,6 +36,7 @@
 
 #include <zephyr/kernel.h>
 
+#include "sensei_gap9/g9ota.h"
 #include "sensei_gap9/gap9_core.h"
 
 #ifdef __cplusplus
@@ -92,7 +93,9 @@ int gap9_link_init(const struct gap9_link_cfg *cfg);
  * later). A staged job waits for SPI_A or LTE (up to CONFIG_SENSEI_GAP9_BUS_WAIT_S, then done gets
  * -EBUSY) and for a free queue entry. Other errors come through done: -ETIMEDOUT, -EPROTO (GAP9
  * firmware with other messages), -ECANCELED (power off or button), -ECONNRESET (GAP9 restarted
- * after it sent part of the result), or the status of the job.
+ * after it sent part of the result), -EPROTONOSUPPORT (the app of GAP9 is older than the job needs), or the status of
+ * the job. With CONFIG_SENSEI_GAP9_RECOVERY, -ENOEXEC (GAP9 is in recovery: its boot loader runs, no job of the app
+ * can) is also the return value when the link knows it already: nothing is staged and no error is counted.
  */
 int gap9_link_submit(const void *job, g9_done_fn done, void *user);
 
@@ -148,22 +151,27 @@ int gap9_link_reboot(uint8_t slot, void (*cb)(int err, const sensei_gap9_hello *
  */
 bool gap9_link_recovery(uint32_t *reason);
 
-/**
- * Queue a recovery job (`const sensei_Gap9RecoveryJob *`, copied; gap9_ota.proto). The staging, the bus wait and the
- * errors are those of gap9_link_submit(); `done` gets a `const sensei_Gap9RecoveryResult *`. -ENOEXEC (also through
- * done): GAP9 runs its app.
+/** The job protocol major of the app that said hello last (false: none yet, or the boot loader's HELLO was the last).
  */
-int gap9_link_submit_recovery(const void *job, g9_done_fn done, void *user);
+bool gap9_link_app_major(uint32_t *major);
+
+/**
+ * Queue the recovery job for an update request (`req` is converted into the staging slot, valid during the call
+ * only; gap9_ota.proto Gap9RecoveryJob). The staging, the bus wait and the errors are those of gap9_link_submit();
+ * `done` gets a `const sensei_Gap9RecoveryResult *`. -ENOEXEC (also through done): GAP9 runs its app.
+ */
+int gap9_link_submit_recovery(const struct g9ota_req *req, g9_done_fn done, void *user);
 
 /** Power GAP9 up now to look whether it is still in recovery, instead of waiting for the next look. */
 void gap9_link_reprobe(void);
 
 /**
- * With CONFIG_SENSEI_GAP9_RECOVERY_STRAP: the next power-up of GAP9 (gap9_link_reboot()) has the recovery strap high
- * (P1.06 to pad 57), so that its boot loader enters recovery whatever the slots hold; the strap drops after the HELLO
- * and with the power. Returns 0 or -ENOTSUP (no strap in this build). Untested on hardware.
+ * With CONFIG_SENSEI_GAP9_RECOVERY_STRAP: `on` arms the strap for the next power-up of GAP9 (gap9_link_reboot()): it is
+ * high (P1.06 to pad 57), so that the boot loader enters recovery whatever the slots hold; the strap drops after the
+ * HELLO and with the power. `off` disarms it (the reboot did not happen). Returns 0 or -ENOTSUP (no strap in this
+ * build; disarming is always 0). Untested on hardware.
  */
-int gap9_link_force_recovery(void);
+int gap9_link_force_recovery(bool on);
 #endif /* CONFIG_SENSEI_GAP9_RECOVERY */
 
 struct gap9_link_status {

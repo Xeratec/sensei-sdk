@@ -160,6 +160,13 @@ static void ingest(struct g9ota_flow *f, const sensei_Gap9OtaInfo *info) {
     const sensei_Gap9Slot *s = f->booted ? &info->slot_b : &info->slot_a;
 
     f->image_id = s->valid ? s->image_id : 0;
+    /* No version confirmed yet (a node that confirmed before min_version existed, or settings that were migrated): the
+     * confirmed slot answers with an image that this node verified: its version is the floor. */
+    if (f->min_version == 0 && !f->trial.open && f->booted == f->trial.confirmed && s->has_version &&
+        slot_known(f, f->booted, s)) {
+      f->min_version = pack_version(&s->version);
+      persist_keep(f);
+    }
   }
 }
 
@@ -249,6 +256,7 @@ static void trial_act(struct g9ota_flow *f, struct sensei_gap9_trial_out out) {
   case SENSEI_GAP9_TRIAL_REVERT:
     persist_keep(f);
     (void)f->ops->set_slot(out.slot);
+    f->booted_known = false; /* the SSBL may start the other slot when this one does not load */
     f->last_fail = sensei_Gap9OtaFail_GAP9_OTA_FAIL_BOOT;
     trial_end(f);
     if (f->held && f->ops->reboot(out.slot, on_revert_boot, f) == 0) {
@@ -259,6 +267,7 @@ static void trial_act(struct g9ota_flow *f, struct sensei_gap9_trial_out out) {
   case SENSEI_GAP9_TRIAL_GIVE_UP:
     persist_keep(f);
     (void)f->ops->set_slot(out.slot);
+    f->booted_known = false;
     trial_end(f);
     session_end(f);
     break;
@@ -296,18 +305,27 @@ static void on_reboot(int err, const sensei_Version *hello, void *user) {
 /* Start the trial of `slot` (an apply or a revert). Replies at once. */
 static void start_trial(struct g9ota_flow *f, uint8_t slot, uint32_t image_id) {
   struct sensei_gap9_trial_out out;
+  uint8_t was_confirmed;
 
   /* A slot is started only with an image id that this node verified. */
   if (image_id == 0 || f->known[slot & 1u] != image_id) {
     refuse(f, sensei_Gap9OtaResult_GAP9_OTA_INVALID, sensei_Gap9OtaFail_GAP9_OTA_FAIL_STATE);
     return;
   }
+  /* GAP9 runs the other slot than the confirmed one (a fallback, or a recovery image without its trial): the confirmed
+   * slot is bad, and the transfer went into it. The slot that runs becomes the one to go back to. */
+  was_confirmed = f->trial.confirmed;
+  if (!f->trial.open && slot == was_confirmed && f->booted_known && (f->booted & 1u) != was_confirmed) {
+    f->trial.confirmed = f->booted & 1u;
+  }
   out = sensei_gap9_trial_step(&f->trial, SENSEI_GAP9_TRIAL_APPLY, slot);
   if (out.action != SENSEI_GAP9_TRIAL_BOOT) { /* a trial is open, or the slot is the confirmed one */
+    f->trial.confirmed = was_confirmed;
     refuse(f, sensei_Gap9OtaResult_GAP9_OTA_INVALID, sensei_Gap9OtaFail_GAP9_OTA_FAIL_STATE);
     return;
   }
   if (persist_try(f) != 0) {
+    f->trial.confirmed = was_confirmed;
     f->trial.open = false;
     f->view.detail = -EIO;
     refuse(f, sensei_Gap9OtaResult_GAP9_OTA_FAILED, sensei_Gap9OtaFail_GAP9_OTA_FAIL_FLASH);
@@ -459,16 +477,39 @@ static void on_job(int err, const sensei_Gap9OtaInfo *info, void *user) {
   if (info == NULL && err == 0) {
     err = -EIO;
   }
-  if (err == -ENOEXEC && !f->rec_retry && in_recovery(f)) {
-    /* The job was an app job and GAP9 turned out to be in its boot loader (or the first job of a session came before
-     * the HELLO): the same request goes again as a recovery job (the glue routes by the state of the link). */
+  if (err == -EPROTONOSUPPORT && f->step != ST_TRIAL_STATUS && f->step != ST_TRIAL_VERIFY) {
+    /* The app of GAP9 is older than G9OTA_APP_MAJOR_MIN: it runs the normal jobs, not the update. A trial of such an
+     * image fails as any trial that gets no status. */
+    session_end(f);
+    send_error(f, err);
+    return;
+  }
+  if (err == -ENOEXEC && !f->rec_retry) {
+    /* The job was meant for the other program of GAP9: an app job and the boot loader runs (or the first job of a
+     * session came before the HELLO), or a recovery job and the app came up. The same request goes again, once, the
+     * other way (the glue routes by the state of the link). */
+    bool rec = in_recovery(f);
+
     switch (f->step) {
     case ST_BEGIN:
       f->rec_retry = true;
-      f->rec_begin = f->req.u.begin;
-      job_status(f);
-      submit(f, ST_REC_KEEP);
+      if (rec) { /* the keep slot is checked first */
+        f->rec_begin = f->req.u.begin;
+        job_status(f);
+        submit(f, ST_REC_KEEP);
+      } else {
+        submit(f, f->step);
+      }
       return;
+    case ST_REC_KEEP:
+      if (!rec) { /* the app came up: no keep slot to check, the begin goes as an app job */
+        f->rec_retry = true;
+        req_clear(f, G9OTA_OP_BEGIN);
+        f->req.u.begin = f->rec_begin;
+        submit(f, ST_BEGIN);
+        return;
+      }
+      break;
     case ST_CHUNK:
     case ST_STATUS:
     case ST_FINISH:
@@ -701,9 +742,9 @@ static void on_force_boot(int err, const sensei_Version *hello, void *user) {
   struct g9ota_flow *f = user;
 
   (void)hello;
+  (void)f->ops->force_recovery(false); /* the power-up used the strap, or it did not happen: nothing stays armed */
   if (err == -ENOEXEC && in_recovery(f)) {
-    f->rec_begin = f->req.u.begin;
-    job_status(f);
+    job_status(f); /* the begin waits in rec_begin */
     submit(f, ST_REC_KEEP);
     return;
   }
@@ -719,10 +760,27 @@ static void on_force_boot(int err, const sensei_Version *hello, void *user) {
 static int begin_forced(struct g9ota_flow *f, const sensei_Gap9OtaBegin *b) {
   int rc;
 
-  (void)b;
+  uint32_t major = 0;
+
   if (f->ops->force_recovery == NULL || f->ops->recovery == NULL || f->forced ||
       (f->state == G9OTA_F_SESSION && f->view.stage == sensei_Gap9OtaStage_GAP9_OTA_STAGE_RECEIVING)) {
     refuse(f, sensei_Gap9OtaResult_GAP9_OTA_INVALID, sensei_Gap9OtaFail_GAP9_OTA_FAIL_STATE);
+    return 0;
+  }
+  if (f->ops->app_major != NULL && f->ops->app_major(&major) && major < G9OTA_APP_MAJOR_MIN) {
+    return -EPROTONOSUPPORT; /* an app that takes no update requests */
+  }
+  if (f->booted_known && f->booted != f->trial.confirmed) {
+    /* The app answered from the slot that is not the confirmed one: the confirmed slot is damaged and this image is
+     * the only one that works. The boot loader would keep the confirmed slot and write the other: this one. */
+    f->view.detail = f->booted;
+    refuse(f, sensei_Gap9OtaResult_GAP9_OTA_INVALID, sensei_Gap9OtaFail_GAP9_OTA_FAIL_KEEP);
+    return 0;
+  }
+  if (f->have_fresh && (uint32_t)(now(f) - f->fresh_ms) < G9OTA_OPEN_MIN_MS) {
+    /* a forced begin resets GAP9 whether it resumes or not: the same rule as for a new transfer */
+    f->view.detail = 0;
+    refuse(f, sensei_Gap9OtaResult_GAP9_OTA_BUSY, sensei_Gap9OtaFail_GAP9_OTA_FAIL_RATE);
     return 0;
   }
   rc = session_start(f);
@@ -730,16 +788,21 @@ static int begin_forced(struct g9ota_flow *f, const sensei_Gap9OtaBegin *b) {
     return rc;
   }
   f->forced = true;
-  if (f->ops->force_recovery() != 0) {
+  f->rec_begin = *b; /* waits for the boot loader and the check of the keep slot */
+  if (f->ops->force_recovery(true) != 0) {
     session_end(f);
     refuse(f, sensei_Gap9OtaResult_GAP9_OTA_INVALID, sensei_Gap9OtaFail_GAP9_OTA_FAIL_STATE);
     return 0;
   }
   rc = f->ops->reboot(f->trial.confirmed, on_force_boot, f);
   if (rc != 0) {
+    (void)f->ops->force_recovery(false); /* the strap must not wait for another power-up */
     session_end(f);
     return rc;
   }
+  /* Every forced begin resets GAP9 and ends in a session end: the rule of the new transfers holds for them too. */
+  f->have_fresh = true;
+  f->fresh_ms = now(f);
   return 0;
 }
 
@@ -753,8 +816,6 @@ static int begin_request(struct g9ota_flow *f, const sensei_Gap9OtaBegin *b) {
   if (b->size == 0) {
     return -EINVAL;
   }
-  req_clear(f, G9OTA_OP_BEGIN);
-  f->req.u.begin = *b;
   f->begin_fresh = !b->resume;
   if (f->begin_fresh && f->have_fresh && (uint32_t)(now(f) - f->fresh_ms) < G9OTA_OPEN_MIN_MS) {
     /* The slot's sectors wear out: GAP9 keeps this rule too, but forgets it when it loses
@@ -771,11 +832,13 @@ static int begin_request(struct g9ota_flow *f, const sensei_Gap9OtaBegin *b) {
     return rc;
   }
   if (in_recovery(f)) { /* the keep slot is checked first */
-    f->rec_begin = f->req.u.begin;
+    f->rec_begin = *b;
     job_status(f);
     submit(f, ST_REC_KEEP);
     return 0;
   }
+  req_clear(f, G9OTA_OP_BEGIN);
+  f->req.u.begin = *b;
   submit(f, ST_BEGIN);
   return 0;
 }

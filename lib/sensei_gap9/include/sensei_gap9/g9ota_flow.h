@@ -39,8 +39,15 @@
  * the flow checks that the slot it keeps (the slot line, the confirmed slot) is the confirmed one (FAIL_KEEP) before a
  * transfer starts, and writes the other slot. `begin` with `force_recovery` powers GAP9 with the strap first (once per
  * session, never during a transfer). An image older than the highest confirmed version is refused (FAIL_ROLLBACK).
- * - New transfers (not a resume) are at least G9OTA_OPEN_MIN_MS apart (MRAM wear; GAP9 forgets its own count when it
- * loses power).
+ * - A GAP9 that runs the other slot than the confirmed one (the confirmed slot did not start, or an image of a
+ * recovery started without its trial) has a confirmed slot that is bad: a transfer goes into it, and `apply` of that
+ * slot makes the slot that runs the one to go back to (g9ota_flow.c, start_trial). `revert` then starts the slot that
+ * runs on trial, so that it is checked and confirmed like any image. A forced recovery is refused in this state: the
+ * writer would overwrite the only image that works.
+ * - An app older than G9OTA_APP_MAJOR_MIN (job protocol) runs the normal jobs; the update requests fail with
+ * -EPROTONOSUPPORT (the link, gap9_core.h job_min_major). A forced recovery is refused for it too.
+ * - New transfers (not a resume, and every forced recovery) are at least G9OTA_OPEN_MIN_MS apart (MRAM wear; GAP9
+ * forgets its own count when it loses power).
  * - Settings that cannot be stored are retried every few seconds (g9ota_flow_poll).
  * - The reply to `apply` comes at once (stage APPLYING). The host asks `status` until the trial is over.
  */
@@ -122,8 +129,12 @@ struct g9ota_ops {
   /** GAP9 is in recovery (its boot loader runs the writer, gap9_core.h g9_recovery()); `reason` may be NULL. The job
    * callback then sends the recovery jobs. NULL: no recovery support (a build without CONFIG_SENSEI_GAP9_RECOVERY). */
   bool (*recovery)(uint32_t *reason);
-  /** Power the next boot with the recovery strap (Gap9OtaBegin.force_recovery). 0 or -ENOTSUP. NULL: no strap. */
-  int (*force_recovery)(void);
+  /** `on`: power the next boot with the recovery strap (Gap9OtaBegin.force_recovery), 0 or -ENOTSUP; `off`: disarm it
+   * (the reboot did not happen or ended; the flow calls it on every way out). NULL: no strap. */
+  int (*force_recovery)(bool on);
+  /** The job protocol major of the app that said hello last: true with the major, false if none did or the last HELLO
+   * was the boot loader's. NULL: not known. A forced recovery is refused for an app older than G9OTA_APP_MAJOR_MIN. */
+  bool (*app_major)(uint32_t *major);
 };
 
 enum g9ota_state {
@@ -149,7 +160,7 @@ struct g9ota_flow {
   sensei_Gap9OtaFail last_fail; /* of an update that went wrong, until the next begin or abort */
   uint8_t booted;               /* the slot GAP9 runs from, as of the last answer */
   uint32_t image_id;            /* of the running image, 0 if not known */
-  bool booted_known;
+  bool booted_known; /* `booted` is what the last answer of the app said (false after a revert: the outcome is open) */
 
   /* the request in progress */
   bool busy;
@@ -173,7 +184,7 @@ struct g9ota_flow {
   uint32_t min_version;          /* the highest version confirmed; stored */
   uint32_t trial_version;        /* version of the slot on trial, as the status job showed it */
   bool forced;                   /* a begin forced recovery in this session */
-  bool rec_retry;                /* the job in flight was sent again as a recovery job */
+  bool rec_retry;                /* the job in flight was sent again the other way (app job or recovery job) */
   sensei_Gap9OtaBegin rec_begin; /* the begin that waits for the check of the keep slot */
 
   struct g9ota_req req; /* about 1 KB: the job in flight */

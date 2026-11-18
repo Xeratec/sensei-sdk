@@ -1,0 +1,143 @@
+// SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+// SPDX-License-Identifier: Apache-2.0
+//
+// Authors:
+// - Philip Wiese <wiesep@iis.ee.ethz.ch>
+
+// Update of the GAP9 application over the air (lib/sensei_gap9, OTA.md). The host streams a signed
+// MCUboot-format image through the nRF5340 into the MRAM slot (A or B) that GAP9 does not run from. Slots are
+// numbered 0 (A) and 1 (B).
+//
+// Two links use these messages:
+//  - nRF5340 to GAP9 (jobs): Gap9OtaBegin, Gap9OtaData, Gap9OtaStatus, answered by Gap9OtaInfo. The app puts them
+//    into its own job and result messages (the SENSEI IEQ node: Gap9Job and Gap9Result of gap9.proto).
+//  - host to nRF5340: Gap9OtaBegin, Gap9OtaChunk, Gap9OtaCommand, answered by Gap9OtaReply. The app puts them into its
+//    own host messages (the node: HostToNode and NodeToHost of host.proto).
+// Field numbers are stable: never reuse or renumber, add new fields at the end.
+
+syntax = "proto3";
+
+package sensei;
+
+import "sensei/types.proto";
+
+enum Gap9OtaResult {
+  GAP9_OTA_OK = 0;
+  GAP9_OTA_BUSY = 1;    // try again later (a GAP9 job or another session holds the link, or a new transfer too soon)
+  GAP9_OTA_INVALID = 2; // the request is wrong or does not fit the state: `fail` says why, the transfer is unchanged
+  GAP9_OTA_FAILED = 3;  // the transfer or the trial failed: `fail` says why, `stage` is FAILED
+}
+
+// Where a transfer on the GAP9 stands.
+enum Gap9OtaStage {
+  GAP9_OTA_STAGE_IDLE = 0;      // no transfer open
+  GAP9_OTA_STAGE_RECEIVING = 1; // `offset` is the next byte wanted
+  GAP9_OTA_STAGE_VERIFIED = 2;  // every byte is in and checked (hash, header, kind); the nRF5340 checks the signature
+  GAP9_OTA_STAGE_APPLYING = 3;  // nRF5340 only: the new slot runs on trial and is being checked
+  GAP9_OTA_STAGE_FAILED = 4;    // see `fail`; abort or begin starts again
+}
+
+enum Gap9OtaFail {
+  GAP9_OTA_FAIL_NONE = 0;
+  GAP9_OTA_FAIL_STATE = 1;     // the request does not fit the state of the transfer
+  GAP9_OTA_FAIL_OFFSET = 2;    // chunk at another offset than the one wanted: continue at `offset`
+  GAP9_OTA_FAIL_SIZE = 3;      // empty, larger than the slot, or a chunk that is too long
+  GAP9_OTA_FAIL_IMAGE = 4;     // not an MCUboot image, or its sizes or hash TLV do not fit the file
+  GAP9_OTA_FAIL_HASH = 5;      // the bytes in the slot do not match the SHA-256 of begin
+  GAP9_OTA_FAIL_DOWNGRADE = 6; // older than the running image
+  GAP9_OTA_FAIL_KIND = 7;      // an image for another board (the kind TLV is missing or differs)
+  GAP9_OTA_FAIL_SIGNATURE = 8; // nRF5340: the signature is not from the key of this node
+  GAP9_OTA_FAIL_FLASH = 9;     // MRAM error, `detail` is the code
+  GAP9_OTA_FAIL_RATE = 10;     // too many new transfers in a short time: wait and ask again (result BUSY)
+  GAP9_OTA_FAIL_BOOT = 11;     // nRF5340: the new image did not start, spoke another protocol or failed its check
+  GAP9_OTA_FAIL_NO_SLOT = 12;  // nRF5340: revert, but the other slot holds no image
+}
+
+// One slot as GAP9 finds it.
+message Gap9Slot {
+  bool valid = 1;       // an MCUboot header and a kind TLV for this board are in the slot
+  Version version = 2;  // from the header (git is 0)
+  fixed32 image_id = 3; // first 4 bytes of the image hash (little endian), 0 if not valid
+}
+
+message Gap9OtaBegin {
+  uint32 size = 1;     // bytes of the whole file
+  bytes sha256 = 2;    // 32 B, of the whole file
+  Version version = 3; // of the image, from its header (the nRF5340 refuses a lower one before the transfer)
+  // Keep an open transfer (also one saved before GAP9 lost power) of the same size and SHA-256 and answer its offset.
+  // Else, or if there is none, a new transfer starts at 0.
+  bool resume = 4;
+}
+
+// nRF5340 to GAP9: the bytes arrive in order, `offset` is where `data` goes (the offset of the last answer).
+message Gap9OtaData {
+  uint32 offset = 1;
+  bytes data = 2; // <= Gap9OtaInfo.chunk_max (1024 B)
+}
+
+// nRF5340 to GAP9: the state of the transfer, the slots and the booted slot. With `verify`, also check the image in
+// `slot` as finish does (without a transfer; the answer is Gap9OtaInfo with image_hash, signature and key_hash, or
+// `fail`): the nRF5340 checks the signature of a slot that it did not receive itself (revert, lost settings). A GAP9
+// that does not know the field only answers the status.
+message Gap9OtaStatus {
+  bool verify = 1;
+  uint32 slot = 2;
+}
+
+// GAP9's answer to every ota job.
+message Gap9OtaInfo {
+  Gap9OtaResult result = 1; // the verdict on the request; the job status of the app is OK whenever the job was handled
+  Gap9OtaStage stage = 2;
+  Gap9OtaFail fail = 3;
+  sint32 detail = 4;
+  uint32 offset = 5; // next byte wanted; after a restart of GAP9 a multiple of the MRAM sector (8 KiB)
+  uint32 size = 6;   // of the open transfer
+  uint32 chunk_max = 7;
+  uint32 booted_slot = 8; // the slot this GAP9 application runs from; it is never written
+  uint32 slot_size = 9;
+  Gap9Slot slot_a = 10;
+  Gap9Slot slot_b = 11;
+  // After a successful finish (stage VERIFIED) or a status with verify: what the nRF5340 needs to check the signature.
+  // `image_hash` is the SHA-256 TLV that GAP9 matched against the bytes it read back (header, image and protected
+  // TLVs), `signature` the ECDSA P-256 signature TLV as r || s, `key_hash` the key hash TLV if there is one.
+  bytes image_hash = 12;
+  bytes signature = 13;
+  bytes key_hash = 14;
+}
+
+// Host to nRF5340: bytes of the image. Flow: Gap9OtaBegin, Gap9OtaChunk until the end, GAP9_OTA_ACTION_FINISH,
+// GAP9_OTA_ACTION_APPLY, then STATUS until the trial is over. The reply to each is a Gap9OtaReply.
+message Gap9OtaChunk {
+  uint32 offset = 1; // where `data` goes: the offset of the last reply
+  bytes data = 2;    // <= Gap9OtaReply.chunk_max (188 B: fits a host message of 212 B)
+}
+
+enum Gap9OtaAction {
+  GAP9_OTA_ACTION_STATUS = 0; // transfer state, next offset (the resume query), slots and versions
+  GAP9_OTA_ACTION_FINISH =
+      1; // all bytes sent: GAP9 reads the slot back and checks it, the nRF5340 checks the signature
+  GAP9_OTA_ACTION_APPLY =
+      2; // the nRF5340 starts the new slot on trial; the reply is at once (stage APPLYING), ask STATUS
+  GAP9_OTA_ACTION_ABORT = 3;  // drop the open transfer and give the SPI bus back
+  GAP9_OTA_ACTION_REVERT = 4; // start the other slot (the previous image) on trial, until the next update begins
+}
+
+message Gap9OtaCommand { Gap9OtaAction action = 1; }
+
+// Answer of the nRF5340 to a host request. `result` is the verdict, the rest is the state of the transfer (from GAP9)
+// and of the slots (the nRF5340 knows which slot is confirmed). stage APPLYING: the new slot runs on trial and is being
+// checked; it ends with confirmed_slot == booted_slot, or with stage FAILED (fail BOOT) and the old slot running again.
+message Gap9OtaReply {
+  Gap9OtaResult result = 1;
+  Gap9OtaStage stage = 2;
+  Gap9OtaFail fail = 3;
+  sint32 detail = 4;
+  uint32 offset = 5;         // next byte wanted (a multiple of the MRAM sector, 8 KiB, after GAP9 lost power)
+  uint32 size = 6;           // of the open transfer
+  uint32 chunk_max = 7;      // largest Gap9OtaChunk.data: 188 B
+  uint32 booted_slot = 8;    // 0 = A, 1 = B: the slot GAP9 runs from now
+  uint32 confirmed_slot = 9; // the slot the nRF5340 trusts; it differs from booted_slot while an image is on trial
+  Gap9Slot slot_a = 10;
+  Gap9Slot slot_b = 11;
+  uint32 slot_size = 12; // bytes a slot holds: the largest image
+}

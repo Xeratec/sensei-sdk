@@ -17,11 +17,11 @@ the nanopb glue and the messages of the SDK libraries. C99, no allocation, no OS
 | SPI frame | `spi.h` | 8 byte header `0x5E, version, type, flags, len, crc16`, then the message. The CRC covers header bytes 0 to 5 and the message |
 | Fragments | `frag.h` | message split into radio chunks `msg_id, index, count, data`, with a reassembler; the 3-byte acknowledgement `msg_id, index, 0` (count 0, never a chunk) |
 | nanopb glue | `pb.h` | `sensei_encode_<Name>()` and `sensei_decode_<Name>()`, `SENSEI_PB_DECLARE()` for app messages |
-| Messages | `proto/sensei/*.proto` | `types.proto` (Empty, Version, Radio), `lpwan.proto` (nRF5340 to nRF9151 requests, responses, events, and the update of the shield: `Dfu*`) |
+| Messages | `proto/sensei/*.proto` | `types.proto` (Empty, Version, Radio), `lpwan.proto` (nRF5340 to nRF9151 requests, responses, events, and the update of the shield: `Dfu*`), `gap9_ota.proto` (update of the GAP9 application: `Gap9Ota*`, see `lib/sensei_gap9/OTA.md`) |
 | SHA-256 | `sha256.h` | small streaming SHA-256 (no allocation, no hardware), for images that arrive in pieces; `sensei_sha256_update_ff()` hashes a skipped 0xFF region |
 
 Apps add their own messages in their own `.proto` files (same package `sensei`, so C and Python names stay
-short) and import `sensei/types.proto` and `sensei/lpwan.proto`. The SENSEI IEQ node does that
+short) and import `sensei/types.proto`, `sensei/lpwan.proto` and `sensei/gap9_ota.proto`. The SENSEI IEQ node does that
 (`firmware/proto`). The GAP9 and LPWAN libraries (`sensei_gap9`, `sensei_lpwan`) build on this one.
 
 ## Stream channels and limits

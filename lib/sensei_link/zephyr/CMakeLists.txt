@@ -17,5 +17,6 @@ zephyr_library_sources(
   ${SENSEI_LINK_DIR}/src/frag.c
   ${SENSEI_LINK_DIR}/src/pb.c
   ${SENSEI_LINK_DIR}/generated/sensei/types.pb.c
-  ${SENSEI_LINK_DIR}/generated/sensei/lpwan.pb.c)
+  ${SENSEI_LINK_DIR}/generated/sensei/lpwan.pb.c
+  ${SENSEI_LINK_DIR}/generated/sensei/gap9_ota.pb.c)
 zephyr_include_directories(${SENSEI_LINK_DIR}/include ${SENSEI_LINK_DIR}/generated)

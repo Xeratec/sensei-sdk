@@ -1,0 +1,12 @@
+# SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+# SPDX-License-Identifier: Apache-2.0
+#
+# Authors:
+# - Philip Wiese <wiesep@iis.ee.ethz.ch>
+
+sensei.Gap9OtaBegin.sha256    max_size:32 fixed_length:true
+sensei.Gap9OtaData.data       max_size:1024
+sensei.Gap9OtaInfo.image_hash max_size:32
+sensei.Gap9OtaInfo.signature  max_size:64
+sensei.Gap9OtaInfo.key_hash   max_size:32
+sensei.Gap9OtaChunk.data      max_size:188

@@ -149,7 +149,7 @@ Plain C libraries for nRF (Zephyr), GAP9 and host builds. Each folder has `inclu
 |---|---|---|
 | [lib/sensei_delta](lib/sensei_delta/README.md) | `CONFIG_SENSEI_DELTA` | Delta coder engine (DPCM, rANS, Huffman); the application brings the trained tables |
 | [lib/sensei_secure](lib/sensei_secure/README.md) | `CONFIG_SENSEI_SECURE` | End-to-end envelope (ECDH P-256, HKDF, AES-GCM, replay window) on the crypto library |
-| [lib/sensei_link](lib/sensei_link/README.md) | `CONFIG_SENSEI_LINK` | Message framing (COBS and CRC streams, SPI frames, fragments), nanopb glue, `types.proto` and `lpwan.proto` |
+| [lib/sensei_link](lib/sensei_link/README.md) | `CONFIG_SENSEI_LINK` | Message framing (COBS and CRC streams, SPI frames, fragments), nanopb glue, `types.proto`, `lpwan.proto` and `gap9_ota.proto` |
 | [lib/sensei_lpwan](lib/sensei_lpwan/README.md) | `CONFIG_SENSEI_LPWAN` | Client of the LPWAN shield's nRF9151 (LTE-M, NB-IoT, LoRaWAN) and the protocol cores of both sides |
 | [lib/sensei_gap9](lib/sensei_gap9/README.md) | `CONFIG_SENSEI_GAP9` | Link between the nRF5340 and GAP9 (jobs and results over SPI, power sequencing, firmware slot select); GAP9 side for GAP9 apps |
 | [lib/sensei_busarb](lib/sensei_busarb/README.md) | `CONFIG_SENSEI_BUSARB` | One owner at a time for the shared SPI_A bus and the LTE current peaks |

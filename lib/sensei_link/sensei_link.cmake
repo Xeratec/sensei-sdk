@@ -41,7 +41,8 @@ set(SENSEI_LINK_FRAMING_SOURCES
 
 set(SENSEI_LINK_GENERATED_SOURCES
   ${SENSEI_LINK_DIR}/generated/sensei/types.pb.c
-  ${SENSEI_LINK_DIR}/generated/sensei/lpwan.pb.c)
+  ${SENSEI_LINK_DIR}/generated/sensei/lpwan.pb.c
+  ${SENSEI_LINK_DIR}/generated/sensei/gap9_ota.pb.c)
 
 set(SENSEI_NANOPB_SOURCES
   ${SENSEI_NANOPB_DIR}/pb_common.c

@@ -26,10 +26,23 @@ project(sensei_lpwan_shield)
 target_sources(app PRIVATE
   src/main.c
   src/diag.c
-  src/link.c
   src/service.c
 )
 target_include_directories(app PRIVATE src)
+
+if(CONFIG_LPWAN_SHIELD_SIM)
+  # native_sim: the link is a socket, the modem and the LR1121 are fakes (sim/README.md). The headers of the modem
+  # library, lte_lc and date_time are the real ones of NCS: the fakes must have their signatures.
+  target_sources(app PRIVATE sim/sim_shield.c sim/sim_link.c)
+  target_include_directories(app PRIVATE sim ${ZEPHYR_BASE}/boards/native/native_sim
+    ${ZEPHYR_NRF_MODULE_DIR}/include ${ZEPHYR_NRFXLIB_MODULE_DIR}/nrf_modem/include)
+  # what the Kconfig of the modem libraries would define on the board, and lte.c asks for
+  target_compile_definitions(app PRIVATE
+    CONFIG_LTE_LC_NETWORK_REGISTRATION_MODULE=1 CONFIG_LTE_LC_PSM_MODULE=1 CONFIG_LTE_LC_EDRX_MODULE=1
+    CONFIG_LTE_LC_RAI_MODULE=1 CONFIG_LTE_LC_CONN_EVAL_MODULE=1 CONFIG_LTE_PROPRIETARY_PSM_REQ=1)
+else()
+  target_sources(app PRIVATE src/link.c)
+endif()
 # The trial rule and the image TLVs of the OTA helpers (pure headers, no Zephyr dependency): "ota/sensei_ota_trial.h",
 # "ota/sensei_ota_image.h".
 target_include_directories(app PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../../system)
@@ -48,25 +61,33 @@ if(CONFIG_LPWAN_SHIELD_DFU)
 endif()
 
 target_sources_ifdef(CONFIG_LPWAN_SHIELD_LTE app PRIVATE src/lte.c)
+if(CONFIG_LPWAN_SHIELD_SIM AND CONFIG_LPWAN_SHIELD_LTE)
+  target_sources(app PRIVATE sim/sim_modem.c)
+endif()
 
 if(CONFIG_LPWAN_SHIELD_LORA)
   set(LR_DIR ${CMAKE_CURRENT_LIST_DIR}/third_party/lr1121_modem)
-  target_sources(app PRIVATE
-    src/lora.c
-    src/lr1121_zephyr_hal.c
-    ${LR_DIR}/lr1121_modem_bsp.c
-    ${LR_DIR}/lr1121_modem_driver_version.c
-    ${LR_DIR}/lr1121_modem_lorawan.c
-    ${LR_DIR}/lr1121_modem_lr_fhss.c
-    ${LR_DIR}/lr1121_modem_modem.c
-    ${LR_DIR}/lr1121_modem_radio_timings.c
-    ${LR_DIR}/lr1121_modem_radio.c
-    ${LR_DIR}/lr1121_modem_regmem.c
-    ${LR_DIR}/lr1121_modem_relay.c
-    ${LR_DIR}/lr1121_modem_system.c
-  )
+  target_sources(app PRIVATE src/lora.c)
   target_include_directories(app PRIVATE ${LR_DIR})
-  # The Semtech driver is built as delivered; do not hold it to our warning level.
-  set_source_files_properties(${LR_DIR}/lr1121_modem_lorawan.c ${LR_DIR}/lr1121_modem_radio.c
-    PROPERTIES COMPILE_OPTIONS "-Wno-unused-parameter")
+  if(CONFIG_LPWAN_SHIELD_SIM)
+    # the driver calls that lora.c makes are faked (the headers are the driver's)
+    target_sources(app PRIVATE sim/sim_lr1121.c)
+  else()
+    target_sources(app PRIVATE
+      src/lr1121_zephyr_hal.c
+      ${LR_DIR}/lr1121_modem_bsp.c
+      ${LR_DIR}/lr1121_modem_driver_version.c
+      ${LR_DIR}/lr1121_modem_lorawan.c
+      ${LR_DIR}/lr1121_modem_lr_fhss.c
+      ${LR_DIR}/lr1121_modem_modem.c
+      ${LR_DIR}/lr1121_modem_radio_timings.c
+      ${LR_DIR}/lr1121_modem_radio.c
+      ${LR_DIR}/lr1121_modem_regmem.c
+      ${LR_DIR}/lr1121_modem_relay.c
+      ${LR_DIR}/lr1121_modem_system.c
+    )
+    # The Semtech driver is built as delivered; do not hold it to our warning level.
+    set_source_files_properties(${LR_DIR}/lr1121_modem_lorawan.c ${LR_DIR}/lr1121_modem_radio.c
+      PROPERTIES COMPILE_OPTIONS "-Wno-unused-parameter")
+  endif()
 endif()

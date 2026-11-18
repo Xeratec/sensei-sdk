@@ -141,6 +141,10 @@ int sensei_lpwan_radio_send_ex(sensei_Radio radio, const uint8_t *chunk, size_t 
  */
 bool sensei_lpwan_send_unconfirmed(void);
 
+/** Sends since boot that waited for the answer of the server (LTE_RAI_ONE_RESP) and got none: the count of
+ * sensei_lpwan_send_unconfirmed() (and of `lte_no_answer` in the shield status). Safe to call from any thread. */
+uint32_t sensei_lpwan_lte_no_answer(void);
+
 /** What to do before a data uplink on LTE (from the connection evaluation, %CONEVAL). */
 enum sensei_lpwan_link {
   SENSEI_LPWAN_LINK_OK,   /* send: the link is fine, or the evaluation is off or gave nothing */

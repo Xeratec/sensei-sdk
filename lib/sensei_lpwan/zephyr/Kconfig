@@ -12,6 +12,13 @@ config SENSEI_LPWAN_PROTO
 	  the shared state machine and the 3GPP timer coding. Selected by the nRF5340 client
 	  (SENSEI_LPWAN) and used by the nRF9151 app (NRF/apps/lpwan_shield).
 
+config SENSEI_LPWAN_SIM_HOST
+	bool
+	depends on BOARD_NATIVE_SIM
+	help
+	  Host sockets and files for the simulated shield link (lpwan_sim_host.c in the native simulator runner). Selected by
+	  SENSEI_LPWAN_SIM and by the simulated shield app.
+
 menuconfig SENSEI_LPWAN
 	bool "LPWAN shield client (LoRaWAN, LTE-M, NB-IoT over the nRF9151)"
 	select SENSEI_LPWAN_PROTO
@@ -105,6 +112,15 @@ config SENSEI_LPWAN_LINK_FAILURES
 	  The nRF9151 may hang or reset. A request that gets no answer counts as one failure; after this
 	  many in a row the client cuts the shield power and starts it again at the next use. A LoRaWAN
 	  session survives in the LR1121, LTE registers again.
+
+config SENSEI_LPWAN_SIM
+	bool "Simulated shield: a socket instead of SPI, the expander and the pins (native_sim)"
+	depends on BOARD_NATIVE_SIM
+	select SENSEI_LPWAN_SIM_HOST
+	help
+	  The link to the nRF9151 is a TCP connection to the simulated shield app (NRF/apps/lpwan_shield built for
+	  native_sim): `zephyr.exe -lpwan_shield=<host>:<port>`. Connecting is the power of the shield, closing the
+	  connection cuts it. For tests without hardware. See lib/sensei_lpwan/README.md.
 
 config SENSEI_LPWAN_SPI_HZ
 	int "SPI clock, Hz"

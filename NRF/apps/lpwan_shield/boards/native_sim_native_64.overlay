@@ -1,0 +1,21 @@
+/*
+ * SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Authors:
+ * - Philip Wiese <wiesep@iis.ee.ethz.ch>
+ */
+
+/* Simulated shield (native_sim). Used instead of app.overlay, which is for the nRF9151. The event line of the LR1121
+ * (DIO9) is an emulated GPIO pin that the fake radio drives (sim/sim_lr1121.c). The node borrows the binding of the
+ * link lines, which also asks for a busy line (not used). */
+
+#include <zephyr/dt-bindings/gpio/gpio.h>
+
+/ {
+	sim_lr1121: sim-lr1121 {
+		compatible = "sensei,lpwan-link";
+		busy-gpios = <&gpio0 6 GPIO_ACTIVE_HIGH>;
+		event-gpios = <&gpio0 5 GPIO_ACTIVE_HIGH>;
+	};
+};

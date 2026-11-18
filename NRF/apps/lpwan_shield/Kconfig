@@ -6,6 +6,14 @@
 
 mainmenu "SENSEI LPWAN service (nRF9151)"
 
+config LPWAN_SHIELD_SIM
+	bool "Simulated shield on native_sim (link over a socket, fake LTE modem and LR1121)"
+	depends on BOARD_NATIVE_SIM
+	select SENSEI_LPWAN_SIM_HOST
+	help
+	  For tests without hardware: the SPI link is a TCP connection to the simulated node, the modem library, lte_lc and
+	  the LR1121 driver are fakes (sim/), the LTE socket is a host socket. See sim/README.md.
+
 config LPWAN_SHIELD_LTE
 	bool "LTE-M and NB-IoT"
 	default y
@@ -13,11 +21,11 @@ config LPWAN_SHIELD_LTE
 	select NET_SOCKETS
 	select NET_SOCKETS_OFFLOAD
 	select NET_SOCKETS_POSIX_NAMES
-	select NRF_MODEM_LIB
-	select LTE_LINK_CONTROL
-	select LTE_LC_PSM_MODULE
-	select LTE_LC_EDRX_MODULE
-	select DATE_TIME
+	select NRF_MODEM_LIB if !LPWAN_SHIELD_SIM
+	select LTE_LINK_CONTROL if !LPWAN_SHIELD_SIM
+	select LTE_LC_PSM_MODULE if !LPWAN_SHIELD_SIM
+	select LTE_LC_EDRX_MODULE if !LPWAN_SHIELD_SIM
+	select DATE_TIME if !LPWAN_SHIELD_SIM
 	help
 	  UDP or TCP uplink and downlink over the LTE modem. The modem library starts at the first
 	  connect request.
@@ -45,8 +53,8 @@ config LPWAN_SHIELD_LTE_TIME_WAIT_S
 config LPWAN_SHIELD_RAI
 	bool "Release assistance indication (RAI) on the last chunk of an LTE message"
 	default y
-	select LTE_LC_RAI_MODULE
-	select LTE_RAI_REQ
+	select LTE_LC_RAI_MODULE if !LPWAN_SHIELD_SIM
+	select LTE_RAI_REQ if !LPWAN_SHIELD_SIM
 	help
 	  The client marks the last chunk of a message (Send.rai); the shield sets the RAI socket option for that send
 	  and, if the server is expected to answer, waits for the answer and then tells the modem that nothing more is
@@ -76,7 +84,7 @@ config LPWAN_SHIELD_LTE_ANSWER_WAIT_NBIOT_S
 config LPWAN_SHIELD_LTE_EVAL
 	bool "Connection evaluation (%CONEVAL) on request of the client"
 	default y
-	select LTE_LC_CONN_EVAL_MODULE
+	select LTE_LC_CONN_EVAL_MODULE if !LPWAN_SHIELD_SIM
 	help
 	  The client asks before a send that can wait (lte_eval); the result (energy estimate, RSRP, coverage level) is an
 	  event. The node defers non-urgent data when the estimate is bad.
@@ -84,7 +92,7 @@ config LPWAN_SHIELD_LTE_EVAL
 config LPWAN_SHIELD_PROPRIETARY_PSM
 	bool "Proprietary PSM when the network grants no PSM"
 	default y
-	select LTE_PROPRIETARY_PSM_REQ
+	select LTE_PROPRIETARY_PSM_REQ if !LPWAN_SHIELD_SIM
 	help
 	  The modem sleeps as in PSM although the network did not grant it (AT%FEACONF). It acts only when the
 	  network grants no PSM. Needs a modem firmware that has it (mfw_nrf91x1); on others the request is ignored.

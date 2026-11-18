@@ -18,7 +18,7 @@ add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/.. sensei_lpwan)
 target_compile_options(sensei_lpwan PRIVATE -Wall -Wextra -Wtype-limits -Werror)
 
 enable_testing()
-foreach(t test_lpwan_link test_lpwan_timers test_lpwan_lora test_lpwan_dfu test_lpwan_dfu_fuzz test_lpwan_upd test_lpwan_rai)
+foreach(t test_lpwan_link test_lpwan_timers test_lpwan_lora test_lpwan_dfu test_lpwan_dfu_fuzz test_lpwan_upd test_lpwan_rai test_lpwan_sim)
   add_executable(${t} ${t}.c)
   target_link_libraries(${t} PRIVATE sensei_lpwan)
   target_compile_options(${t} PRIVATE -Wall -Wextra -Wtype-limits -Werror)

@@ -19,6 +19,7 @@
  */
 
 #include <errno.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -327,11 +328,19 @@ static void worker_connect(void) {
 
 /* ---- send with RAI (the sequence is in lib/sensei_lpwan/src/lpwan_rai.c, host tested) ---- */
 
+#ifdef CONFIG_LPWAN_SHIELD_SIM
+int sim_modem_set_rai(int opt); /* sim/sim_modem.c: a host socket has no RAI option */
+#endif
+
 static int io_set_rai(void *ctx, enum lpwan_rai_opt opt) {
   int v = (int)opt;
 
   ARG_UNUSED(ctx);
+#ifdef CONFIG_LPWAN_SHIELD_SIM
+  return sim_modem_set_rai(v);
+#else
   return zsock_setsockopt(sock, SOL_SOCKET, SO_RAI, &v, sizeof(v)) == 0 ? 0 : -errno;
+#endif
 }
 
 static int io_send(void *ctx, const uint8_t *data, size_t len) {
@@ -443,6 +452,8 @@ static void worker_send(const struct msg *m) {
     (void)atomic_inc(out.answered ? &n_answers : &n_no_answer);
     if (unconfirmed) {
       LOG_WRN("sent, no answer of the server within %u s", (unsigned)(wait_ms / 1000));
+    } else {
+      LOG_INF("send answered");
     }
   }
   svc_emit_tx_done_ack(m->seq, lpwan_rai_send_ok(&out), attempts, out.answered, unconfirmed);

@@ -30,6 +30,10 @@ LOG_MODULE_REGISTER(main, CONFIG_LPWAN_SHIELD_LOG_LEVEL);
 
 int service_start(void);
 
+#ifdef CONFIG_LPWAN_SHIELD_SIM
+#include "sim_shield.h"
+#endif
+
 #ifdef CONFIG_LPWAN_SHIELD_LTE
 /*
  * The modem core crashed. The default handler only logs, and the LTE backend would then wait for ever
@@ -46,12 +50,16 @@ void nrf_modem_fault_handler(struct nrf_modem_fault_info *fault) {
 int main(void) {
   int err;
 
+#ifdef CONFIG_LPWAN_SHIELD_SIM
+  sim_shield_start(); /* no watchdog on native_sim */
+#else
   /* Task watchdog with the hardware watchdog behind it: the link thread feeds it (link.c). A frozen kernel or a
    * link thread that cannot re-arm the SPI slave resets the chip. */
   err = task_wdt_init(DEVICE_DT_GET(DT_ALIAS(watchdog0)));
   if (err) {
     LOG_ERR("watchdog init failed: %d", err);
   }
+#endif
   diag_init();
   /* The update state and the trial supervision are ready before the first request. */
   dfu_init();

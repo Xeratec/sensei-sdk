@@ -23,8 +23,8 @@ nRF5340 (master)                          nRF9151 (slave)
 | Folder | What |
 |---|---|
 | `include/sensei_lpwan/lpwan_link.h` | transfer scheme, flags, shared state machine API |
-| `src/` | protocol cores without OS: `link_slave.c` (nRF9151), `lpwan_master.c` (nRF5340), `lpwan_sm.c` (both), `lpwan_timers.c` (3GPP PSM and eDRX timer coding), `lpwan_lora.c` (LoRa payload limit, airtime, send time estimate, what a send gets before it is queued, the send tracking of both sides), `lpwan_dfu.c` (rules of the shield update: offsets, resume, SHA-256, checkpoints, MCUboot header and kind checks, repeats, an abort that undoes the marking, rate limit and link hold; flash and modem behind an ops table), `lpwan_upd.c` (what the client remembers about the update: when a swap may be running, the trial of a new image, the end of a session; pure), `lpwan_rai.c` (LTE uplink policy: the RAI flag of a chunk, the send sequence of RAI option, send and wait for the answer behind an ops table, the answer of the server, the connection evaluation classes and the decision when to ask; pure) |
-| `zephyr/` | nRF5340 client: `lpwan_client.c` (thread, shield power, shared SPI_A bus, radios, the update session), `lpwan_shell.c` |
+| `src/` | protocol cores without OS: `link_slave.c` (nRF9151), `lpwan_master.c` (nRF5340), `lpwan_sm.c` (both), `lpwan_timers.c` (3GPP PSM and eDRX timer coding), `lpwan_lora.c` (LoRa payload limit, airtime, send time estimate, what a send gets before it is queued, the send tracking of both sides), `lpwan_dfu.c` (rules of the shield update: offsets, resume, SHA-256, checkpoints, MCUboot header and kind checks, repeats, an abort that undoes the marking, rate limit and link hold; flash and modem behind an ops table), `lpwan_upd.c` (what the client remembers about the update: when a swap may be running, the trial of a new image, the end of a session; pure), `lpwan_sim.c` (stream framing of the simulated shield link), `lpwan_rai.c` (LTE uplink policy: the RAI flag of a chunk, the send sequence of RAI option, send and wait for the answer behind an ops table, the answer of the server, the connection evaluation classes and the decision when to ask; pure) |
+| `zephyr/` | nRF5340 client: `lpwan_client.c` (thread, shield power, shared SPI_A bus, radios, the update session), `lpwan_shell.c`, `sim/` (simulated shield link, native_sim) |
 | `tests/` | host tests: master against slave through a simulated SPI with faults, state machine, timer coding, LoRa limits and airtime, a model of the LR1121 (duty cycle, NbTrans, repeats) with the shield and the client around it, `test_lpwan_dfu` (a shield update on a RAM flash, with gaps, resume after a restart, bad images, repeats, abort, the modem path, and over the SPI link with damaged frames), `test_lpwan_dfu_fuzz` (random chunking, lost replies, restarts and power loss in the middle of a flash operation), `test_lpwan_upd` (swap wait, trial, session rules), `test_lpwan_rai` (RAI flag and sequence on a fake socket, ack or downlink as the answer, evaluation classes and decision) |
 
 ## Client API (nRF5340, `sensei_lpwan/lpwan.h`)
@@ -55,6 +55,7 @@ nRF5340 (master)                          nRF9151 (slave)
 - `sensei_lpwan_radio_send_ex(radio, chunk, len, last, done, user)`: like `radio_send` and says if the chunk is the last of its
   message. See "LTE: RAI, the answer of the server" below.
 - `sensei_lpwan_send_unconfirmed()`: inside `done()`, true if the chunk went out but the answer of the server did not come.
+- `sensei_lpwan_lte_no_answer()`: how many sends got no answer since boot (the node reports it as `Status.lte_no_answer`).
 - `sensei_lpwan_lte_link_check()` and `sensei_lpwan_lte_info()`: the connection evaluation (energy estimate, RSRP, coverage
   level) of the LTE modem. See "LTE: connection evaluation".
 - `sensei_lpwan_shield_diag()`: reset cause and fault record of the shield. See "Diagnostics of the shield".
@@ -161,7 +162,8 @@ while GAP9 holds the bus and on again after it. Untested on hardware.
   The master keeps an ACK until a frame that carries it has gone out, and does not confirm a message it could not decode.
 - **Shield restart:** the client resets the master's link state when it powers the shield (`lpwan_master_reset`). The
   nRF9151 forgets everything when it restarts: the client then sees `NOT_CONNECTED` for a request its own state allowed,
-  starts again from idle and connects again.
+  starts again from idle and connects again. A send that meets a restarted shield ends with `-EAGAIN` and the client connects
+  again (`on_up` follows): the app does not count a failure and the message is not held until the next uplink time.
 - **Lost link:** `SENSEI_LPWAN_LINK_FAILURES` requests (default 3) without an answer, or that many sends without a result,
   power-cycle the shield. A shield that does not answer at power-on is cut and tried again after 15 s. A request
   does not count while GAP9 owns the bus.
@@ -196,6 +198,15 @@ while GAP9 holds the bus and on again after it. Untested on hardware.
   (now 2; the update messages (tags 40 to 46, `LpwanVersion` 4 to 7) and the LTE additions (`Send.rai`, `lte_eval`, `ConnEval`, `TxDone.acked`, `TxDone.unconfirmed`, `ConnEval.rsrp_valid`, `LpwanStatus` 20 to 22 and `rssi_valid`, `diag_ack`) are additions and did not bump it: an old shield app reports
   `dfu_targets` 0, an old client never sends `dfu_confirm`, so a new shield image is not kept; the earlier changes: `SendInfo`, `TxDone.next_max_payload`, `SendInfo.next_max_payload`). `SendInfo.queued_seq`, `LpwanStatus.queued`,
   `late_tx_seq` and `late_tx_ok` are new fields: an older peer ignores them and treats BUSY as a failure.
+
+## Simulated shield link (native_sim)
+
+`CONFIG_SENSEI_LPWAN_SIM` (native_sim only) replaces SPI, the I2C expander and the pins of the client by a TCP connection to the
+simulated shield app (`NRF/apps/lpwan_shield/sim`): `zephyr.exe -lpwan_shield=<host>:<port>`. Powering the shield connects, cutting
+the power closes the connection and the shield process restarts. The frames are those of the board; the stream format is in
+`include/sensei_lpwan/lpwan_sim.h` (pure, host tested in `tests/test_lpwan_sim.c`). The client keeps the rest of its logic: bus
+arbitration, recovery, timeouts. Code: `zephyr/sim/lpwan_sim_master.c` (client side), `zephyr/sim/lpwan_sim_host.c` (host sockets,
+built into the native simulator runner). The few places in `lpwan_client.c` that touch the hardware have a second branch.
 
 ## Use it
 

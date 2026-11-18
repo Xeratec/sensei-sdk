@@ -29,7 +29,9 @@
 #include <zephyr/device.h>
 #include <zephyr/devicetree.h>
 #include <zephyr/drivers/gpio.h>
+#ifndef CONFIG_SENSEI_LPWAN_SIM
 #include <zephyr/drivers/pinctrl.h>
+#endif
 #include <zephyr/drivers/spi.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
@@ -44,12 +46,17 @@
 #include "sensei_lpwan/lpwan_lora.h"
 #include "sensei_lpwan/lpwan_master.h"
 #include "sensei_lpwan/lpwan_upd.h"
+#ifdef CONFIG_SENSEI_LPWAN_SIM
+#include "lpwan_sim_master.h"
+#endif
 
 LOG_MODULE_REGISTER(sensei_lpwan, CONFIG_SENSEI_LPWAN_LOG_LEVEL);
 
+#ifndef CONFIG_SENSEI_LPWAN_SIM
 #define LINK_NODE DT_ALIAS(lpwan_link)
 #define SPI_NODE DT_ALIAS(lpwan_spi)
 #define SPI_BUS DT_BUS(SPI_NODE)
+#endif
 
 #define LORA_MTU SENSEI_LPWAN_MTU_LORA
 #define LTE_MTU SENSEI_LPWAN_MTU_LTE
@@ -84,6 +91,9 @@ static void submit_work(struct k_work *w) {
 
 /* ---- hardware ---- */
 
+/* The simulated node (native_sim, CONFIG_SENSEI_LPWAN_SIM) has no SPI, expander or pins: the link to the shield is a
+ * socket (lpwan_sim_master.c). The places that touch the hardware have a second branch below. */
+#ifndef CONFIG_SENSEI_LPWAN_SIM
 static const struct gpio_dt_spec pin_event = GPIO_DT_SPEC_GET(LINK_NODE, event_gpios);
 static const struct gpio_dt_spec pin_busy = GPIO_DT_SPEC_GET(LINK_NODE, busy_gpios);
 static const struct gpio_dt_spec pin_ack = GPIO_DT_SPEC_GET(LINK_NODE, ack_gpios);
@@ -97,6 +107,7 @@ static const struct spi_dt_spec spi_nrf91 =
     SPI_DT_SPEC_GET(SPI_NODE, SPI_OP_MODE_MASTER | SPI_WORD_SET(8) | SPI_TRANSFER_MSB);
 static const struct device *const spi_dev = DEVICE_DT_GET(SPI_BUS);
 PINCTRL_DT_DEFINE(SPI_BUS); /* own copy of the pin states: the driver's is static */
+#endif                      /* !CONFIG_SENSEI_LPWAN_SIM */
 
 /* Longest wait for GAP9 to finish (boot, job, power-off) before an exchange or an LTE
  * transmission gives up. The claims are in sensei_busarb/bus_arb.h. */
@@ -128,10 +139,12 @@ static bool shield_on; /* 3.3 V of the shield on (thread owned) */
 static void level_update(void);
 
 static int bus_take(int32_t timeout_ms) {
+#ifndef CONFIG_SENSEI_LPWAN_SIM
   struct spi_config cfg = spi_nrf91.config;
   const struct gpio_dt_spec *cs = &cfg.cs.gpio;
+#endif
   int64_t end = k_uptime_get() + timeout_ms;
-  int err;
+  int err = 0;
 
   if (k_mutex_lock(&bus_lock, K_MSEC(timeout_ms)) != 0) {
     return -ETIMEDOUT;
@@ -140,10 +153,12 @@ static int bus_take(int32_t timeout_ms) {
     k_mutex_unlock(&bus_lock);
     return -EBUSY; /* GAP9 owns the bus */
   }
-  level_update();                   /* GAP9 does not hold the bus: the nRF9151 may listen */
+  level_update(); /* GAP9 does not hold the bus: the nRF9151 may listen */
+#ifndef CONFIG_SENSEI_LPWAN_SIM
   gpio_pin_set_dt(&pin_gap_sel, 0); /* GAP9 isolated from SPI_A */
   pinctrl_apply_state(PINCTRL_DT_DEV_CONFIG_GET(SPI_BUS), PINCTRL_STATE_DEFAULT);
   err = gpio_pin_configure_dt(cs, GPIO_OUTPUT_INACTIVE);
+#endif
   if (err) {
     bus_release(BUS_SPI);
     k_mutex_unlock(&bus_lock);
@@ -154,13 +169,13 @@ static int bus_take(int32_t timeout_ms) {
 }
 
 static void bus_give(void) {
-  const struct gpio_dt_spec *cs = &spi_nrf91.config.cs.gpio;
-
   if (!atomic_get(&bus_taken)) {
     return;
   }
-  (void)gpio_pin_configure_dt(cs, GPIO_DISCONNECTED);
+#ifndef CONFIG_SENSEI_LPWAN_SIM
+  (void)gpio_pin_configure_dt(&spi_nrf91.config.cs.gpio, GPIO_DISCONNECTED);
   pinctrl_apply_state(PINCTRL_DT_DEV_CONFIG_GET(SPI_BUS), PINCTRL_STATE_SLEEP);
+#endif
   atomic_set(&bus_taken, 0);
   bus_release(BUS_SPI);
   k_mutex_unlock(&bus_lock);
@@ -173,7 +188,9 @@ static void level_update(void) {
   bool want = shield_on && !bus_is_held(BUS_GAP9);
 
   if (want != level_on) {
+#ifndef CONFIG_SENSEI_LPWAN_SIM
     (void)gpio_pin_configure_dt(&pin_level, want ? GPIO_OUTPUT_ACTIVE : GPIO_OUTPUT_INACTIVE);
+#endif
     level_on = want;
     LOG_DBG("level shifter %s", want ? "on" : "off (GAP9 owns the bus)");
   }
@@ -211,7 +228,9 @@ struct cmd {
 
 K_MSGQ_DEFINE(cmd_q, sizeof(struct cmd), 8, 4);
 static K_SEM_DEFINE(version_sem, 0, 1);
+#ifndef CONFIG_SENSEI_LPWAN_SIM
 static struct gpio_callback event_cb;
+#endif
 
 static struct lpwan_master master;
 static lpwan_sm_t sm;
@@ -424,6 +443,10 @@ static void finish_send(int err) {
 /* ---- shield power and link ---- */
 
 static int expander_outputs(bool on) {
+#ifdef CONFIG_SENSEI_LPWAN_SIM
+  level_on = false;
+  return lpwan_sim_master_power(on); /* the supply of the shield is the connection */
+#else
   int err = 0;
 
   err |= gpio_pin_configure_dt(
@@ -436,6 +459,7 @@ static int expander_outputs(bool on) {
   err |= gpio_pin_configure_dt(&pin_spare, GPIO_OUTPUT_INACTIVE);
   err |= gpio_pin_configure_dt(&pin_busy, GPIO_INPUT);
   return err ? -EIO : 0;
+#endif
 }
 
 static int post(enum cmd_type type, sensei_Radio radio, bool on);
@@ -443,10 +467,12 @@ static int post(enum cmd_type type, sensei_Radio radio, bool on);
 /* ---- master ops ---- */
 
 static int op_xfer(void *c, const uint8_t *tx, uint8_t *rx, size_t len) {
+#ifndef CONFIG_SENSEI_LPWAN_SIM
   const struct spi_buf txb = {.buf = (void *)tx, .len = len};
   const struct spi_buf rxb = {.buf = rx, .len = len};
   const struct spi_buf_set txs = {.buffers = &txb, .count = 1};
   const struct spi_buf_set rxs = {.buffers = &rxb, .count = 1};
+#endif
   int err;
 
   ARG_UNUSED(c);
@@ -454,7 +480,11 @@ static int op_xfer(void *c, const uint8_t *tx, uint8_t *rx, size_t len) {
   if (err) {
     return err;
   }
+#ifdef CONFIG_SENSEI_LPWAN_SIM
+  err = lpwan_sim_master_xfer(tx, rx, len);
+#else
   err = spi_transceive_dt(&spi_nrf91, &txs, &rxs);
+#endif
   bus_give();
   return err;
 }
@@ -467,7 +497,11 @@ static int op_wait_ready(void *c, uint32_t timeout_ms) {
   do {
     /* BUSY is on the expander: one I2C read per poll. A slave that does not answer within 50 ms is
      * slow or gone: poll every 10 ms then, not every ms. */
+#ifdef CONFIG_SENSEI_LPWAN_SIM
+    if (!lpwan_sim_master_busy()) {
+#else
     if (gpio_pin_get_dt(&pin_busy) == 0) {
+#endif
       return 0;
     }
     k_msleep(k_uptime_get() - start < 50 ? 1 : 10);
@@ -477,7 +511,11 @@ static int op_wait_ready(void *c, uint32_t timeout_ms) {
 
 static bool op_event_pending(void *c) {
   ARG_UNUSED(c);
+#ifdef CONFIG_SENSEI_LPWAN_SIM
+  return lpwan_sim_master_event();
+#else
   return gpio_pin_get_dt(&pin_event) > 0;
+#endif
 }
 
 static uint32_t op_now(void *c) {
@@ -901,7 +939,9 @@ static int shield_up_for(uint32_t boot_timeout_ms) {
     k_msleep(5);
     shield_on = true;
     level_update();
+#ifndef CONFIG_SENSEI_LPWAN_SIM
     gpio_pin_set_dt(&pin_ack, 1);
+#endif
     LOG_INF("shield on");
   }
   /* A new session: the slave has no memory of the old one. */
@@ -956,11 +996,15 @@ static void shield_down(void) {
     return;
   }
   finish_send(-ENOTCONN); /* a send in flight is gone with the power */
+#ifdef CONFIG_SENSEI_LPWAN_SIM
+  (void)lpwan_sim_master_power(false); /* 3.3 V off */
+#else
   (void)gpio_pin_configure_dt(&pin_level, GPIO_OUTPUT_INACTIVE);
-  level_on = false;
   (void)gpio_pin_configure_dt(&pin_ack, GPIO_OUTPUT_INACTIVE);
   (void)gpio_pin_configure_dt(&pin_power, GPIO_OUTPUT_INACTIVE); /* 3.3 V off */
-  lpwan_upd_power_cut(&upd);                                     /* an image on trial goes back: a swap at power-up */
+#endif
+  level_on = false;
+  lpwan_upd_power_cut(&upd); /* an image on trial goes back: a swap at power-up */
   shield_on = false;
   shield_off_at = k_uptime_get();
   link_up = false;
@@ -1203,6 +1247,12 @@ static void do_send(void) {
                       : -EIO);
     } else if (res == sensei_LpwanResult_LPWAN_BUSY && send_radio == sensei_Radio_RADIO_LORA) {
       busy_answer(&rs);
+    } else if (res == sensei_LpwanResult_LPWAN_NOT_CONNECTED || res == sensei_LpwanResult_LPWAN_NOT_JOINED) {
+      /* The shield restarted (or lost the connection) and request() started the state machine again: connect again and
+       * let the app wait for on_up. A failed chunk would only be retried into the same refusal until the retries are
+       * used up, and the message would wait for the next uplink time. */
+      finish_send(-EAGAIN);
+      (void)post(CMD_CONNECT, send_radio, false);
     } else {
       finish_send(-EIO);
     }
@@ -1703,12 +1753,16 @@ static void thread_fn(void *a, void *b, void *c) {
   }
 }
 
+#ifdef CONFIG_SENSEI_LPWAN_SIM
+static void event_isr_sim(void) { k_sem_give(&event_sem); }
+#else
 static void event_isr(const struct device *port, struct gpio_callback *cb, uint32_t pins) {
   ARG_UNUSED(port);
   ARG_UNUSED(cb);
   ARG_UNUSED(pins);
   k_sem_give(&event_sem);
 }
+#endif
 
 static int post(enum cmd_type type, sensei_Radio radio, bool on) {
   struct cmd c = {.type = type, .radio = radio, .on = on};
@@ -1797,6 +1851,8 @@ int sensei_lpwan_radio_send_ex(sensei_Radio r, const uint8_t *chunk, size_t len,
 
 bool sensei_lpwan_send_unconfirmed(void) { return send_unconfirmed; }
 
+uint32_t sensei_lpwan_lte_no_answer(void) { return lte_noack; }
+
 enum sensei_lpwan_link sensei_lpwan_lte_link_check(void) {
 #ifdef CONFIG_SENSEI_LPWAN_LTE_EVAL
   enum lpwan_eval_action act;
@@ -1871,6 +1927,15 @@ int sensei_lpwan_init(const struct sensei_lpwan_hooks *h, const struct sensei_lp
   lpwan_master_init(&master, &mops, NULL);
   master.ready_timeout_ms = 1000;
 
+#ifdef CONFIG_SENSEI_LPWAN_SIM
+  err = lpwan_sim_master_init(event_isr_sim);
+  if (err) {
+    LOG_ERR("simulated shield link failed: %d", err);
+    return err;
+  }
+  shield_off_at = k_uptime_get();
+  bus_set_listener(gap9_listener, NULL);
+#else
   if (!device_is_ready(spi_dev) || !gpio_is_ready_dt(&pin_event) || !gpio_is_ready_dt(&pin_busy) ||
       !gpio_is_ready_dt(&pin_power) || !gpio_is_ready_dt(&pin_gap_sel)) {
     LOG_ERR("LPWAN shield devices not ready (is LPWAN_Shield_v1 in the build?)");
@@ -1894,6 +1959,7 @@ int sensei_lpwan_init(const struct sensei_lpwan_hooks *h, const struct sensei_lp
   if (err) {
     return -EIO;
   }
+#endif
 
   k_thread_create(&thread, stack, K_THREAD_STACK_SIZEOF(stack), thread_fn, NULL, NULL, NULL,
                   K_PRIO_PREEMPT(CONFIG_SENSEI_LPWAN_THREAD_PRIORITY), 0, K_NO_WAIT);

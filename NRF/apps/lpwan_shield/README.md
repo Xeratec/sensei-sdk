@@ -50,6 +50,16 @@ The SENSEI IEQ node builds it with `make nrf9151` and `make nrf9151-release` (`f
 The non-secure slot is 196.6 kB (188 kB usable) with MCUboot; 212 kB without. Kconfig: `LPWAN_SHIELD_LTE`, `LPWAN_SHIELD_LORA` (both default y).
 Turn one off to save flash.
 
+## Simulated shield (native_sim)
+
+The same app builds for `native_sim/native/64` without hardware: the SPI link is a socket, the LTE modem and the LR1121 are
+fakes, the LTE socket is a host socket. A simulated node (SENSEI IEQ `firmware/sim`) talks to it, and the radio path runs
+against a collector. Build, options, control commands and limits: [sim/README.md](sim/README.md).
+
+```sh
+west build -b native_sim/native/64 --no-sysbuild -- -DEXTRA_ZEPHYR_MODULES=$SENSEI_SDK_ROOT/NRF
+```
+
 ## Flash
 
 ```sh

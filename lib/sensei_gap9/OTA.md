@@ -36,8 +36,8 @@ Untested on hardware. Tested on the host (`make test-host`, `make test-python`) 
 - **nRF5340 app:** `CONFIG_SENSEI_GAP9_OTA=y` and a `struct sensei_gap9_ota_cfg`: the public key of the signature
   (P-256 point and its SHA-256), a `job` callback that sends a `struct g9ota_req` as a job of the app's format and
   returns the `Gap9OtaInfo` of the answer (errors: `-ENOTSUP` for a GAP9 that cannot be updated, `-EPROTO`, `-EIO` ...),
-  an optional `trial_check` (the app's own checks of a new image: self-test, a detect job), and the work queue. The app
-  forwards its host requests to `sensei_gap9_ota_begin/_chunk/_command()` and sends the `Gap9OtaReply` that the flow
+  an optional `trial_check` (the app's own checks of a new image: self-test, a detect job), and the work queue (needed). The app
+  forwards its host requests to `g9ota_flow_begin/_chunk/_command(sensei_gap9_ota_flow(), ...)` and sends the `Gap9OtaReply` that the flow
   gives to its reply callback (the app copies it into its host message).
 - **Host:** an image made by `pack_slot.py --kind <board>`, and the host messages in its own protocol.
 

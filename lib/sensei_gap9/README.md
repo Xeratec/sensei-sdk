@@ -48,7 +48,7 @@ The firmware update of GAP9 over the air (A/B slots, signed images, trial boot) 
   reports its HELLO. Details in [PROTOCOL.md](PROTOCOL.md).
 - `CONFIG_SENSEI_GAP9_OTA=y` adds the update flow (selects `SETTINGS`, `SENSEI_CRYPTO_ECDSA`): the app fills a
   `struct sensei_gap9_ota_cfg` (public key, job callback, trial check, work queue), calls `sensei_gap9_ota_init()` after
-  `gap9_link_init()` and forwards the host requests to `sensei_gap9_ota_begin/_chunk/_command()`. See OTA.md.
+  `gap9_link_init()` and forwards the host requests to `g9ota_flow_begin/_chunk/_command()` with `sensei_gap9_ota_flow()`. See OTA.md.
 - `gap9_link_submit()` returns `-ENOMEM` when all staging slots are taken; every other error comes through the callback
   (`final` is set on the last call of a job). `gap9_link_reset()` is for the user button.
 - SPI_A is shared with the LPWAN shield (`sensei_busarb`): GAP9 starts only when the shield holds neither the bus nor an LTE transmission.

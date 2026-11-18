@@ -29,7 +29,8 @@ test-host:
 	done
 
 # Python tests of the GAP9 image builder (GAP9/ssbl/tools). Needs pytest; the tests that sign an image or run the writer
-# also need cryptography, imgtool ($IMGTOOL) and a C compiler, and skip without them.
+# also need cryptography, imgtool ($IMGTOOL) and a C compiler, and skip without them (with $CI set they fail instead;
+# .github/workflows/python-tests.yml runs this target).
 test-python:
 	python3 -m pytest GAP9/ssbl/tools -q
 

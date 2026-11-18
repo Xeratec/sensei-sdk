@@ -14,7 +14,7 @@ config SENSEI_LPWAN_PROTO
 
 config SENSEI_LPWAN_SIM_HOST
 	bool
-	depends on BOARD_NATIVE_SIM
+	depends on BOARD_NATIVE_SIM || BOARD_NRF5340BSIM_NRF5340_CPUAPP
 	help
 	  Host sockets and files for the simulated shield link (lpwan_sim_host.c in the native simulator runner). Selected by
 	  SENSEI_LPWAN_SIM and by the simulated shield app.
@@ -114,13 +114,14 @@ config SENSEI_LPWAN_LINK_FAILURES
 	  session survives in the LR1121, LTE registers again.
 
 config SENSEI_LPWAN_SIM
-	bool "Simulated shield: a socket instead of SPI, the expander and the pins (native_sim)"
-	depends on BOARD_NATIVE_SIM
+	bool "Simulated shield: a socket instead of SPI, the expander and the pins (native_sim, BabbleSim)"
+	depends on BOARD_NATIVE_SIM || BOARD_NRF5340BSIM_NRF5340_CPUAPP
 	select SENSEI_LPWAN_SIM_HOST
 	help
 	  The link to the nRF9151 is a TCP connection to the simulated shield app (NRF/apps/lpwan_shield built for
 	  native_sim): `zephyr.exe -lpwan_shield=<host>:<port>`. Connecting is the power of the shield, closing the
-	  connection cuts it. For tests without hardware. See lib/sensei_lpwan/README.md.
+	  connection cuts it. Without a target the simulated node has no shield, as a base board without the LPWAN
+	  shield. For tests without hardware. See lib/sensei_lpwan/README.md.
 
 config SENSEI_LPWAN_SIM_TARGET
 	string "Where the simulated shield listens, host:port (the command line option -lpwan_shield wins)"
@@ -140,6 +141,20 @@ config SENSEI_LPWAN_BB_MODE_PFM
 	help
 	  Power-save mode saves current at light load but adds ripple at the LTE and LoRa transmit
 	  bursts. Untested on hardware.
+
+config SENSEI_LPWAN_FEM
+	bool "nRF21540 range extender on the shield is in use (BLE)"
+	help
+	  Off (the default): the client drives the extender's power-down line (expander P5) and MODE (P6) low at every
+	  bring-up and power-off and leaves them so: a powered-down extender draws no current. On: nPD is high while the
+	  shield is on. Only the pin side. The radio side (MPSL front-end support on the network core, see
+	  NRF/overlays/lpwan_fem_cpunet.overlay) is not implemented. Untested on hardware.
+
+config SENSEI_LPWAN_FEM_MODE_HIGH
+	bool "nRF21540 MODE line (expander P6) high while the extender is in use"
+	depends on SENSEI_LPWAN_FEM
+	help
+	  Which transmit gain setting that selects is in the nRF21540 data sheet. Untested on hardware.
 
 config SENSEI_LPWAN_SHELL
 	bool "Shell commands: sensei lpwan status|power|join|connect|disconnect|provision"

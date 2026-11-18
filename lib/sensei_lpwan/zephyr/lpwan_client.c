@@ -45,6 +45,7 @@
 #include "sensei_lpwan/lpwan_dfu.h"
 #include "sensei_lpwan/lpwan_lora.h"
 #include "sensei_lpwan/lpwan_master.h"
+#include "sensei_lpwan/lpwan_shield.h"
 #include "sensei_lpwan/lpwan_upd.h"
 #ifdef CONFIG_SENSEI_LPWAN_SIM
 #include "lpwan_sim_master.h"
@@ -108,6 +109,12 @@ static const struct gpio_dt_spec pin_power = GPIO_DT_SPEC_GET(LINK_NODE, power_g
 static const struct gpio_dt_spec pin_level = GPIO_DT_SPEC_GET(LINK_NODE, level_shifter_gpios);
 static const struct gpio_dt_spec pin_bbmode = GPIO_DT_SPEC_GET(LINK_NODE, bb_mode_gpios);
 static const struct gpio_dt_spec pin_gap_sel = GPIO_DT_SPEC_GET(LINK_NODE, spi_gap_sel_gpios);
+/* nRF21540 range extender: power-down (expander P5) and MODE (P6), see fem_drive(). */
+#if DT_NODE_HAS_PROP(LINK_NODE, fem_pd_gpios) && DT_NODE_HAS_PROP(LINK_NODE, fem_mode_gpios)
+#define HAVE_FEM_PINS 1
+static const struct gpio_dt_spec pin_fem_pd = GPIO_DT_SPEC_GET(LINK_NODE, fem_pd_gpios);
+static const struct gpio_dt_spec pin_fem_mode = GPIO_DT_SPEC_GET(LINK_NODE, fem_mode_gpios);
+#endif
 
 static const struct spi_dt_spec spi_nrf91 =
     SPI_DT_SPEC_GET(SPI_NODE, SPI_OP_MODE_MASTER | SPI_WORD_SET(8) | SPI_TRANSFER_MSB);
@@ -135,12 +142,50 @@ PINCTRL_DT_DEFINE(SPI_BUS); /* own copy of the pin states: the driver's is stati
  */
 
 static K_SEM_DEFINE(event_sem, 0, 1);
+/* Uptime of the first EVENT edge that the thread has not caught up with yet (0: none), set in the EVENT interrupt. It
+ * ends when the thread has read the events and the line is low again. An edge older than EDGE_MAX_AGE_MS is not
+ * believed. */
+#define EDGE_MAX_AGE_MS 30000
+static struct k_spinlock edge_lock;
+static int64_t event_edge;
+
+static void edge_note(void) {
+  k_spinlock_key_t k = k_spin_lock(&edge_lock);
+
+  if (event_edge == 0) {
+    event_edge = MAX(k_uptime_get(), 1);
+  }
+  k_spin_unlock(&edge_lock, k);
+}
+
+static int64_t edge_get(void) {
+  k_spinlock_key_t k = k_spin_lock(&edge_lock);
+  int64_t e = event_edge;
+
+  k_spin_unlock(&edge_lock, k);
+  return e;
+}
+
+static void edge_clear(void) {
+  k_spinlock_key_t k = k_spin_lock(&edge_lock);
+
+  event_edge = 0;
+  k_spin_unlock(&edge_lock, k);
+}
+
 static struct k_mutex bus_lock;
 static atomic_t bus_taken;
 static bool level_on;             /* level shifter enabled (thread owned) */
 static atomic_t gap9_bus_changed; /* BUS_GAP9 was claimed or released: the thread updates the shifter */
 
 static bool shield_on; /* 3.3 V of the shield on (thread owned) */
+
+/* Is a shield fitted: decided once in sensei_lpwan_init(), never again until the next boot. client_up: init succeeded,
+ * the thread runs. Without it every call of the API fails at once and nothing touches the pins or the bus. */
+static atomic_t shield_state = LPWAN_SHIELD_UNKNOWN;
+static bool client_up;
+
+static enum lpwan_shield_state shield_state_get(void) { return (enum lpwan_shield_state)atomic_get(&shield_state); }
 
 static void level_update(void);
 
@@ -338,7 +383,10 @@ static atomic_t gnss_pending;
 static atomic_t gnss_cancel_flag; /* cancel asked before the request went out */
 static bool gnss_open;            /* thread owned */
 static bool release_deferred;     /* a disconnect came during the fix: it runs when the fix has ended (thread owned) */
-static int64_t gnss_rx_ms;    /* uptime when the thread read the result event (thread owned, read by gnss_done_fn) */
+static unsigned release_tries;    /* BUSY answers to the release since the last good one (thread owned) */
+static struct k_work_delayable release_work; /* posts the release again after a BUSY answer */
+static int64_t gnss_rx_ms;    /* uptime of the result event: its EVENT edge, else when the thread read it (thread owned,
+                                  read by gnss_done_fn) */
 static int64_t gnss_deadline; /* result not later than this (thread owned), 0: the request has not gone out */
 static uint32_t gnss_seq;     /* seq of the gnss_fix request, the result event carries it */
 static uint32_t gnss_timeout; /* s, as requested */
@@ -469,6 +517,20 @@ static void finish_send(int err) {
 
 /* ---- shield power and link ---- */
 
+/* The nRF21540 lines. The extender is not used by default (CONFIG_SENSEI_LPWAN_FEM off): nPD (P5) and MODE (P6) are
+ * driven low, at every bring-up and at power-off, and stay so. Never left as inputs: they would float. */
+#ifdef HAVE_FEM_PINS
+static int fem_drive(bool shield_is_on) {
+  const struct lpwan_fem_levels l = lpwan_fem_levels(IS_ENABLED(CONFIG_SENSEI_LPWAN_FEM), shield_is_on,
+                                                     IS_ENABLED(CONFIG_SENSEI_LPWAN_FEM_MODE_HIGH));
+  int err = 0;
+
+  err |= gpio_pin_configure_dt(&pin_fem_mode, l.mode_high ? GPIO_OUTPUT_ACTIVE : GPIO_OUTPUT_INACTIVE); /* first */
+  err |= gpio_pin_configure_dt(&pin_fem_pd, l.npd_high ? GPIO_OUTPUT_ACTIVE : GPIO_OUTPUT_INACTIVE);
+  return err;
+}
+#endif
+
 static int expander_outputs(bool on) {
 #ifdef CONFIG_SENSEI_LPWAN_SIM
   level_on = false;
@@ -476,6 +538,9 @@ static int expander_outputs(bool on) {
 #else
   int err = 0;
 
+#ifdef HAVE_FEM_PINS
+  err |= fem_drive(on);
+#endif
   err |= gpio_pin_configure_dt(
       &pin_bbmode, on ? (IS_ENABLED(CONFIG_SENSEI_LPWAN_BB_MODE_PFM) ? GPIO_OUTPUT_INACTIVE : GPIO_OUTPUT_ACTIVE)
                       : GPIO_OUTPUT_INACTIVE);
@@ -606,6 +671,7 @@ static void gnss_finish(int err, sensei_GnssFixStatus status, const sensei_GnssF
   gnss_deadline = 0;
   if (release_deferred) {
     release_deferred = false;
+    release_tries = 0;
     if (err != -ENOTCONN) {                                      /* with the power gone there is nothing to release */
       (void)post(CMD_DISCONNECT, sensei_Radio_RADIO_BLE, false); /* queued before on_up: it runs first */
     }
@@ -646,16 +712,22 @@ static void gnss_done_fn(struct k_work *w) {
 }
 
 static void gnss_event(const sensei_GnssFixResult *r) {
+  int64_t now = k_uptime_get();
+  int64_t edge;
+
   if (!gnss_open || r->seq != gnss_seq) {
     LOG_WRN("GNSS result of seq %u ignored (%s)", (unsigned)r->seq, gnss_open ? "another fix" : "none waits");
     return;
   }
   LOG_INF("GNSS: %s, %u satellites, %u ms", lpwan_gnss_status_name(r->status), (unsigned)r->sats, (unsigned)r->ttff_ms);
-  gnss_rx_ms = k_uptime_get();
+  /* The result is as old as its EVENT edge, not as the moment this thread got to read it: a request that holds the
+   * bus (a slow answer, GAP9) delays the read, and the clock would be set back by that time. */
+  edge = edge_get();
+  gnss_rx_ms = edge != 0 && now - edge <= EDGE_MAX_AGE_MS ? edge : now;
   gnss_finish(0, r->status, r);
 }
 
-static void op_on_event(void *c, const sensei_LpwanEvent *evt) {
+static void event_apply(void *c, const sensei_LpwanEvent *evt) {
   /* False: the event does not fit (the radio is not the active one, a tx_done of another send). */
   bool applied = lpwan_sm_event(&sm, evt);
 
@@ -759,6 +831,15 @@ static void op_on_event(void *c, const sensei_LpwanEvent *evt) {
     break;
   default:
     break;
+  }
+}
+
+/* An event frame was read. When the EVENT line is low again the thread has caught up: the edge of the next event is a
+ * new one. */
+static void op_on_event(void *c, const sensei_LpwanEvent *evt) {
+  event_apply(c, evt);
+  if (!op_event_pending(NULL)) {
+    edge_clear();
   }
 }
 
@@ -1106,6 +1187,9 @@ static void shield_down(void) {
   (void)gpio_pin_configure_dt(&pin_level, GPIO_OUTPUT_INACTIVE);
   (void)gpio_pin_configure_dt(&pin_ack, GPIO_OUTPUT_INACTIVE);
   (void)gpio_pin_configure_dt(&pin_power, GPIO_OUTPUT_INACTIVE); /* 3.3 V off */
+#ifdef HAVE_FEM_PINS
+  (void)fem_drive(false);
+#endif
 #endif
   level_on = false;
   lpwan_upd_power_cut(&upd); /* an image on trial goes back: a swap at power-up */
@@ -1470,6 +1554,19 @@ static void do_gnss_cancel(void) {
   }
 }
 
+/* The release came while the shield still ran the fix: after a timeout of the client, gnss_finish() let it go, but the
+ * shield may take a moment more to end the fix and answers BUSY. Try again a few seconds later, a few times. */
+#define RELEASE_RETRY_MS 3000
+#define RELEASE_TRIES_MAX 5
+
+static void release_fn(struct k_work *w) {
+  ARG_UNUSED(w);
+  if (release_deferred) { /* a connect that came since has cleared it */
+    release_deferred = false;
+    (void)post(CMD_DISCONNECT, sensei_Radio_RADIO_BLE, false);
+  }
+}
+
 static void do_disconnect(void) {
   if (!link_up) {
     return;
@@ -1479,7 +1576,13 @@ static void do_disconnect(void) {
     return;
   }
   if (simple_request(sensei_LpwanRequest_lte_disconnect_tag) == 0) {
+    release_tries = 0;
     (void)lpwan_master_fetch_events(&master, 8);
+  } else if (last_result == sensei_LpwanResult_LPWAN_BUSY && sm.tech == LPWAN_TECH_LTE &&
+             release_tries++ < RELEASE_TRIES_MAX) {
+    LOG_INF("release refused (BUSY), again in %u s", (unsigned)(RELEASE_RETRY_MS / 1000));
+    release_deferred = true;
+    (void)k_work_reschedule(&release_work, K_MSEC(RELEASE_RETRY_MS));
   }
 }
 
@@ -1955,17 +2058,24 @@ static void thread_fn(void *a, void *b, void *c) {
     if (shield_on && link_up && op_event_pending(NULL)) {
       (void)lpwan_master_fetch_events(&master, 16);
     }
+    if (!(shield_on && link_up) || !op_event_pending(NULL)) {
+      edge_clear(); /* nothing waits: an edge that is left is of an event that was read */
+    }
     check_timers();
   }
 }
 
 #ifdef CONFIG_SENSEI_LPWAN_SIM
-static void event_isr_sim(void) { k_sem_give(&event_sem); }
+static void event_isr_sim(void) {
+  edge_note();
+  k_sem_give(&event_sem);
+}
 #else
 static void event_isr(const struct device *port, struct gpio_callback *cb, uint32_t pins) {
   ARG_UNUSED(port);
   ARG_UNUSED(cb);
   ARG_UNUSED(pins);
+  edge_note();
   k_sem_give(&event_sem);
 }
 #endif
@@ -1973,6 +2083,9 @@ static void event_isr(const struct device *port, struct gpio_callback *cb, uint3
 static int post(enum cmd_type type, sensei_Radio radio, bool on) {
   struct cmd c = {.type = type, .radio = radio, .on = on};
 
+  if (!client_up) {
+    return -ENODEV; /* no shield: nobody reads the queue */
+  }
   return k_msgq_put(&cmd_q, &c, K_NO_WAIT) == 0 ? 0 : -EBUSY;
 }
 
@@ -1987,6 +2100,9 @@ uint32_t sensei_lpwan_lora_retry_after_ms(void) {
 bool sensei_lpwan_radio_ready(sensei_Radio r) {
   lpwan_tech_t want = lpwan_tech_of_radio(r);
 
+  if (!client_up) {
+    return false;
+  }
   if (atomic_get(&dfu_active)) {
     return false; /* an update of the shield holds the link: on_up comes when it ends */
   }
@@ -2020,6 +2136,9 @@ int sensei_lpwan_radio_send_ex(sensei_Radio r, const uint8_t *chunk, size_t len,
                                void *user) {
   if (len == 0 || len > sizeof(send_buf)) {
     return -EINVAL;
+  }
+  if (!client_up) {
+    return -ENODEV;
   }
   if (atomic_get(&dfu_active)) {
     return -EAGAIN; /* the app waits for on_up (RADIO_BLE) at the end of the session: no failure */
@@ -2065,6 +2184,10 @@ uint32_t sensei_lpwan_lte_no_answer(void) { return lte_noack; }
 enum sensei_lpwan_link sensei_lpwan_lte_link_check(void) {
 #ifdef CONFIG_SENSEI_LPWAN_LTE_EVAL
   enum lpwan_eval_action act;
+
+  if (!client_up) {
+    return SENSEI_LPWAN_LINK_OK;
+  }
   k_spinlock_key_t k = k_spin_lock(&eval_lock);
   uint32_t now = (uint32_t)k_uptime_get();
 
@@ -2131,6 +2254,7 @@ int sensei_lpwan_init(const struct sensei_lpwan_hooks *h, const struct sensei_lp
   k_work_init(&dfu_job.work, dfu_done_fn);
   k_work_init(&gnss_work, gnss_done_fn);
   k_work_init_delayable(&retry_work, retry_fn);
+  k_work_init_delayable(&release_work, release_fn);
   k_work_init(&time_item.work, time_work);
   lpwan_sm_init(&sm);
   lpwan_upd_init(&upd); /* the node may have cut the power in the middle of a swap */
@@ -2138,28 +2262,39 @@ int sensei_lpwan_init(const struct sensei_lpwan_hooks *h, const struct sensei_lp
   master.ready_timeout_ms = 1000;
 
 #ifdef CONFIG_SENSEI_LPWAN_SIM
+  if (!lpwan_sim_master_configured()) {
+    /* The simulator was not told where the shield is: the node has none. */
+    atomic_set(&shield_state, LPWAN_SHIELD_ABSENT);
+    LOG_WRN("no LPWAN shield (the simulator has no -lpwan_shield): the node uses BLE");
+    return -ENODEV;
+  }
   err = lpwan_sim_master_init(event_isr_sim);
   if (err) {
     LOG_ERR("simulated shield link failed: %d", err);
     return err;
   }
+  atomic_set(&shield_state, LPWAN_SHIELD_PRESENT);
   shield_off_at = k_uptime_get();
   bus_set_listener(gap9_listener, NULL);
 #else
+  /* Is a shield stacked? The expander (I2C 0x20) is on the shield only. Its driver does not come up when the expander
+   * does not answer, so its pins are not ready. That is the check, made once: no power-on, no retries. */
   if (!device_is_ready(spi_dev) || !gpio_is_ready_dt(&pin_event) || !gpio_is_ready_dt(&pin_busy) ||
       !gpio_is_ready_dt(&pin_power) || !gpio_is_ready_dt(&pin_gap_sel)) {
-    LOG_ERR("LPWAN shield devices not ready (is LPWAN_Shield_v1 in the build?)");
+    atomic_set(&shield_state, lpwan_shield_probe(false, false));
+    LOG_WRN("no LPWAN shield (the expander does not answer): the node uses BLE until the next boot");
     return -ENODEV;
   }
   /* Shield off, SPI pins parked, GAP9 free to use the bus. */
   err |= gpio_pin_configure_dt(&pin_gap_sel, GPIO_OUTPUT_INACTIVE);
   err |= gpio_pin_configure_dt(&pin_event, GPIO_INPUT | GPIO_PULL_DOWN);
   err |= expander_outputs(false);
+  atomic_set(&shield_state, lpwan_shield_probe(true, err == 0));
   shield_off_at = k_uptime_get(); /* the shield may have been on before a reset of the nRF5340 */
   pinctrl_apply_state(PINCTRL_DT_DEV_CONFIG_GET(SPI_BUS), PINCTRL_STATE_SLEEP);
   (void)gpio_pin_configure_dt(&spi_nrf91.config.cs.gpio, GPIO_DISCONNECTED);
   if (err) {
-    LOG_ERR("shield pins failed (expander at 0x20 not answering?)");
+    LOG_WRN("no LPWAN shield (the expander pins do not answer): the node uses BLE until the next boot");
     return -EIO;
   }
   bus_set_listener(gap9_listener, NULL);
@@ -2171,6 +2306,7 @@ int sensei_lpwan_init(const struct sensei_lpwan_hooks *h, const struct sensei_lp
   }
 #endif
 
+  client_up = true;
   k_thread_create(&thread, stack, K_THREAD_STACK_SIZEOF(stack), thread_fn, NULL, NULL, NULL,
                   K_PRIO_PREEMPT(CONFIG_SENSEI_LPWAN_THREAD_PRIORITY), 0, K_NO_WAIT);
   k_thread_name_set(&thread, "lpwan");
@@ -2185,6 +2321,9 @@ int sensei_lpwan_gnss_fix(uint32_t timeout_s, sensei_lpwan_gnss_done_fn done, vo
 
   if (!lpwan_gnss_timeout(timeout_s, &t)) {
     return -EINVAL;
+  }
+  if (!client_up) {
+    return -ENODEV;
   }
   if (!atomic_cas(&gnss_pending, 0, 1)) {
     return -EBUSY;
@@ -2212,7 +2351,12 @@ bool sensei_lpwan_gnss_busy(void) { return atomic_get(&gnss_pending) != 0; }
 
 uint32_t sensei_lpwan_version_reads(void) { return (uint32_t)atomic_get(&ver_reads); }
 
+enum lpwan_shield_state sensei_lpwan_shield_state(void) { return shield_state_get(); }
+
 int sensei_lpwan_gnss_supported(void) {
+  if (shield_state_get() == LPWAN_SHIELD_ABSENT) {
+    return 0; /* no shield, no GNSS of the shield */
+  }
   k_spinlock_key_t k = k_spin_lock(&ver_lock);
   int r = shield_ver_valid ? (shield_ver.gnss ? 1 : 0) : -ENODATA;
 
@@ -2225,6 +2369,9 @@ int sensei_lpwan_gnss_supported(void) {
 int sensei_lpwan_dfu_submit(const sensei_LpwanRequest *req, sensei_lpwan_dfu_done_fn done, void *user) {
   if (req->which_body < sensei_LpwanRequest_dfu_begin_tag || req->which_body > sensei_LpwanRequest_dfu_confirm_tag) {
     return -EINVAL;
+  }
+  if (!client_up) {
+    return -ENODEV;
   }
   if (!atomic_cas(&dfu_busy, 0, 1)) {
     return -EBUSY;
@@ -2286,6 +2433,9 @@ int sensei_lpwan_cmd_disconnect(void) { return post(CMD_DISCONNECT, sensei_Radio
 int sensei_lpwan_cmd_power(bool on) { return post(CMD_POWER, sensei_Radio_RADIO_BLE, on); }
 
 int sensei_lpwan_query_version(sensei_LpwanVersion *out, uint32_t timeout_ms) {
+  if (!client_up) {
+    return -ENODEV;
+  }
   k_sem_reset(&version_sem);
   atomic_set(&version_wanted, 1);
   if (post(CMD_VERSION, sensei_Radio_RADIO_BLE, false) != 0) {
@@ -2326,6 +2476,9 @@ void sensei_lpwan_get_info(struct lpwan_info *i) {
 }
 
 const char *sensei_lpwan_state_str(void) {
+  if (shield_state_get() == LPWAN_SHIELD_ABSENT) {
+    return "no shield";
+  }
   if (proto_bad) {
     return "protocol mismatch";
   }

@@ -27,8 +27,9 @@
  *   told by on_up(RADIO_BLE) then; an LTE release (disconnect, or a change to another radio) is remembered and runs
  *   when the fix has ended, before on_up; the update of the shield is refused (-EBUSY). A cancel of the fix is always
  *   possible, also during an update.
- * - A fix that ends with LTE not wanted leaves the modem in functional mode 0 (power off), so that it saves what the
- *   GNSS learned before the shield is cut. With LTE on it ends with mode 30 (GNSS off, LTE as it was).
+ * - A fix that began with the modem off (functional mode 0 or 4: no LTE, or a connect that failed) leaves it in mode 0
+ *   (power off), so that it saves what the GNSS learned before the shield is cut. Else it ends with mode 30 (GNSS off,
+ *   LTE as it was). The shield reads the mode when the fix begins; "LTE wanted" does not decide.
  * - LoRa is not touched by a fix, except that a sleep request is refused for any radio.
  */
 

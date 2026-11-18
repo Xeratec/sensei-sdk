@@ -19,6 +19,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/** True if the simulator was told where the shield is (`-lpwan_shield=<host>:<port>` or the target option). Without it
+ *  the simulated node has no shield: the client does not start (like a node without the expander). */
+bool lpwan_sim_master_configured(void);
+
 /** Start the link thread. `on_event` is called (link thread) when EVENT goes high. Returns 0 or a negative errno. */
 int lpwan_sim_master_init(void (*on_event)(void));
 

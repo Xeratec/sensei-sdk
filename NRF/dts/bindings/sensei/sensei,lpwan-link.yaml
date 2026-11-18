@@ -33,6 +33,12 @@ properties:
   bb-mode-gpios:
     type: phandle-array
     description: Shield buck-boost mode (nRF5340 side, expander).
+  fem-pd-gpios:
+    type: phandle-array
+    description: nRF21540 range extender power-down, low = off (nRF5340 side, expander P5).
+  fem-mode-gpios:
+    type: phandle-array
+    description: nRF21540 MODE line (nRF5340 side, expander P6).
   spi-gap-sel-gpios:
     type: phandle-array
     description: GAP9 isolation switch on the shared SPI_A bus (nRF5340 side).

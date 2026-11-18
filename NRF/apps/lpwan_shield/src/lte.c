@@ -307,6 +307,9 @@ static enum lte_lc_system_mode system_mode(void) {
  * configure cannot run then: the shield refuses them during a fix (lpwan_gnss.h). */
 static K_MUTEX_DEFINE(func_lock);
 static bool gnss_func_on;
+/* The modem was off (functional mode 0 or 4) when the fix began: it goes back to power off at the end, whatever
+ * want_connected says. want_connected stays true after a failed connect, with the modem still not registered. */
+static bool gnss_modem_was_off;
 
 static bool mode_has_gnss(enum lte_lc_system_mode m) {
   return m == LTE_LC_SYSTEM_MODE_GPS || m == LTE_LC_SYSTEM_MODE_LTEM_GPS || m == LTE_LC_SYSTEM_MODE_NBIOT_GPS ||
@@ -344,6 +347,14 @@ int lte_gnss_begin(void) {
     return err;
   }
   k_mutex_lock(&func_lock, K_FOREVER);
+  {
+    enum lte_lc_func_mode fm;
+
+    /* A mode that cannot be read counts as "off" only if LTE is not wanted (the old rule). */
+    gnss_modem_was_off = lte_lc_func_mode_get(&fm) == 0
+                             ? (fm == LTE_LC_FUNC_MODE_POWER_OFF || fm == LTE_LC_FUNC_MODE_OFFLINE)
+                             : !want_connected;
+  }
   err = gnss_system_mode_ready();
   if (err == 0) {
     err = lte_lc_func_mode_set(LTE_LC_FUNC_MODE_ACTIVATE_GNSS);
@@ -362,11 +373,12 @@ void lte_gnss_end(void) {
 
   k_mutex_lock(&func_lock, K_FOREVER);
   gnss_func_on = false;
-  if (want_connected) {
+  if (!gnss_modem_was_off) {
     err = lte_lc_func_mode_set(LTE_LC_FUNC_MODE_DEACTIVATE_GNSS); /* LTE goes on as it was */
   } else {
-    /* No LTE: power the modem off, which saves what the GNSS learned (ephemerides, time, last position) before the
-     * shield is cut. Mode 30 would leave it on and the data unsaved. */
+    /* The modem was off when the fix began (no LTE, or a connect that failed): power it off, which saves what the
+     * GNSS learned (ephemerides, time, last position) before the shield is cut. Mode 30 would leave it on and the
+     * data unsaved. */
     err = lte_lc_power_off();
   }
   k_mutex_unlock(&func_lock);

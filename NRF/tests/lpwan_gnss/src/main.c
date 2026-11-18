@@ -15,7 +15,9 @@
  * request reaches the shield) and the app is called (on_up) after it; a disconnect asked during the fix runs when it
  * has ended; a result that never comes ends with -ETIMEDOUT and a cancel request; power off during a fix ends it with
  * -ENOTCONN and the next fix works; a result that arrives before the answer to the request is taken; an update of the
- * shield is refused (-EBUSY); the time of the fix is moved to now. */
+ * shield is refused (-EBUSY); the time of the fix is moved to now, counted from the EVENT edge of the result and not
+ * from the moment the client thread read it (a slow answer to another request holds the thread); a release that the
+ * shield refuses (BUSY: it still runs the fix after the client gave it up) is tried again. */
 
 #include <string.h>
 
@@ -54,6 +56,9 @@ static struct {
   uint32_t fix_seq;
   /* script */
   bool result_in_request; /* the result of a fix is queued before the answer to the request */
+  int send_delay_ms;      /* the answer to a send comes this late (the client thread waits for it) */
+  uint32_t age_ms;        /* age of the fix in the result, ms */
+  bool ignore_cancel;     /* the shield takes a gnss_cancel and goes on with the fix a while */
   /* observations */
   struct entry log[LOG_N];
   int n_log;
@@ -158,7 +163,7 @@ static void end_fix_locked(sensei_GnssFixStatus status) {
     e.gnss_result.acc_m = 5;
     e.gnss_result.sats = 8;
     e.gnss_result.unix_time = FIX_UTC;
-    e.gnss_result.age_ms = FIX_AGE_MS;
+    e.gnss_result.age_ms = fk.age_ms;
     e.gnss_result.ttff_ms = 31000;
   }
   push(&e);
@@ -177,6 +182,9 @@ static void on_request(struct link_slave *s, const sensei_LpwanRequest *req, voi
 
   ARG_UNUSED(u);
   r.seq = req->seq;
+  if (req->which_body == sensei_LpwanRequest_send_tag && fk.send_delay_ms > 0) {
+    k_msleep(fk.send_delay_ms); /* before the lock: the test may end the fix meanwhile */
+  }
   k_mutex_lock(&st_lock, K_FOREVER);
   r.result = lpwan_admit_request(&fk.sm, req, false, fk.fix_running); /* the function of service.c */
   if (r.result == sensei_LpwanResult_LPWAN_OK) {
@@ -217,7 +225,9 @@ static void on_request(struct link_slave *s, const sensei_LpwanRequest *req, voi
       }
       break;
     case sensei_LpwanRequest_gnss_cancel_tag:
-      end_fix_locked(sensei_GnssFixStatus_GNSS_FIX_CANCELLED);
+      if (!fk.ignore_cancel) {
+        end_fix_locked(sensei_GnssFixStatus_GNSS_FIX_CANCELLED);
+      }
       break;
     default:
       break;
@@ -456,6 +466,9 @@ static void before(void *f) {
   k_mutex_lock(&st_lock, K_FOREVER);
   fk.n_log = 0;
   fk.result_in_request = false;
+  fk.send_delay_ms = 0;
+  fk.age_ms = FIX_AGE_MS;
+  fk.ignore_cancel = false;
   k_mutex_unlock(&st_lock);
   up_lte = up_ble = 0;
   sent_calls = fix_calls = dfu_calls = 0;
@@ -502,6 +515,57 @@ ZTEST(lpwan_gnss, test_lte_send_goes_out_during_a_fix) {
   zassert_true(fix_res.unix_time >= FIX_UTC + 1 && fix_res.unix_time <= FIX_UTC + 3, "time %u",
                (unsigned)fix_res.unix_time);
   zassert_false(sensei_lpwan_gnss_busy());
+}
+
+ZTEST(lpwan_gnss, test_result_time_counts_from_the_event_edge) {
+  static const uint8_t data[4] = {1, 2, 3, 4};
+
+  /* The client thread waits for the (slow) answer to a send while the result arrives: it reads the result 0.8 s after
+   * its EVENT edge. The result is 1.1 s old when the shield sends it, so it is 1.9 s old when the callback runs: +2 s
+   * (the time is rounded to seconds). Counted from the moment of the read it would be 1.1 s old: +1 s, the clock
+   * would be set back by the 0.8 s. */
+  connect_lte();
+  start_fix(60);
+  k_mutex_lock(&st_lock, K_FOREVER);
+  fk.age_ms = 1100;
+  fk.send_delay_ms = 800;
+  k_mutex_unlock(&st_lock);
+  zassert_ok(sensei_lpwan_radio_send(sensei_Radio_RADIO_LTEM, data, sizeof(data), send_done, NULL));
+  k_msleep(100); /* the request is at the shield, its answer is held */
+  fake_end_fix(sensei_GnssFixStatus_GNSS_FIX_OK);
+  zassert_true(wait_int(&fix_calls, 1, 20000));
+  zassert_true(wait_int(&sent_calls, 1, 20000));
+  zassert_equal(fix_err, 0);
+  zassert_equal(fix_res.status, sensei_GnssFixStatus_GNSS_FIX_OK);
+  zassert_true(fix_res.unix_time >= FIX_UTC + 2 && fix_res.unix_time <= FIX_UTC + 3, "time +%d s",
+               (int)(fix_res.unix_time - FIX_UTC));
+}
+
+ZTEST(lpwan_gnss, test_release_is_tried_again_after_busy) {
+  /* The client gave the fix up after its deadline and asked the shield to cancel, but the shield still runs it: the
+   * release that waited for the fix is refused (BUSY). The client asks again a few seconds later; the shield has ended
+   * the fix by then and takes it. */
+  k_mutex_lock(&st_lock, K_FOREVER);
+  fk.ignore_cancel = true;
+  k_mutex_unlock(&st_lock);
+  connect_lte();
+  start_fix(1);
+  zassert_ok(sensei_lpwan_cmd_disconnect()); /* during the fix: it waits */
+  zassert_true(wait_int(&fix_calls, 1, 60000));
+  zassert_equal(fix_err, -ETIMEDOUT);
+  zassert_true(wait_log(sensei_LpwanRequest_lte_disconnect_tag, 1, 5000), "the release was tried");
+  int first = log_find(sensei_LpwanRequest_lte_disconnect_tag, 0);
+
+  zassert_equal(fk.log[first].res, sensei_LpwanResult_LPWAN_BUSY, "the shield still runs the fix");
+  zassert_equal(fake_sm().tech, LPWAN_TECH_LTE);
+  fake_end_fix(sensei_GnssFixStatus_GNSS_FIX_CANCELLED); /* the shield is done */
+  zassert_true(wait_log(sensei_LpwanRequest_lte_disconnect_tag, 2, 10000), "no second try");
+  k_msleep(300);
+  int ok = log_find(sensei_LpwanRequest_lte_disconnect_tag, first + 1);
+
+  zassert_true(ok > first);
+  zassert_equal(fk.log[ok].res, sensei_LpwanResult_LPWAN_OK);
+  zassert_equal(fake_sm().tech, LPWAN_TECH_NONE, "released");
 }
 
 ZTEST(lpwan_gnss, test_lte_connect_waits_for_the_fix) {

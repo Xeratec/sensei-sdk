@@ -11,7 +11,10 @@
  * - I2C_A (P1.02 SCL, P1.03 SDA) to the shield I/O expander TCAL6408 (address 0x20).
  * - Expander interrupt on P1.12 (the base board net MSP_CS).
  * - Event line from the nRF9151 on P0.31.
- * - nRF21540 TX_EN on P0.27 and RX_EN on P1.13 (not used by the firmware yet).
+ * - nRF21540 TX_EN on P0.27 and RX_EN on P1.13 (not used by the firmware yet). Its power-down nPD and MODE are on the
+ *   expander (P5, P6): the client holds both low while the extender is not in use (the default).
+ * - Without a shield the expander does not answer: its driver stays down and the client never starts (the node uses
+ *   BLE for its uplinks).
  */
 
 &pinctrl {
@@ -79,6 +82,11 @@
 		level-shifter-gpios = <&lpwan_expander 7 GPIO_ACTIVE_HIGH>;
 		/* Expander P3: buck-boost mode (high = forced PWM, low = power save). */
 		bb-mode-gpios = <&lpwan_expander 3 GPIO_ACTIVE_HIGH>;
+		/* Expander P5: nRF21540 range extender power-down nPD (low = off). The client drives it low at every
+		 * bring-up and power-off unless CONFIG_SENSEI_LPWAN_FEM is set, so the unused extender is off. */
+		fem-pd-gpios = <&lpwan_expander 5 GPIO_ACTIVE_HIGH>;
+		/* Expander P6: nRF21540 MODE. Driven low with the extender off, so the line never floats. */
+		fem-mode-gpios = <&lpwan_expander 6 GPIO_ACTIVE_HIGH>;
 		/* GAP9 isolation switch (TMUX1112) on SPI_A. */
 		spi-gap-sel-gpios = <&gpio0 20 GPIO_ACTIVE_HIGH>;
 	};

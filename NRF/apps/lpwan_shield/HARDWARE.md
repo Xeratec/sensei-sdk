@@ -91,8 +91,8 @@ ADDR is tied to GND. Powered from the always-on 3.3 V (VCC_P) and 1.8 V (VCC_I).
 | P2 | nRF91_GPIO13 | in | BUSY from the nRF9151 (P0.29): high = busy |
 | P3 | BB_MODE | out | buck-boost mode: high = forced PWM (1 M pull-up), low = power save |
 | P4 | EN_3V3 | out | shield 3.3 V load switch U3 (1 M pull-up: on by default) |
-| P5 | nRF21_nPD | out | nRF21540 power down (low = off) **verify** |
-| P6 | nRF21_MODE | out | nRF21540 MODE **verify** |
+| P5 | nRF21_nPD | out | nRF21540 power down (low = off). The client drives it low at every bring-up and power-off (`fem-pd-gpios`) **verify** |
+| P6 | nRF21_MODE | out | nRF21540 MODE. Driven low with the extender off (`fem-mode-gpios`) **verify** |
 | P7 | OE | out | output enable of the level shifter U12 TXB0108 (10 k and 12 k to GND: off by default) |
 | INT | `_I/O_exp_nINT` | out | to the base board P1.12 (pull-up on the shield) |
 
@@ -167,6 +167,21 @@ Vsys (base board) ---+                                                          
   MODE once from the application core, (3) the RX_EN/TX_EN lines pass the TXB0108, check the
   switching delay against the FEM timing, (4) the RF path (U.FL ports) has to be used for BLE. Not
   implemented; not tested. The nRF21540 SPI is not needed in GPIO mode.
+- **Off by default.** Without the FEM support (`CONFIG_SENSEI_LPWAN_FEM` off, the default) the client drives nPD (expander P5) and MODE (P6) low
+  when it sets up the expander at start-up (shield off), at every bring-up and at every power-off, and never changes them
+  after that. nPD low is power-down: the extender draws (almost) no current, and the two lines are never inputs that float. MODE low is a
+  defined level, which does not matter while nPD is low. The devicetree has them as `fem-pd-gpios` and `fem-mode-gpios` of `lpwan_link`
+  (shield overlay). With `CONFIG_SENSEI_LPWAN_FEM` the client sets nPD high while the shield is on (and MODE high with
+  `CONFIG_SENSEI_LPWAN_FEM_MODE_HIGH`): the pin side only, the radio side above is not implemented. The levels are the pure function
+  `lpwan_fem_levels()` (`lib/sensei_lpwan`, host tested). Untested on hardware: the shield current with the extender off, see the SENSEI IEQ
+  `firmware/docs/TESTING.md`.
+
+## Without a shield
+
+The expander (TCAL6408, I2C 0x20 on I2C_A) is on the shield only. On a base board with the sensor shield and no LPWAN shield nothing answers
+there, the expander driver does not come up, and `sensei_lpwan_init()` finds that at start-up (once; a reboot looks again): the state is
+"absent", the client does not start, the shield is never powered and no power-on is retried. See `lib/sensei_lpwan/README.md`. Whether the I2C_A
+lines have pull-ups on the base board (so that the missing device gives a NACK and not a stuck bus) is **verify**.
 
 ## GAP9 and SPI_A: the answer
 

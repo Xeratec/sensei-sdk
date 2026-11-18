@@ -31,6 +31,7 @@
 #include "sensei/lpwan.pb.h"
 #include "sensei_lpwan/lpwan_gnss.h"
 #include "sensei_lpwan/lpwan_rai.h"
+#include "sensei_lpwan/lpwan_shield.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -82,9 +83,20 @@ struct sensei_lpwan_hooks {
 
 /**
  * Set up the link and the shield pins, start the thread. The shield stays off until it is needed.
- * hooks and cfg are copied. Returns 0 or a negative errno (-ENODEV: shield not in the build).
+ * hooks and cfg are copied. Returns 0 or a negative errno.
+ *
+ * Whether a shield is stacked is decided here, once (sensei_lpwan_shield_state()). The I/O expander (I2C 0x20) is on
+ * the shield only: if it does not answer, init returns -ENODEV (-EIO if its pins fail), the state is ABSENT, and the
+ * client does not start: nothing is powered, no thread, no retries (a reboot looks again). The calls below then fail
+ * without effect: sensei_lpwan_radio_ready() is false, the sends, the fix, the update and the version query give
+ * -ENODEV, and sensei_lpwan_gnss_supported() is 0. An app that gets an error here does not register the LPWAN radios,
+ * so its uplink scheduler falls back to BLE. -ENODEV also means that the build has no LPWAN_Shield_v1 devices for the
+ * client.
  */
 int sensei_lpwan_init(const struct sensei_lpwan_hooks *hooks, const struct sensei_lpwan_config *cfg);
+
+/** UNKNOWN until sensei_lpwan_init() has run, then PRESENT or ABSENT for the rest of the run (see there). */
+enum lpwan_shield_state sensei_lpwan_shield_state(void);
 
 /** Replace the configuration. Safe from any thread. */
 void sensei_lpwan_set_config(const struct sensei_lpwan_config *cfg);
@@ -316,11 +328,12 @@ int sensei_lpwan_shield_diag(struct sensei_lpwan_shield_diag *out);
 
 /**
  * GNSS of the shield's nRF9151: one position fix on request. The shield is powered if it is off. The rules of a fix
- * next to LTE are in sensei_lpwan/lpwan_gnss.h: LoRa is not touched; an LTE send goes through while a fix runs (LTE
- * connected); an LTE connect waits for the end of the fix (sensei_lpwan_radio_ready(LTE) is false until then, an LTE
- * send without a connection gives -EAGAIN, on_up(RADIO_BLE) follows); an LTE release (disconnect) asked during the fix
- * runs when it has ended, before on_up; a fix is not started while an LTE connect or send is in flight; an update of
- * the shield is refused (-EBUSY) while a fix is pending.
+ * next to LTE are in sensei_lpwan/lpwan_gnss.h: LoRa is not touched by a fix (a sleep request is refused for any radio,
+ * though: a fix keeps the shield awake and a LoRa node does not power it down until the fix ends); an LTE send goes
+ * through while a fix runs (LTE connected); an LTE connect waits for the end of the fix (sensei_lpwan_radio_ready(LTE)
+ * is false until then, an LTE send without a connection gives -EAGAIN, on_up(RADIO_BLE) follows); an LTE release
+ * (disconnect) asked during the fix runs when it has ended, before on_up; a fix is not started while an LTE connect or
+ * send is in flight; an update of the shield is refused (-EBUSY) while a fix is pending.
  *
  * done(err, res, user) runs on hooks.wq. err 0: the shield answered, res->status tells how the fix ended (GNSS_FIX_OK
  * with the position, TIMEOUT, BLOCKED, CANCELLED, FAILED). Else res->status is the verdict of the client:

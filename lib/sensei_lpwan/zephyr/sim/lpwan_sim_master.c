@@ -158,15 +158,24 @@ static void link_main(void *a, void *b, void *c) {
   }
 }
 
-int lpwan_sim_master_init(void (*on_event)(void)) {
+static void parse_target(void) {
   const char *tgt = target != NULL ? target : CONFIG_SENSEI_LPWAN_SIM_TARGET; /* the option wins */
   const char *colon = tgt[0] != '\0' ? strrchr(tgt, ':') : NULL;
 
-  event_cb = on_event;
   if (colon != NULL && colon != tgt) {
     snprintf(host, sizeof(host), "%.*s", (int)MIN((size_t)(colon - tgt), sizeof(host) - 1), tgt);
     port = atoi(colon + 1);
   }
+}
+
+bool lpwan_sim_master_configured(void) {
+  parse_target();
+  return port > 0;
+}
+
+int lpwan_sim_master_init(void (*on_event)(void)) {
+  event_cb = on_event;
+  parse_target();
   if (port <= 0) {
     LOG_WRN("no shield: start with -lpwan_shield=<host>:<port>");
   }

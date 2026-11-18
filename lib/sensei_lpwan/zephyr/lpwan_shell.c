@@ -24,6 +24,10 @@ static int cmd_status(const struct shell *sh, size_t argc, char **argv) {
   struct lpwan_info i;
 
   sensei_lpwan_get_info(&i);
+  if (sensei_lpwan_shield_state() == LPWAN_SHIELD_ABSENT) {
+    shell_print(sh, "shield absent (the expander does not answer): the node sends over BLE; reboot to look again");
+    return 0;
+  }
   shell_print(sh, "shield %s, link %s, state %s, tech %s%s", i.shield_on ? "on" : "off", i.link_up ? "up" : "down",
               lpwan_state_name(i.state), lpwan_tech_name(i.tech),
               i.tech == LPWAN_TECH_LTE ? (i.lte_mode_nb ? " (NB-IoT)" : " (LTE-M)") : "");

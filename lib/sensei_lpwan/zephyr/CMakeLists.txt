@@ -17,7 +17,8 @@ zephyr_library_sources(
   ${SENSEI_LPWAN_DIR}/src/lpwan_upd.c
   ${SENSEI_LPWAN_DIR}/src/lpwan_rai.c
   ${SENSEI_LPWAN_DIR}/src/lpwan_counters.c
-  ${SENSEI_LPWAN_DIR}/src/lpwan_gnss.c)
+  ${SENSEI_LPWAN_DIR}/src/lpwan_gnss.c
+  ${SENSEI_LPWAN_DIR}/src/lpwan_shield.c)
 zephyr_library_sources_ifdef(CONFIG_SENSEI_LPWAN
   ${SENSEI_LPWAN_DIR}/src/lpwan_master.c
   ${SENSEI_LPWAN_DIR}/zephyr/lpwan_client.c)
@@ -28,7 +29,10 @@ if(CONFIG_SENSEI_LPWAN_SIM_HOST)
   zephyr_library_sources(${SENSEI_LPWAN_DIR}/src/lpwan_sim.c)
   target_sources(native_simulator INTERFACE ${SENSEI_LPWAN_DIR}/zephyr/sim/lpwan_sim_host.c)
   target_compile_options(native_simulator BEFORE INTERFACE -I${SENSEI_LPWAN_DIR}/include)
-  zephyr_library_include_directories(${ZEPHYR_BASE}/boards/native/native_sim)
+  # cmdline.h of native_sim; the BabbleSim board has its own on the include path
+  if(CONFIG_BOARD_NATIVE_SIM)
+    zephyr_library_include_directories(${ZEPHYR_BASE}/boards/native/native_sim)
+  endif()
 endif()
 zephyr_include_directories(${SENSEI_LPWAN_DIR}/include)
 zephyr_library_include_directories(${SENSEI_LPWAN_DIR}/zephyr)

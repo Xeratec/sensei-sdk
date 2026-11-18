@@ -12,9 +12,9 @@
  *
  * A worker thread runs an attempt: it starts the modem library if needed, makes sure GNSS is in the system mode and
  * activates it (functional mode 31, lte_gnss_begin: antenna, system mode), starts a single fix, waits for a valid fix,
- * the timeout or a cancel, stops, deactivates GNSS (lte_gnss_end: functional mode 30 with LTE on, else 0) and queues
- * the result event. GNSS is active only for the attempt. The modem runs GNSS only while LTE is idle; a fix that the
- * modem kept blocked until the end is reported as such. Untested on hardware.
+ * the timeout or a cancel, stops, deactivates GNSS (lte_gnss_end: functional mode 30, or 0 if the modem was off (0 or
+ * 4) when the fix began) and queues the result event. GNSS is active only for the attempt. The modem runs GNSS only
+ * while LTE is idle; a fix that the modem kept blocked until the end is reported as such. Untested on hardware.
  */
 
 #include <errno.h>

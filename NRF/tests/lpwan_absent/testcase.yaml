@@ -1,0 +1,11 @@
+# SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+# SPDX-License-Identifier: Apache-2.0
+---
+# LPWAN client without a shield: init says -ENODEV and the state is "absent"; nothing is powered, no retry, every call
+# of the API fails at once without effect.
+tests:
+  sensei.lpwan.absent:
+    platform_allow:
+      - native_sim/native/64
+    tags: sensei lpwan
+    timeout: 60

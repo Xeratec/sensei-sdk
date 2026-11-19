@@ -57,9 +57,16 @@
 #endif
 /** A chain that is this many epochs long triggers a mix. */
 #define SENSEI_E2E_REKEY_EPOCHS 4096u
-/** An epoch is persisted in blocks of this many epochs when the last persist is less than SENSEI_E2E_PERSIST_FAST_S
- * ago (streaming), else one epoch. */
-#define SENSEI_E2E_BLOCK_EPOCHS 16u
+/** The counters are persisted in blocks of whole epochs: one epoch after a start, twice the last block while the
+ * persists come less than SENSEI_E2E_PERSIST_FAST_S apart (streaming), up to this many epochs (65 536 counters), half
+ * of it after a persist that comes later (a slow sender is back at one epoch after a few). Flash writes then stay at
+ * about one per minute at any rate up to ~1000 messages a second. Trade-off: the chain key
+ * in flash is the one of the first epoch of the block, so it opens the keys of the epochs of the block that were sent
+ * already, at most this many epochs; a longer cap means fewer writes and more exposed messages. Must stay below
+ * SENSEI_RATCHET_MAX_SKIP (a restart walks the chain from the stored epoch to the new counter). */
+#ifndef SENSEI_E2E_BLOCK_EPOCHS_MAX
+#define SENSEI_E2E_BLOCK_EPOCHS_MAX 1024u
+#endif
 #define SENSEI_E2E_PERSIST_FAST_S 60u
 
 /** What is kept in flash. */
@@ -86,7 +93,9 @@ struct sensei_e2e_nv {
    * backend. have_rat: there is a record that opened. rat_unreadable: there is a record that does not open (wrong size,
    * does not authenticate, wrong key): the state of the generation is lost. If the node is provisioned, it refuses to
    * seal and open until it is provisioned again (a fallback to generation 0 would be a downgrade). A record that opened
-   * but belongs to another key id is old and is ignored. */
+   * but belongs to another key id is old and is ignored. A generation 0 record (it only holds a pending request) is
+   * dropped by a build without the ratchet (no X25519 or HMAC): such a build never asks for a mix and no key depends
+   * on the record; a record of generation 1 or later is refused there (damaged). */
   uint8_t rat[SENSEI_E2E_RAT_SIZE];
   bool have_rat;
   bool rat_unreadable;
@@ -110,11 +119,16 @@ struct sensei_e2e_ops {
    * the state is then lost at a restart; tests, host tools). Return 0 on success.
    */
   int (*save_rat)(void *user, uint32_t key_id, const uint8_t *rec, size_t len);
-  /** Seconds of a monotonic clock (uptime). Time of the last persist, age of an epoch, retries. NULL: the clock stands
-   * still at 0 (blocks of 16 epochs, no time-bound epochs, a pending request is sent once per start). */
+  /** Seconds of a monotonic clock (uptime). Time of the last persist, age of an epoch, age of the generation, retries.
+   * NULL: the clock stands still at 0 (blocks grow to SENSEI_E2E_BLOCK_EPOCHS_MAX, no time-bound epochs, a pending
+   * request is sent once per start, the age of a generation is 0). */
   uint32_t (*uptime_s)(void *user);
   /** Seconds since 1970 if the wall clock is set, else 0. For the start of a generation (SENSEI_E2E_REKEY_DAYS). NULL:
-   * unknown; the period is then counted in uptime (a node that restarts more often never mixes for that reason). */
+   * unknown; the period is then counted in uptime plus the age that every record of the generation carries (hours,
+   * 16 bits), so a node that restarts often and has no wall clock still mixes about every SENSEI_E2E_REKEY_DAYS of
+   * running time (the time since the last write of the record is lost at a restart, and the age is rounded up). A node
+   * that is switched off (System OFF) does not count that time. If the clock appears after the switch, the start of
+   * the generation is back-dated by the age. */
   uint32_t (*unix_s)(void *user);
 };
 
@@ -129,9 +143,10 @@ struct sensei_e2e_cfg {
 
 /** The ratchet state of the device. */
 struct sensei_e2e_rat {
-  uint32_t gen;                          /**< 0: static keys */
-  uint32_t gen_start_unix;               /**< 0: unknown */
-  uint32_t gen_start_up;                 /**< uptime at the start of the generation (RAM only) */
+  uint32_t gen;            /**< 0: static keys */
+  uint32_t gen_start_unix; /**< 0: unknown */
+  uint32_t gen_start_up;   /**< uptime at the start of the generation (RAM only; may lie before the boot: the stored age
+                              is taken off at the load) */
   uint8_t root[SENSEI_RATCHET_KEY_SIZE]; /**< R_gen: gen 0: R_0 */
   uint8_t k_down[SENSEI_RATCHET_MK_SIZE];
   struct sensei_ratchet_chain up; /**< uplink chain, generation 1 and later */
@@ -174,7 +189,8 @@ struct sensei_e2e {
   bool flash_idx_valid;
   uint32_t flash_idx; /* chain index of the up_ck in flash */
   bool persist_seen;
-  uint32_t persist_t; /* uptime of the last block persist */
+  uint32_t persist_t;    /* uptime of the last block persist */
+  uint32_t block_epochs; /* epochs of the last block (1 .. SENSEI_E2E_BLOCK_EPOCHS_MAX) */
   bool sent_valid;
   uint32_t sent_t;    /* uptime of the last request sent */
   uint32_t epoch_cur; /* epoch of the last counter sealed in this run (UINT32_MAX: none) */
@@ -185,14 +201,18 @@ struct sensei_e2e {
 /**
  * Load the state (nv: what was read from flash, may be all empty), make the key pair if there is
  * none and open the session if a collector key is stored. ctr_step is only a proposal now: the counters are persisted
- * in blocks of whole epochs (SENSEI_E2E_BLOCK_EPOCHS, or one epoch), see the README. Returns 0 or a negative errno:
+ * in blocks of whole epochs (one, growing to SENSEI_E2E_BLOCK_EPOCHS_MAX while the persists come fast), see the README.
+ * nv is not const: the secrets of the caller's copy (nv->priv and nv->rat, with the ratchet secrets R_g, the chain key,
+ * the downlink keys and the pending key) are wiped before the call returns, whether it succeeded or not, because the
+ * module keeps its own copy. The flags (have_priv, have_backend, ...) and the counters stay; to initialize again, read
+ * the flash again. Returns 0 or a negative errno:
  * -EACCES if nv->key_unreadable is set, -EIO if the public key cannot be derived from a key that came from a sealed
  * record (nv->priv_sealed; nothing is replaced; a damaged plain key is replaced), or the error of the storage when the
  * new key pair cannot be stored (no key is kept then). A failed session leaves the module without a session
  * (sensei_e2e_ready() false).
  */
 int sensei_e2e_init(struct sensei_e2e *e, const struct sensei_secure_crypto *c, const struct sensei_e2e_ops *ops,
-                    void *user, const struct sensei_e2e_nv *nv, uint32_t ctr_step);
+                    void *user, struct sensei_e2e_nv *nv, uint32_t ctr_step);
 
 /**
  * Store the collector's public key and derive the session: the node is then in generation 0 with new static keys and
@@ -255,8 +275,10 @@ void sensei_e2e_rekey_unsent(struct sensei_e2e *e);
  * The answer of the collector (RekeyAnswer{gen, pub, up_base}, decoded, from a downlink that sensei_e2e_open()
  * accepted). Only an answer to the pending request counts: gen = generation + 1, up_base equal to the request, pub 32
  * bytes and not of low order. Then the node computes the new generation, writes the state (one atomic record) and
- * switches: the next counter is max(last + 1, 64 * up_base) and every uplink from then on is sealed in the new
- * generation; the ephemeral key, R_g and the chain of generation g are erased. Returns 0 (switched); -EALREADY (no
+ * switches: every uplink from then on is sealed in the new generation. The first counter of the generation is
+ * max(last + 1, 64 * up_base), moved up to the next epoch boundary when the first uplink is sealed (a generation starts
+ * a new epoch; up_base lies above the stored mark, so it is 64 * up_base unless the node sent past it while the request
+ * was out); the ephemeral key, R_g and the chain of generation g are erased. Returns 0 (switched); -EALREADY (no
  * request pending, or the generation is not new: a repeated answer is ignored); -EBADMSG (gen, up_base or length do not
  * match); -EACCES (pub of low order); or the error of the write (nothing changed, the request stays pending: a repeated
  * answer tries again). The previous generation's downlink key is kept until the next request.
@@ -275,7 +297,9 @@ bool sensei_e2e_ready(const struct sensei_e2e *e);
 uint32_t sensei_e2e_key_id(const struct sensei_e2e *e);
 
 /** Seal kind (node to host or backend direction of the node). Returns the length or a negative
- * errno; -EPERM if the ratchet state is damaged (counted, see sensei_e2e_status()). From generation 1 on the counter
+ * errno; -EPERM if the ratchet state is damaged (counted, see sensei_e2e_status()); -EPROTO if the node has no key for
+ * the counter (the key hook of the session failed: SENSEI_SECURE_ERR_TXKEY; nothing was sent, the counter is not used,
+ * a bug or a crypto failure, not a refusal of the peer). From generation 1 on the counter
  * may jump forward (a new epoch after a restart, an epoch older than epoch_max_s, the first epoch of a generation). */
 int sensei_e2e_seal(struct sensei_e2e *e, enum sensei_secure_kind kind, const uint8_t *pt, size_t len, uint8_t *out,
                     size_t cap);
@@ -288,6 +312,14 @@ int sensei_e2e_seal(struct sensei_e2e *e, enum sensei_secure_kind kind, const ui
  */
 int sensei_e2e_open(struct sensei_e2e *e, enum sensei_secure_kind want, const uint8_t *in, size_t len, uint8_t *out,
                     size_t cap, size_t *out_len);
+
+/**
+ * The key id that a node with private key priv gets for the collector key backend_pub (what sensei_secure_derive()
+ * gives): for the storage backend, to tell which of two stored keys the ratchet record belongs to. 0, -EIO (crypto) or
+ * -EINVAL (not a usable collector key).
+ */
+int sensei_e2e_key_id_of(const struct sensei_secure_crypto *c, const uint8_t priv[SENSEI_SECURE_PRIV_SIZE],
+                         const uint8_t backend_pub[SENSEI_SECURE_PUB_SIZE], uint32_t *key_id);
 
 /** Map a SENSEI_SECURE_ERR_* code to a negative errno. */
 int sensei_e2e_errno(int err);

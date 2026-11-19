@@ -16,3 +16,7 @@ project(sensei_secure_settings_test)
 target_sources(app PRIVATE src/main.c)
 # The vectors of the sealed settings records (vector 7), the same as in the host test of lib/sensei_secure.
 target_include_directories(app PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../../../lib/sensei_secure/tests/generated)
+
+# The test fails single writes and deletes of the settings (the marker of the key): the two calls go through
+# __wrap_ functions in src/main.c that call the real ones unless a test asks for an error.
+zephyr_ld_options(-Wl,--wrap=settings_save_one -Wl,--wrap=settings_delete)

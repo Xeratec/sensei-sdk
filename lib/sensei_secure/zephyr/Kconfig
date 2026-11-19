@@ -67,6 +67,14 @@ config SENSEI_SECURE_SETTINGS_CONFIRM_ON_OTA
 	  confirm of the host, or at the start of an image that is confirmed already; the OTA module must be started with
 	  sensei_ota_init()). A trial image that MCUboot reverts finds its key.
 
+config SENSEI_SECURE_SETTINGS_CONFIRM_STACK_SIZE
+	int "Stack of the work queue that deletes the plain key record at the confirmation"
+	default 2048
+	depends on SENSEI_SECURE_SETTINGS_CONFIRM_ON_OTA
+	help
+	  The delete runs on a work queue of its own (one thread, started at the first sensei_e2e_settings_load()), not on
+	  the system work queue: a delete can wait for a garbage collection of the settings storage.
+
 config SENSEI_SECURE_SETTINGS_CONFIRM_AFTER_LOAD
 	bool "Delete the plain key record right after the load (no bootloader that reverts)"
 	default y if !BOOTLOADER_MCUBOOT

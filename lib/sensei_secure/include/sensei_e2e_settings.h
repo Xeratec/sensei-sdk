@@ -18,8 +18,9 @@
  * sensei_e2e_seal.h) under a key from sensei_e2e_settings_seal_key(); the HUK provider derives it from the
  * hardware unique key of the nRF5340. A plain e2e_priv of an earlier version is sealed at the first start but stays
  * until the new image is confirmed (the OTA module calls sensei_e2e_settings_confirm() through
- * sensei_ota_on_confirmed() with CONFIG_SENSEI_SECURE_SETTINGS_CONFIRM_ON_OTA; builds without MCUboot call it after the
- * load; any other application calls it itself), so a revert to the old image finds its key.
+ * sensei_ota_on_confirmed() with CONFIG_SENSEI_SECURE_SETTINGS_CONFIRM_ON_OTA, on a work queue of its own: the delete
+ * may wait for a garbage collection of the settings, so it does not run on the system work queue; builds without
+ * MCUboot call it after the load; any other application calls it itself), so a revert to the old image finds its key.
  *
  * e2e_rat is the ratchet state (forward secrecy): SENSEI_E2E_RAT_SIZE bytes, written as one settings entry (one
  * atomic write). With sealing the entry is key_id (4 B, plain) || sealed record, the key id is also the context of the
@@ -28,7 +29,14 @@
  * sensei_e2e_init() refuses to seal and open until the node is provisioned again (nv->rat_unreadable).
  * e2e_mrk is 4 bytes of a hash of the sealed key, written by this firmware (and later ones) whenever it seals a key.
  * It tells a plain e2e_priv that an older firmware wrote after the key was sealed (a downgrade) from one that the
- * first keys-at-rest image left behind when its delete failed (see sensei_e2e_settings_load()).
+ * first keys-at-rest image left behind when its delete failed (see sensei_e2e_settings_load()). The old marker is
+ * deleted before a new sealed key is written, and a key that cannot be stored (or a marker that cannot be deleted)
+ * fails the call: the marker never names a key other than the sealed one. When e2e_bpub and e2e_rat exist, the key
+ * id in e2e_rat decides which of two different stored keys is the current one (the key whose key id, derived with
+ * e2e_bpub, is the one in the record); the marker only decides when the record does not.
+ * Sealing on or off is fixed per build: a node that has an e2e_rat record and runs a build with the other setting finds
+ * a record of the wrong size, which is lost state (nv->rat_unreadable): it refuses to seal and open until it is
+ * provisioned again.
  * Without sealing the private key is plain in flash: protect the chip (APPROTECT) in the field. With sealing
  * a flash image copied to another chip, and stale settings pages, do not give up the key; code that runs on the
  * chip still can use it (APPROTECT stays the main barrier).
@@ -72,13 +80,14 @@ uint32_t sensei_e2e_unix_time(void);
  * junk: the sealed key stands. The marker e2e_mrk refines "different keys": a marker that names another key than the
  * sealed one means the sealed key was written after this firmware last sealed (by the first keys-at-rest image, which
  * ignores a failed delete of the plain record): the plain key is the older one, the sealed key stands and the plain
- * record is deleted at once. A marker that names the sealed key, or no marker, keeps the rule above (the plain key is
- * the newer one); without a marker an older plain key that the first keys-at-rest image left behind is not told apart
- * from a newer one of a downgrade. A plain record that is not a valid scalar and no sealed record: the key is damaged,
- * it is not sealed, sensei_e2e_init() replaces it. If the sealing key is not available or the record does not open,
- * nv->key_unreadable is set, nv->have_priv is false and the
- * function returns the error (-EACCES for a record that does not open, the error of the provider
- * otherwise). sensei_e2e_init() then refuses to start. The stored record is not touched.
+ * record is deleted at once (before this rule: if e2e_bpub and e2e_rat exist and the key id in e2e_rat belongs to one
+ * of the two keys, that key is the current one). A marker that names the sealed key, or no marker, keeps the rule above
+ * (the plain key is the newer one); without a marker an older plain key that the first keys-at-rest image left behind
+ * is not told apart from a newer one of a downgrade. A plain record that is not a valid scalar and no sealed record:
+ * the key is damaged, it is not sealed, sensei_e2e_init() replaces it. If the sealing key is not available or the
+ * record does not open, nv->key_unreadable is set, nv->have_priv is false and the function returns the error (-EACCES
+ * for a record that does not open, the error of the provider otherwise). sensei_e2e_init() then refuses to start. The
+ * stored record is not touched.
  */
 int sensei_e2e_settings_load(struct sensei_e2e_nv *nv);
 

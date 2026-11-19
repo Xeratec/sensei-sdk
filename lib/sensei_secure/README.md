@@ -242,29 +242,46 @@ The collector side is in the Python key store (a later phase). What the applicat
 | `sensei_e2e_settings_plain_pending()` | `sensei e2e status` | a plain `e2e_priv` waits for the confirmation of the image |
 
 `ops` has three more members: `save_rat` (store the 156 B plain record as one atomic write, NULL record: delete),
-`uptime_s` (monotonic seconds) and `unix_s` (wall clock, 0 if not set). Without a clock the time rules stand still.
+`uptime_s` (monotonic seconds) and `unix_s` (wall clock, 0 if not set). Without `uptime_s` the time rules stand still.
 `sensei_e2e_settings_ops` has them: uptime from the kernel, the wall clock from `sensei_e2e_unix_time()`, a weak function that
 returns 0; the application (the node) defines it.
 
 - **Trigger.** Generation 0 after provisioning (at once); `rekey_days` since the generation started (wall clock, or
-  uptime from the start of the boot if the clock is not set); a chain of 4096 epochs; `sensei_e2e_rekey_now()`. A pending
-  request is returned again after `retry_h` hours and at the first call after a start; there is no give-up.
+  running time if the clock is not set); a chain of 4096 epochs; `sensei_e2e_rekey_now()`. A pending request is returned
+  again after `retry_h` hours and at the first call after a start; there is no give-up.
+- **Age of the generation.** Every write of `e2e_rat` carries the age of the generation in hours (the `u16` at offset 2,
+  rounded up, at most 65535 h = 7.4 years). At the load the start is `uptime - age`, so a node that restarts more often
+  than `rekey_days` and has no wall clock still mixes after about `rekey_days` of running time. What is lost at a restart
+  is the time since the last write of the record (at most `epoch_max_s` of a node that sends, 1 day; a restart starts a new
+  epoch and so writes again); a node that sleeps in System OFF does not count that time. If the wall clock appears after
+  the switch (the stored start is 0), the start is set to `now - age`; the clock is then used.
 - **Request.** A new X25519 key, `up_base = max(epoch(mark) + 1, up_base of this generation + 1)` (above every counter that
   was sent), the previous downlink key dropped, then one write of the record with the request pending. Only after that
   the request is returned.
 - **Answer.** Only for the pending request: `gen` is the generation plus 1, `up_base` equal, the key 32 B and not of low
   order. The new generation is computed, the first counter is `max(last + 1, 64 * up_base)`, the chain is walked to that
-  epoch, and the new state goes to flash in one write. Then the RAM state switches and the ephemeral key, `R_g` and the
+  epoch, and the new state goes to flash in one write. `up_base` lies above the stored mark, so the first counter is
+  `64 * up_base`, the start of an epoch, unless the node sent past it while the request was out; then it is the next
+  epoch boundary (a generation always starts a new epoch, because the first seal moves up to a boundary). Then the RAM state switches and the ephemeral key, `R_g` and the
   chain of generation g are erased. A failed write leaves generation g with the request pending; the same answer works later.
   The previous downlink key (generation g, for generation 0 the static key) is kept until the next request.
 - **Keys of the session.** Uplinks: the message key of the epoch of the counter. Downlinks: `k_down` of the generation, the
   previous generation's key while it is kept, the static key (generation 0 format) only while the previous generation is
   generation 0. Anything else is refused (`-EACCES`).
-- **Counter blocks.** The mark always ends on an epoch boundary (`res = c | 63`): one epoch, or 16 epochs if the last persist
-  is less than 60 s ago (streaming), so about one write a minute at most. From generation 1 on the chain key at the start of
-  the block is written first, then the mark: a crash between the two leaves the old mark (nothing of the block was used) and
-  a key that is not behind it. After a restart the node resumes at `mark + 1` (an epoch boundary, so a restart starts a new
-  epoch) and walks at most 16 steps. The counter never goes below the epoch of the chain: after a switch or restart the
+- **Counter blocks.** The mark always ends on an epoch boundary (`res = c | 63`). A block is one epoch after a start. While
+  the persists come less than 60 s apart (streaming) the block doubles every time, up to `SENSEI_E2E_BLOCK_EPOCHS_MAX`
+  (1024 epochs = 65536 counters); a persist that comes after 60 s or more halves it (a slow sender is back at one epoch
+  after a few). So the flash is written about once a minute at most, whatever the rate (100 000 messages at 50 a second:
+  36 counter writes; blocks of 16 epochs would need 98). Trade-off: the chain key in flash is the one of the first epoch
+  of the block, so someone who reads the flash can derive the keys of the epochs of the block that were sent already: up to
+  `SENSEI_E2E_BLOCK_EPOCHS_MAX * 64` messages (about 22 minutes at 50 a second) instead of 1024. A lower cap writes more
+  often. A restart skips the rest of the block (counters are plentiful: 2^32). The collector sees `up_base` and the first
+  counter of a generation up to one block above the last counter of the old one. From generation 1 on the chain key at the
+  start of the block is written first, then the mark: a crash between the two leaves the old mark (nothing of the block was
+  used) and a key that is not behind it. After a restart the node resumes at `mark + 1` (an epoch boundary, so a restart
+  starts a new epoch) and walks at most `SENSEI_E2E_BLOCK_EPOCHS_MAX` steps. The key hook of the session checks that the
+  counter is at or below the stored mark and the stored chain index at or below the epoch in use; if not, the seal fails
+  with `SENSEI_SECURE_ERR_TXKEY` (`-EPROTO` from `sensei_e2e_seal()`, its own code, not a refusal of a peer). The counter never goes below the epoch of the chain: after a switch or restart the
   sealing moves it up first (`sensei_secure_tx_jump()`), so a missing key cannot block the node. An epoch that is in use for
   more than `epoch_max_s` ends at the next seal (the counter jumps to the next multiple of 64).
 - **Provisioning again.** Back to generation 0 with the new static keys; the collector key is stored, then the ratchet record
@@ -273,19 +290,31 @@ returns 0; the application (the node) defines it.
 - **Damaged state.** A ratchet record that exists but does not open, has the wrong size or is not valid, or a record of
   generation 1 or later in a build without X25519: no fallback to generation 0 (that would be a downgrade). The node refuses to
   seal and open (`-EPERM`, counted) until it is provisioned again. A record that opens but belongs to another key id is old and
-  ignored.
-- **Record e2e_rat** (v1, 156 B, little endian): `u8 ver = 1 | u8 flags (bit 0 previous, bit 1 pending) | u16 0 | u32 key_id |
+  ignored. A generation 0 record only holds a pending request: a build without X25519 drops it (it never asks, no key depends
+  on it). The node must select `SENSEI_SECURE_RATCHET` and leave `cfg.rekey` on (`SENSEI_E2E_REKEY=n` is `cfg.rekey = false`,
+  not "ratchet off"). Sealing on or off is fixed per build: the record has another size in the other setting (156 B plain,
+  189 B sealed), so a node that has a record and runs a build with the other setting is damaged until it is provisioned
+  again. `sensei_e2e_init()` wipes the secrets of the caller's `struct sensei_e2e_nv` (the key and the ratchet record): the
+  module keeps its own copy, so no second plain copy of `R_g`, the chain key or the downlink keys stays in the caller's RAM.
+- **Record e2e_rat** (v1, 156 B, little endian): `u8 ver = 1 | u8 flags (bit 0 previous, bit 1 pending) | u16 age (hours) | u32 key_id |
   u32 gen | u32 gen_start_unix | root[32] | k_down[16] | u32 up_base | u32 up_idx | up_ck[32] | prev_k_down[16] |
-  u32 pend_up_base | pend_priv[32]` (the design had no key id: 152 B). Generation 0 has a record only while a request is pending.
+  u32 pend_up_base | pend_priv[32]` (the design table says 152 B: it has no key id, the 4 B were added; a record of the first version of this firmware has
+  age 0 there). Generation 0 has a record only while a request is pending.
   In settings: `key_id (4 B, plain) || sealed record` (the key id is the context of the seal, 185 B + 4), or the plain record
   without sealing. One entry, one atomic write. Wear: one record and one 4 B mark per block.
 - **Keys at rest of the new state.** `e2e_rat` is sealed like the key. The marker `e2e_mrk` (4 B of a hash of the sealed key) is
   written whenever a key is sealed. With sealing, a plain `e2e_priv` next to a different sealed key is the newer one (a downgrade
   to a firmware that does not know `e2e_privx` made it) unless the marker names another key than the sealed one: then the
   sealed key was written later by the first keys-at-rest image (it seals first and ignores a failed delete), the plain key is the
-  older one and goes at once. Without a marker the first rule applies (not told apart from a downgrade).
+  older one and goes at once. Without a marker the first rule applies (not told apart from a downgrade). When `e2e_bpub` and `e2e_rat` exist, the key
+  id in `e2e_rat` decides first: the key whose key id (with `e2e_bpub`) is the one in the record is the current key; the
+  marker only decides when the record does not. The old marker is deleted before a new sealed key is written (and the call
+  fails if it cannot be deleted); a marker that cannot be written is deleted too, so it never names a key that is not the
+  sealed one.
 - **Confirmation of the image.** The plain key stays after the migration until the image is confirmed.
-  `sensei_ota_on_confirmed()` (`NRF/system/ota`) calls `sensei_e2e_settings_confirm()` through
+  `sensei_ota_on_confirmed()` (`NRF/system/ota`) calls `sensei_e2e_settings_confirm()` (on a work queue of its own, stack
+  `CONFIG_SENSEI_SECURE_SETTINGS_CONFIRM_STACK_SIZE`, because a delete can wait for a garbage collection of the settings and
+  the hook runs on the system work queue; the flag is atomic) through
   `CONFIG_SENSEI_SECURE_SETTINGS_CONFIRM_ON_OTA` (default on with `SENSEI_OTA`): when the node confirms, when the host confirms over
   SMP (seen within 5 s) and at the start of an image that is confirmed already. Builds without MCUboot delete it after the load
   (`CONFIG_SENSEI_SECURE_SETTINGS_CONFIRM_AFTER_LOAD`, default on without `BOOTLOADER_MCUBOOT`).
@@ -326,7 +355,8 @@ without the library).
   bit, epoch before the chain, wrong generation, tag), the keyring hook, `tx_jump`, a scripted transcript (generation 0, request,
   answer, late generation 0 uplink, generation 1 across epoch jumps, previous generation downlink, previous generation dropped),
   and a property test: no (key, nonce) pair twice over 100 000 uplinks, 20 mixes and 40 000 downlinks of 8 senders, and no
-  message key for more than 64 counters.
+  message key for more than 64 counters. `test_e2e` repeats the property through `sensei_e2e` and the collector model (100 000
+  uplinks, 20 mixes, restarts, dropped answers; every counter above all before it, all envelopes open, the checks at the key hook).
 - `test_seal` checks the sealed settings records against the Python vectors (vector 7, `tests/generated/vectors.h`): the same bytes
   both ways, every byte covered by the tag, wrong name, context and key, short and long records, new nonce at every seal.
 - `test_e2e` also covers the device side of forward secrecy against a model of the collector: the mix both ways up to generation
@@ -334,12 +364,14 @@ without the library).
   a write that fails at every site (the 40 writes of a 420-step run, each failed once: no (generation, counter) used twice, the
   restarted node holds the state of its flash and talks), the power-loss replay (a snapshot of the flash after every write; from each one
   a restart, no (generation, counter) used again, the node talks to the collector as it was just before the next write, also across a
-  mix), adaptive blocks and the stored chain key, time-bound epochs, triggers and retry timing, provisioning again, a damaged or
+  mix), adaptive blocks (doubling, halving, the cap, flash wear at 50 messages a second) and the stored chain key, the age of the generation (restarts without a wall
+  clock, a clock that appears late), the wipe of the caller's copy at init, a generation 0 record in a build without X25519, the error of a failing key hook,
+  time-bound epochs, triggers and retry timing, provisioning again, a damaged or
   foreign record, and the transcript of vector 6 replayed on the device (the Python side as the collector: the device makes the same
   bytes).
 
 `test_ratchet.c` and `test_secure.c` also check the generation 0 bytes and the refusals of the kind byte. The same test files run with the Zephyr backend (PSA, Mbed TLS) on `native_sim`: `NRF/tests/secure` (`test_secure`) and
 `NRF/tests/secure_settings` (the settings storage: names, sizes, restart, erase; a second build with sealing and the fixed-key
 provider: sealed names, a record that is changed or does not belong, another key, a failing provider, the migration of the plain key
-and its deletion at the confirmation, a damaged plain key)
+and its deletion at the confirmation, a damaged plain key, the key id of the ratchet record as tie-breaker between two keys, a marker that cannot be written or deleted)
 (`make twister`).

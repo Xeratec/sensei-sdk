@@ -357,7 +357,7 @@ int sensei_secure_seal(struct sensei_secure *s, enum sensei_secure_kind kind, co
 
     if (s->ring.tx_key(s->ring.user, ctr, &gen, gkey) != 0) {
       wipe(gkey, sizeof(gkey));
-      return SENSEI_SECURE_ERR_GEN;
+      return SENSEI_SECURE_ERR_TXKEY;
     }
     if (gen != 0) {
       if (s->c->aead_import(s->c->ctx, gkey, &tmp) != 0) {

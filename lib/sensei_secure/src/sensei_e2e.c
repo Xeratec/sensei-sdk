@@ -31,6 +31,8 @@ int sensei_e2e_errno(int err) {
     return -ENOTCONN;
   case SENSEI_SECURE_ERR_SENDER:
     return -ENOMEM; /* sender table full */
+  case SENSEI_SECURE_ERR_TXKEY:
+    return -EPROTO; /* the node has no key for the counter (the chain failed): not a refusal of a peer */
   default:
     return -EIO;
   }
@@ -66,7 +68,7 @@ static uint32_t now_unix(const struct sensei_e2e *e) { return e->ops->unix_s ? e
 static bool ratchet_ok(const struct sensei_e2e *e) { return sensei_ratchet_available(e->c); }
 
 /* ---- the ratchet record e2e_rat (version 1, 156 B, integers little endian) ----
- *   0  u8 version (1)        1  u8 flags: bit 0 prev, bit 1 pending      2  u16 0
+ *   0  u8 version (1)        1  u8 flags: bit 0 prev, bit 1 pending      2  u16 age of the generation, hours
  *   4  u32 key_id            8  u32 gen          12 u32 gen_start_unix
  *  16  root[32]             48  k_down[16]
  *  64  u32 up_base          68  u32 up_idx       72  up_ck[32]
@@ -76,11 +78,25 @@ static bool ratchet_ok(const struct sensei_e2e *e) { return sensei_ratchet_avail
 #define RAT_VERSION 1u
 #define RAT_PREV 1u
 #define RAT_PENDING 2u
+#define AGE_MAX 0xFFFFu /* 7.4 years */
+
+/* Age of the generation in hours, rounded up (a mix may come a little early, never late), at most AGE_MAX. The uptime
+ * counts from the load: the age that was stored then is part of gen_start_up (rat_decode). */
+static uint16_t gen_age_h(const struct sensei_e2e *e, const struct sensei_e2e_rat *r) {
+  uint32_t s = now_up(e) - r->gen_start_up; /* modular: gen_start_up may lie "before" the boot */
+  uint32_t h = s / 3600u + (s % 3600u != 0u ? 1u : 0u);
+
+  return (uint16_t)(h > AGE_MAX ? AGE_MAX : h);
+}
 
 static void rat_encode(const struct sensei_e2e *e, const struct sensei_e2e_rat *r, uint8_t rec[SENSEI_E2E_RAT_SIZE]) {
+  uint16_t age = gen_age_h(e, r);
+
   memset(rec, 0, SENSEI_E2E_RAT_SIZE);
   rec[0] = RAT_VERSION;
   rec[1] = (uint8_t)((r->prev ? RAT_PREV : 0u) | (r->pending ? RAT_PENDING : 0u));
+  rec[2] = (uint8_t)age;
+  rec[3] = (uint8_t)(age >> 8);
   put32(rec + 4, e->s.key_id);
   put32(rec + 8, r->gen);
   put32(rec + 12, r->gen_start_unix);
@@ -104,8 +120,9 @@ static void rat_encode(const struct sensei_e2e *e, const struct sensei_e2e_rat *
 static int rat_decode(const struct sensei_e2e *e, const uint8_t rec[SENSEI_E2E_RAT_SIZE], struct sensei_e2e_rat *r) {
   uint32_t gen = get32(rec + 8), up_base = get32(rec + 64), up_idx = get32(rec + 68), pend = get32(rec + 120);
   uint8_t flags = rec[1];
+  uint32_t age_h = (uint32_t)rec[2] | ((uint32_t)rec[3] << 8);
 
-  if (rec[0] != RAT_VERSION || (flags & ~(RAT_PREV | RAT_PENDING)) != 0 || rec[2] != 0 || rec[3] != 0) {
+  if (rec[0] != RAT_VERSION || (flags & ~(RAT_PREV | RAT_PENDING)) != 0) {
     return -EBADMSG;
   }
   if (get32(rec + 4) != e->s.key_id) {
@@ -121,6 +138,7 @@ static int rat_decode(const struct sensei_e2e *e, const uint8_t rec[SENSEI_E2E_R
   memset(r, 0, sizeof(*r));
   r->gen = gen;
   r->gen_start_unix = get32(rec + 12);
+  r->gen_start_up = now_up(e) - age_h * 3600u; /* the generation started this long before now (a write is the clock) */
   memcpy(r->root, rec + 16, 32);
   r->prev = (flags & RAT_PREV) != 0;
   r->pending = (flags & RAT_PENDING) != 0;
@@ -137,7 +155,9 @@ static int rat_decode(const struct sensei_e2e *e, const uint8_t rec[SENSEI_E2E_R
   return 0;
 }
 
-/* Store the record of state r (the state in RAM follows once this returned 0). */
+/* Store the record of state r (the state in RAM follows once this returned 0). Every write carries the age of the
+ * generation, so a node that restarts often still counts the time of the generation (up to the time since the last
+ * write). */
 static int rat_save(struct sensei_e2e *e, const struct sensei_e2e_rat *r) {
   int err = 0;
 
@@ -172,8 +192,18 @@ static int ring_tx_key(void *user, uint32_t counter, uint32_t *gen, uint8_t key[
   struct sensei_e2e *e = user;
 
   *gen = e->r.gen;
+  /* The counter and the chain key are in flash before a key is given out: the counter is at or below the stored mark,
+   * and the stored chain index is at or below the epoch in use. Not reached; a node that gets here has a bug, and it
+   * does not send. */
+  if (counter > e->nv.tx_reserved) {
+    return -EINVAL;
+  }
   if (e->r.gen == 0) {
     return 0;
+  }
+  if (!e->flash_idx_valid || sensei_ratchet_epoch(counter) < e->r.up.up_base ||
+      e->flash_idx > sensei_ratchet_epoch(counter) - e->r.up.up_base) {
+    return -EINVAL;
   }
   return sensei_ratchet_chain_key(e->c, &e->r.up, counter, true, SENSEI_RATCHET_MAX_SKIP, key);
 }
@@ -203,18 +233,28 @@ static int ring_rx_key(void *user, bool ratchet, unsigned gen_bits, uint32_t cou
 }
 
 /* The counters are persisted in blocks of whole epochs. The block of the counter first ends at the end of its epoch
- * (res = first | 63), or 16 epochs later if the last persist is less than a minute ago (streaming). From generation 1
- * on the chain key of the first epoch of the block goes to flash before the counter mark: a crash in between leaves the
- * old mark (nothing of the block was used) and a key that is not behind it. */
+ * (res = first | 63). While the persists come less than a minute apart (streaming) the block doubles every time, up to
+ * SENSEI_E2E_BLOCK_EPOCHS_MAX epochs, so that the flash is written about once a minute at most, whatever the rate; a
+ * persist after a minute or more halves it (a slow sender comes down to one epoch, a fast one stays near the size that
+ * lasts a minute); a restart starts with one epoch. The price: the chain key in flash covers the
+ * epochs of the block that were sent already, up to SENSEI_E2E_BLOCK_EPOCHS_MAX * 64 messages are open to someone who
+ * reads the flash. From generation 1 on the chain key of the first epoch of the block goes to flash before the counter
+ * mark: a crash in between leaves the old mark (nothing of the block was used) and a key that is not behind it. */
 static int ring_tx_block(void *user, uint32_t first, uint32_t *reserved) {
   struct sensei_e2e *e = user;
   uint32_t t = now_up(e);
   uint64_t res = (uint64_t)(first | 63u);
+  uint32_t epochs = 1u;
   int err;
 
-  if (e->persist_seen && (uint32_t)(t - e->persist_t) < SENSEI_E2E_PERSIST_FAST_S) {
-    res += (uint64_t)(SENSEI_E2E_BLOCK_EPOCHS - 1u) * SENSEI_RATCHET_EPOCH_SIZE;
+  if (e->persist_seen) {
+    if ((uint32_t)(t - e->persist_t) < SENSEI_E2E_PERSIST_FAST_S) {
+      epochs = e->block_epochs * 2u > SENSEI_E2E_BLOCK_EPOCHS_MAX ? SENSEI_E2E_BLOCK_EPOCHS_MAX : e->block_epochs * 2u;
+    } else {
+      epochs = e->block_epochs > 1u ? e->block_epochs / 2u : 1u;
+    }
   }
+  res += (uint64_t)(epochs - 1u) * SENSEI_RATCHET_EPOCH_SIZE;
   if (res > CTR_MAX) {
     res = CTR_MAX;
   }
@@ -242,6 +282,7 @@ static int ring_tx_block(void *user, uint32_t first, uint32_t *reserved) {
     return err;
   }
   e->nv.tx_reserved = (uint32_t)res;
+  e->block_epochs = epochs;
   e->persist_seen = true;
   e->persist_t = t;
   *reserved = (uint32_t)res;
@@ -317,6 +358,27 @@ static int derive_keys(struct sensei_e2e *e, const uint8_t *backend_pub, struct 
   return err ? -EINVAL : 0;
 }
 
+int sensei_e2e_key_id_of(const struct sensei_secure_crypto *c, const uint8_t priv[SENSEI_SECURE_PRIV_SIZE],
+                         const uint8_t backend_pub[SENSEI_SECURE_PUB_SIZE], uint32_t *key_id) {
+  sensei_secure_key_t own = 0;
+  struct sensei_secure_keys keys;
+  uint8_t pub[SENSEI_SECURE_PUB_SIZE];
+  int err = -EIO;
+
+  if (c->ecdh_import(c->ctx, priv, SENSEI_SECURE_PRIV_SIZE, &own) != 0) {
+    return -EIO;
+  }
+  if (c->ecdh_public(c->ctx, own, pub) == 0) {
+    err = sensei_secure_derive(c, own, SENSEI_SECURE_ROLE_NODE, pub, backend_pub, &keys) == 0 ? 0 : -EINVAL;
+    if (err == 0) {
+      *key_id = keys.key_id;
+    }
+    wipe(&keys, sizeof(keys));
+  }
+  (void)c->key_destroy(c->ctx, own);
+  return err;
+}
+
 /* Open the session on the static keys. The counters (nv) do not depend on the key: a new key goes on above the sent
  * high-water mark, and the senders keep their windows. r.gen 0: R_0 of these keys is taken. */
 static int open_session(struct sensei_e2e *e, const struct sensei_secure_keys *keys) {
@@ -371,12 +433,18 @@ static void rat_load(struct sensei_e2e *e) {
   if (rc == 1) { /* a record of an old key: ignored, the next save replaces it */
     return;
   }
+  if (rc == 0 && r.gen == 0 && !ratchet_ok(e)) {
+    /* A generation 0 record only holds a request that is pending: a build without the ratchet never asks, and no key
+     * depends on it. It is dropped (the next save or provisioning replaces it); only a state of generation 1 or later
+     * must not be run as generation 0. */
+    wipe(&r, sizeof(r));
+    return;
+  }
   if (rc != 0 || !ratchet_ok(e)) { /* a record that is not valid, or one this build cannot use: no fallback */
     e->damaged = true;
     wipe(&r, sizeof(r));
     return;
   }
-  r.gen_start_up = now_up(e);
   if (r.pending && sensei_ratchet_public(e->c, r.pend_priv, r.pend_pub) != 0) {
     e->damaged = true;
     wipe(&r, sizeof(r));
@@ -437,11 +505,16 @@ static int init_body(struct sensei_e2e *e, const struct sensei_secure_crypto *c,
 }
 
 int sensei_e2e_init(struct sensei_e2e *e, const struct sensei_secure_crypto *c, const struct sensei_e2e_ops *ops,
-                    void *user, const struct sensei_e2e_nv *nv, uint32_t ctr_step) {
+                    void *user, struct sensei_e2e_nv *nv, uint32_t ctr_step) {
   int err = init_body(e, c, ops, user, nv, ctr_step);
 
-  wipe(e->nv.rat, sizeof(e->nv.rat)); /* the secrets of the generation are in e->r now */
+  /* The secrets are in e now (e->r, e->nv.priv): the caller's copy goes, so that it does not keep R_g, the chain key,
+   * the downlink key, the pending key or the private key in RAM. The flags stay. */
+  wipe(e->nv.rat, sizeof(e->nv.rat));
   e->nv.have_rat = false;
+  wipe(nv->rat, sizeof(nv->rat));
+  nv->have_rat = false;
+  wipe(nv->priv, sizeof(nv->priv));
   return err;
 }
 
@@ -678,7 +751,11 @@ static bool rekey_trigger(struct sensei_e2e *e) {
   }
   unix_now = now_unix(e);
   if (unix_now != 0 && e->r.gen_start_unix == 0) {
-    e->r.gen_start_unix = unix_now; /* the clock was not set when the generation started; stored with the next record */
+    /* The clock was not set when the generation started: back-date the start by the age (the stored age and the
+     * uptime of this boot). Stored with the next record. */
+    uint32_t age_s = now_up(e) - e->r.gen_start_up;
+
+    e->r.gen_start_unix = unix_now > age_s ? unix_now - age_s : 1u;
   }
   if (unix_now != 0 && e->r.gen_start_unix != 0 && unix_now >= e->r.gen_start_unix) {
     return (uint64_t)(unix_now - e->r.gen_start_unix) >= period;

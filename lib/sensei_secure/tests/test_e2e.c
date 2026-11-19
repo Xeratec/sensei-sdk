@@ -22,7 +22,7 @@ static const struct sensei_secure_crypto *C;
  * keeps a snapshot of the flash after each write (snap_on) for the power-loss replay. */
 static struct sensei_e2e_nv flash;
 static int erased, fail_tx, fail_rx, fail_floor, fail_priv, fail_erase, fail_rat, fail_backend;
-static int write_count, fail_at;
+static int write_count, fail_at, tx_writes;
 #define MAX_SNAP 2048
 static struct sensei_e2e_nv *snaps; /* where write_done() puts them */
 static int n_snaps;
@@ -80,6 +80,7 @@ static int f_tx(void *u, uint32_t r) {
     return -EIO;
   }
   flash.tx_reserved = r;
+  tx_writes++;
   write_done();
   return 0;
 }
@@ -716,7 +717,7 @@ static void test_reset_then_provision_is_refused_while_dirty(void) {
  */
 
 #define RSENDER 0x0C0C0C0Cu
-#define MAX_GEN 16
+#define MAX_GEN 32
 
 struct head { /* the uplink chain and downlink key of one generation */
   bool have;
@@ -930,7 +931,9 @@ static int coll_seal_down(struct collector *col, uint32_t sender, const uint8_t 
   return n;
 }
 
-/* ---- the history of what the node sealed: (generation, counter) must be unique, and every envelope must open ---- */
+/* ---- the history of what the node sealed: the counter must be unique (alone: the nonce is (direction, sender,
+ * counter), so a counter under two generations is a reuse of the nonce under a key that may be the same), and every
+ * envelope must open ---- */
 
 struct hist {
   uint32_t gen, ctr;
@@ -942,7 +945,7 @@ static int n_hist;
 static bool hist_unique(int from, int to) {
   for (int i = from; i < to; i++) {
     for (int j = 0; j < i; j++) {
-      if (hist[i].gen == hist[j].gen && hist[i].ctr == hist[j].ctr) {
+      if (hist[i].ctr == hist[j].ctr) {
         return false;
       }
     }
@@ -1008,6 +1011,37 @@ static int deliver(struct sensei_e2e *e, struct collector *col, const struct ans
   return sensei_e2e_rekey_answer(e, a->gen, a->pub, 32, a->up_base);
 }
 
+/* The check at the key hook of the session (L-5): when the hook is asked for a key, the counter is at or below the mark
+ * in flash (e2e_tx) and, from generation 1 on, the chain index in the record in flash is at or below the epoch of the
+ * counter and the record is the one of the generation in use. The wrapper goes in before every seal of cycle(). */
+static int (*chk_orig)(void *, uint32_t, uint32_t *, uint8_t[16]);
+static long chk_calls;
+
+static int chk_tx_key(void *u, uint32_t counter, uint32_t *gen, uint8_t key[16]) {
+  const struct sensei_e2e *e = u;
+  int rc = chk_orig(u, counter, gen, key);
+
+  chk_calls++;
+  CHECK(counter <= flash.tx_reserved);
+  if (rc == 0 && *gen != 0) {
+    uint32_t idx = (uint32_t)flash.rat[68] | ((uint32_t)flash.rat[69] << 8) | ((uint32_t)flash.rat[70] << 16) |
+                   ((uint32_t)flash.rat[71] << 24);
+    uint32_t fgen = (uint32_t)flash.rat[8] | ((uint32_t)flash.rat[9] << 8) | ((uint32_t)flash.rat[10] << 16) |
+                    ((uint32_t)flash.rat[11] << 24);
+
+    CHECK(flash.have_rat && fgen == *gen);
+    CHECK(sensei_ratchet_epoch(counter) >= e->r.up.up_base && idx <= sensei_ratchet_epoch(counter) - e->r.up.up_base);
+  }
+  return rc;
+}
+
+static void hook_check_install(struct sensei_e2e *e) {
+  if (e->s.ring.tx_key != NULL && e->s.ring.tx_key != chk_tx_key) {
+    chk_orig = e->s.ring.tx_key;
+    e->s.ring.tx_key = chk_tx_key;
+  }
+}
+
 /* One uplink: the node asks for a request, appends it, seals; the collector opens it and answers a request. The answer
  * is delivered unless drop. Returns the sealed length (negative: the seal failed), and what happened in *what:
  * bit 0 request sent, bit 1 answer delivered and the node switched. */
@@ -1021,6 +1055,7 @@ static int cycle(struct sensei_e2e *e, struct collector *col, bool drop, unsigne
     *what = 0;
   }
   memset(pl, 0x42, 24);
+  hook_check_install(e);
   m = sensei_e2e_seal(e, SENSEI_SECURE_KIND_UPLINK, pl, plen, env, sizeof(env));
   if (m < 0) {
     if (rl > 0) {
@@ -1435,8 +1470,9 @@ static void test_fs_power_loss(void) {
   snaps = NULL;
 }
 
-/* Blocks of whole epochs: one epoch if the last persist is a minute ago or more, 16 if it is less (streaming); the
- * mark ends on an epoch boundary, and the chain key of the first epoch of the block is stored with it. */
+/* Blocks of whole epochs: half the last block (at least one epoch) if the last persist is a minute ago or more, twice
+ * the last block if it is less (streaming), up to SENSEI_E2E_BLOCK_EPOCHS_MAX; one epoch after a start; the mark ends
+ * on an epoch boundary, and the chain key of the first epoch of the block is stored with it. */
 static void test_fs_blocks(void) {
   struct sensei_e2e e;
   struct collector col;
@@ -1452,43 +1488,70 @@ static void test_fs_blocks(void) {
   to_gen(&e, &col, 1);
   up_base = e.r.up.up_base;
   CHECK(up_base == 1);
-  /* the first seal of generation 1 is at counter 64, less than a minute after the last persist: 16 epochs */
+  /* the first seal of generation 1 is at counter 64, less than a minute after the last persist: 2 epochs */
   t_up = 30;
   CHECK(sensei_e2e_seal(&e, SENSEI_SECURE_KIND_UPLINK, pl, sizeof(pl), env, sizeof(env)) > 0);
-  CHECK(env_counter(env) == 64 || env_counter(env) > 64);
-  CHECK((flash.tx_reserved & 63u) == 63u);
+  CHECK(env_counter(env) == 64);
+  CHECK((flash.tx_reserved & 63u) == 63u && flash.tx_reserved == 64u * 3u - 1u && e.block_epochs == 2u);
+  /* run through blocks with different gaps and look at the written state: a fast persist doubles, a slow one halves */
   {
-    uint32_t first = env_counter(env), res = flash.tx_reserved;
+    uint32_t prev = 2;
 
-    /* the block from the persist at counter 64 ... or a later one: its length is one epoch or 16 */
-    CHECK(res >= (first | 63u) && (res - (first | 63u)) % 64u == 0);
-  }
-  /* run through blocks with different gaps and look at the written state */
-  for (int round = 0; round < 6; round++) {
-    uint32_t res = flash.tx_reserved, first, nres;
-    uint32_t span;
+    for (int round = 0; round < 6; round++) {
+      uint32_t res = flash.tx_reserved, first, nres;
+      uint32_t span;
 
-    CHECK(sensei_secure_tx_jump(&e.s, res + 1) == 0); /* the start of the next block */
-    t_up += round % 2 ? 100 : 20;                     /* a minute or more since the last persist, or less */
-    CHECK(sensei_e2e_seal(&e, SENSEI_SECURE_KIND_UPLINK, pl, sizeof(pl), env, sizeof(env)) > 0);
-    first = env_counter(env);
-    nres = flash.tx_reserved;
-    CHECK(first == res + 1 && nres > res);
-    span = (nres - (first | 63u)) / 64u + 1u;
-    CHECK((nres & 63u) == 63u && (round % 2 ? span == 1u : span == 16u));
-    /* the chain key of the first epoch of the block is in flash: up_idx and up_ck */
-    idx = (uint32_t)flash.rat[68] | ((uint32_t)flash.rat[69] << 8) | ((uint32_t)flash.rat[70] << 16);
-    CHECK(idx == sensei_ratchet_epoch(first) - up_base);
-    hp = col.has_next ? &col.n_head : &col.head[1];
-    CHECK(hp->have);
-    {
-      struct sensei_ratchet_chain ch;
+      CHECK(sensei_secure_tx_jump(&e.s, res + 1) == 0); /* the start of the next block */
+      t_up += round % 2 ? 100 : 20;                     /* a minute or more since the last persist, or less */
+      CHECK(sensei_e2e_seal(&e, SENSEI_SECURE_KIND_UPLINK, pl, sizeof(pl), env, sizeof(env)) > 0);
+      first = env_counter(env);
+      nres = flash.tx_reserved;
+      CHECK(first == res + 1 && nres > res);
+      span = (nres - (first | 63u)) / 64u + 1u;
+      CHECK((nres & 63u) == 63u && span == (round % 2 ? (prev > 1u ? prev / 2u : 1u) : 2u * prev) &&
+            e.block_epochs == span);
+      prev = span;
+      /* the chain key of the first epoch of the block is in flash: up_idx and up_ck */
+      idx = (uint32_t)flash.rat[68] | ((uint32_t)flash.rat[69] << 8) | ((uint32_t)flash.rat[70] << 16);
+      CHECK(idx == sensei_ratchet_epoch(first) - up_base);
+      hp = col.has_next ? &col.n_head : &col.head[1];
+      CHECK(hp->have);
+      {
+        struct sensei_ratchet_chain ch;
 
-      sensei_ratchet_chain_init(&ch, hp->ck0, hp->up_base);
-      CHECK(sensei_ratchet_chain_advance(C, &ch, idx, SENSEI_RATCHET_MAX_SKIP) == 0);
-      memcpy(mk_ck, ch.ck, 32);
+        sensei_ratchet_chain_init(&ch, hp->ck0, hp->up_base);
+        CHECK(sensei_ratchet_chain_advance(C, &ch, idx, SENSEI_RATCHET_MAX_SKIP) == 0);
+        memcpy(mk_ck, ch.ck, 32);
+      }
+      CHECK(memcmp(flash.rat + 72, mk_ck, 32) == 0);
     }
-    CHECK(memcmp(flash.rat + 72, mk_ck, 32) == 0);
+  }
+  /* streaming: persists less than a minute apart keep doubling, up to the cap, and stay there; later ones halve it */
+  {
+    uint32_t prev = e.block_epochs;
+
+    for (int round = 0; round < 14; round++) {
+      uint32_t res = flash.tx_reserved,
+               want = 2u * prev > SENSEI_E2E_BLOCK_EPOCHS_MAX ? SENSEI_E2E_BLOCK_EPOCHS_MAX : 2u * prev;
+
+      CHECK(sensei_secure_tx_jump(&e.s, res + 1) == 0);
+      t_up += 2;
+      CHECK(sensei_e2e_seal(&e, SENSEI_SECURE_KIND_UPLINK, pl, sizeof(pl), env, sizeof(env)) > 0);
+      CHECK(e.block_epochs == want && flash.tx_reserved == ((env_counter(env) | 63u) + (want - 1u) * 64u));
+      prev = want;
+    }
+    CHECK(prev == SENSEI_E2E_BLOCK_EPOCHS_MAX);
+    CHECK(sensei_secure_tx_jump(&e.s, flash.tx_reserved + 1) == 0);
+    t_up += SENSEI_E2E_PERSIST_FAST_S;
+    CHECK(sensei_e2e_seal(&e, SENSEI_SECURE_KIND_UPLINK, pl, sizeof(pl), env, sizeof(env)) > 0 &&
+          e.block_epochs == SENSEI_E2E_BLOCK_EPOCHS_MAX / 2u);
+    /* a slow sender comes down to one epoch */
+    for (int k = 0; k < 11; k++) {
+      CHECK(sensei_secure_tx_jump(&e.s, flash.tx_reserved + 1) == 0);
+      t_up += SENSEI_E2E_PERSIST_FAST_S;
+      CHECK(sensei_e2e_seal(&e, SENSEI_SECURE_KIND_UPLINK, pl, sizeof(pl), env, sizeof(env)) > 0);
+    }
+    CHECK(e.block_epochs == 1u);
   }
   /* a restart resumes above the mark, on an epoch boundary, and the key of that epoch comes out of the stored one */
   {
@@ -1684,7 +1747,7 @@ static void test_fs_reprovision(void) {
   CHECK(hist_unique(0, n_hist));
 }
 
-/* The mark is far ahead of the counter (a block of 16 epochs) when the request is made: up_base is above the mark, the
+/* The mark is far ahead of the counter (a block of 8 epochs) when the request is made: up_base is above the mark, the
  * first counter of the new generation is above the mark too, and a restart right after the switch (the flash holds the
  * new state and the old mark) puts the node at that counter, not below it (the chain cannot serve an epoch before
  * up_base). */
@@ -1700,9 +1763,13 @@ static void test_fs_mark_ahead(void) {
   setup(&e, &col, &b);
   CHECK(sensei_e2e_seal(&e, SENSEI_SECURE_KIND_UPLINK, pl, sizeof(pl), env, sizeof(env)) > 0); /* [1 .. 63] */
   CHECK(sensei_secure_tx_jump(&e.s, 64) == 0);
-  CHECK(sensei_e2e_seal(&e, SENSEI_SECURE_KIND_UPLINK, pl, sizeof(pl), env, sizeof(env)) > 0); /* 16 epochs, t = 0 */
+  CHECK(sensei_e2e_seal(&e, SENSEI_SECURE_KIND_UPLINK, pl, sizeof(pl), env, sizeof(env)) > 0); /* 2 epochs, t = 0 */
+  CHECK(sensei_secure_tx_jump(&e.s, flash.tx_reserved + 1) == 0);
+  CHECK(sensei_e2e_seal(&e, SENSEI_SECURE_KIND_UPLINK, pl, sizeof(pl), env, sizeof(env)) > 0); /* 4 epochs */
+  CHECK(sensei_secure_tx_jump(&e.s, flash.tx_reserved + 1) == 0);
+  CHECK(sensei_e2e_seal(&e, SENSEI_SECURE_KIND_UPLINK, pl, sizeof(pl), env, sizeof(env)) > 0); /* 8 epochs */
   res = flash.tx_reserved;
-  CHECK(res == 64 * 17 - 1); /* 64 | 63 = 127, and 15 more epochs */
+  CHECK(res == 64 * 15 - 1); /* [64 .. 191] [192 .. 447] [448 .. 959] */
   rl = sensei_e2e_rekey_due(&e, req, sizeof(req));
   CHECK(rl > 0 && e.r.pend_up_base == sensei_ratchet_epoch(res) + 1);
   CHECK(coll_answer(&col, req, (size_t)rl, &a) && sensei_e2e_rekey_answer(&e, a.gen, a.pub, 32, a.up_base) == 0);
@@ -1755,7 +1822,7 @@ static void test_fs_damaged(void) {
   CHECK(e2.damaged);
   CHECK(sensei_e2e_provision(&e2, b.pub, 65) == 0 && !e2.damaged && sensei_e2e_gen(&e2) == 0);
   CHECK(sensei_e2e_seal(&e2, SENSEI_SECURE_KIND_UPLINK, pl, 8, env, 100) > 0);
-  /* a record that opened but is not valid: version, flags, reserved bytes, fields */
+  /* a record that opened but is not valid: version, flags, fields */
   for (int i = 0; i < 6; i++) {
     flash = saved;
     switch (i) {
@@ -1765,8 +1832,9 @@ static void test_fs_damaged(void) {
     case 1:
       flash.rat[1] |= 0x80;
       break;
-    case 2:
-      flash.rat[2] = 1;
+    case 2: /* a pending request with up_base 0 */
+      flash.rat[1] |= 2;
+      memset(flash.rat + 120, 0, 4);
       break;
     case 3: /* generation 1 with up_base 0 */
       flash.rat[64] = flash.rat[65] = flash.rat[66] = flash.rat[67] = 0;
@@ -1872,6 +1940,289 @@ static void test_fs_transcript(void) {
   }
 }
 
+/* L-2: flash wear under fast streaming: 100 000 messages at 50 a second (2000 s) write the counter mark about once a
+ * minute at most once the block has grown; blocks of at most 16 epochs (1024 counters) would write it 98 times. */
+static void test_fs_wear(void) {
+  struct sensei_e2e e;
+  struct collector col;
+  struct backend b;
+  uint8_t pl[8] = {1}, env[100];
+
+  setup(&e, &col, &b);
+  to_gen(&e, &col, 1);
+  tx_writes = 0;
+  for (int i = 0; i < 100000; i++) {
+    if (i % 50 == 49) {
+      t_up += 1;
+    }
+    CHECK(sensei_e2e_seal(&e, SENSEI_SECURE_KIND_UPLINK, pl, sizeof(pl), env, sizeof(env)) > 0);
+  }
+  printf("wear: %d counter writes for 100000 messages in 2000 s\n", tx_writes);
+  CHECK(tx_writes <= 2000 / 60 + 15 && tx_writes < 98 / 2);
+  /* a restart goes on above the mark */
+  {
+    struct sensei_e2e e2;
+    uint32_t res = flash.tx_reserved;
+
+    node_boot(&e2);
+    CHECK(sensei_e2e_seal(&e2, SENSEI_SECURE_KIND_UPLINK, pl, sizeof(pl), env, sizeof(env)) > 0);
+    CHECK(env_counter(env) > e.s.tx_last && env_counter(env) == res + 1);
+  }
+}
+
+static uint32_t rec_age_h(void) { return (uint32_t)flash.rat[2] | ((uint32_t)flash.rat[3] << 8); }
+
+/* M-1: the record carries the age of the generation (hours, rounded up, written with every write of the record); a
+ * restart takes it back, so a node that restarts more often than the period and has no wall clock still mixes; a clock
+ * that appears after the switch back-dates the start of the generation by the age. */
+static void test_fs_age(void) {
+  struct sensei_e2e e, e2;
+  struct collector col;
+  struct backend b;
+  uint8_t pl[8] = {1}, env[100], req[SENSEI_E2E_REKEY_MAX];
+  int boots = 0;
+
+  /* the age in the record: 0 at the switch, then every write has it */
+  setup(&e, &col, &b);
+  t_unix = 0;
+  to_gen(&e, &col, 1);
+  CHECK(rec_age_h() == 0);
+  t_up = 5u * 3600u + 10u;
+  CHECK(sensei_e2e_rekey_now(&e) == 0);
+  CHECK(rec_age_h() == 6); /* rounded up */
+  t_up = 6u * 3600u;
+  CHECK(sensei_e2e_seal(&e, SENSEI_SECURE_KIND_UPLINK, pl, sizeof(pl), env, sizeof(env)) > 0);
+  node_boot(&e2); /* a restart: the generation started 6 h before (the record said 6 h) */
+  CHECK(e2.r.gen_start_up == t_up - 6u * 3600u);
+  t_up += 100;
+  CHECK(sensei_e2e_rekey_now(&e2) == -EALREADY);
+  /* the age is capped at 65535 h and a stored age of 0 (a record of an earlier version) loads as a new generation */
+  flash.rat[2] = 0xFF;
+  flash.rat[3] = 0xFF;
+  node_boot(&e2);
+  CHECK(e2.r.gen_start_up == t_up - 0xFFFFu * 3600u);
+  flash.rat[2] = flash.rat[3] = 0;
+  node_boot(&e2);
+  CHECK(e2.r.gen_start_up == t_up);
+
+  /* no wall clock, a restart every 6 days: the mix still comes (the old code counted the uptime of one boot: never) */
+  setup(&e, &col, &b);
+  t_unix = 0;
+  to_gen(&e, &col, 1);
+  CHECK(cycle(&e, &col, false, NULL) > 0);
+  for (int boot = 0; boot < 3; boot++) {
+    int rl;
+
+    t_up = 0; /* a start: the uptime begins again */
+    node_boot(&e2);
+    boots++;
+    if (boot == 1) { /* 6 days of the first boot are in the record, the second boot is a day old: 7 days */
+      t_up = 86400u - 1u;
+      CHECK(sensei_e2e_rekey_due(&e2, req, sizeof(req)) == 0);
+      t_up = 86400u;
+      rl = sensei_e2e_rekey_due(&e2, req, sizeof(req));
+      CHECK(rl > 0 && e2.r.pending);
+      break;
+    }
+    for (int day = 1; day <= 6; day++) {
+      t_up = (uint32_t)day * 86400u; /* the epoch of a day is over: a new epoch, so the record is written again */
+      CHECK(sensei_e2e_seal(&e2, SENSEI_SECURE_KIND_UPLINK, pl, sizeof(pl), env, sizeof(env)) > 0);
+      CHECK(rec_age_h() == (uint32_t)day * 24u + (uint32_t)boot * 144u);
+      CHECK(sensei_e2e_rekey_due(&e2, req, sizeof(req)) == 0);
+    }
+  }
+  CHECK(boots == 2);
+
+  /* the clock appears after the switch: the start of the generation is back-dated by the age, so the period counts
+   * from the switch and not from the moment the clock came */
+  setup(&e, &col, &b);
+  t_unix = 0;
+  to_gen(&e, &col, 1);
+  CHECK(e.r.gen_start_unix == 0);
+  t_up = 3u * 86400u;
+  t_unix = 1800000000u;
+  CHECK(sensei_e2e_rekey_due(&e, req, sizeof(req)) == 0);
+  CHECK(e.r.gen_start_unix == 1800000000u - 3u * 86400u);
+  t_up += 4u * 86400u - 1u;
+  t_unix += 4u * 86400u - 1u;
+  CHECK(sensei_e2e_rekey_due(&e, req, sizeof(req)) == 0);
+  t_up += 1;
+  t_unix += 1;
+  CHECK(sensei_e2e_rekey_due(&e, req, sizeof(req)) > 0);
+  /* a clock that is smaller than the age: the start is 1, not a wrap */
+  setup(&e, &col, &b);
+  t_unix = 0;
+  to_gen(&e, &col, 1);
+  t_up = 3u * 86400u;
+  t_unix = 100;
+  CHECK(sensei_e2e_rekey_due(&e, req, sizeof(req)) == 0 && e.r.gen_start_unix == 1);
+}
+
+/* M-2: init wipes the caller's copy of the secrets; the node still works, and the caller's flags stay. */
+static void test_fs_init_wipes(void) {
+  struct sensei_e2e e, e2;
+  struct collector col;
+  struct backend b;
+  struct sensei_e2e_nv nv;
+  uint8_t zero[sizeof(nv.rat)] = {0}, pl[8] = {1}, env[100];
+  uint8_t priv[32];
+
+  setup(&e, &col, &b);
+  to_gen(&e, &col, 1);
+  memcpy(priv, flash.priv, 32);
+  nv = flash;
+  CHECK(nv.have_rat && nv.rat[0] == 1 && memcmp(nv.priv, priv, 32) == 0);
+  CHECK(sensei_e2e_init(&e2, C, &ops, NULL, &nv, 64) == 0);
+  CHECK(memcmp(nv.rat, zero, sizeof(nv.rat)) == 0 && !nv.have_rat);
+  CHECK(memcmp(nv.priv, zero, 32) == 0 && nv.have_priv && nv.have_backend);
+  CHECK(sensei_e2e_gen(&e2) == 1 &&
+        sensei_e2e_seal(&e2, SENSEI_SECURE_KIND_UPLINK, pl, sizeof(pl), env, sizeof(env)) > 0);
+  CHECK(memcmp(e2.nv.rat, zero, sizeof(nv.rat)) == 0 && memcmp(e2.nv.priv, priv, 32) == 0);
+  /* also when the init fails (a key that cannot be used) */
+  nv = flash;
+  nv.key_unreadable = true;
+  CHECK(sensei_e2e_init(&e2, C, &ops, NULL, &nv, 64) == -EACCES);
+  CHECK(memcmp(nv.rat, zero, sizeof(nv.rat)) == 0 && memcmp(nv.priv, zero, 32) == 0);
+  /* and when the record is unusable */
+  nv = flash;
+  nv.rat[0] = 9;
+  CHECK(sensei_e2e_init(&e2, C, &ops, NULL, &nv, 64) == 0 && e2.damaged);
+  CHECK(memcmp(nv.rat, zero, sizeof(nv.rat)) == 0 && memcmp(nv.priv, zero, 32) == 0);
+}
+
+/* L-1: a build without the ratchet drops a generation 0 record that only holds a pending request. */
+static void test_fs_no_ratchet_pending(void) {
+  struct sensei_e2e e, e2;
+  struct collector col;
+  struct backend b;
+  struct sensei_secure_crypto c2 = *C;
+  struct sensei_e2e_nv nv;
+  uint8_t pl[8] = {1}, env[100], req[SENSEI_E2E_REKEY_MAX];
+
+  setup(&e, &col, &b);
+  CHECK(sensei_e2e_rekey_due(&e, req, sizeof(req)) > 0 && e.r.pending && flash.have_rat);
+  c2.x25519 = NULL;
+  nv = flash;
+  CHECK(sensei_e2e_init(&e2, &c2, &ops, NULL, &nv, 64) == 0);
+  CHECK(!e2.damaged && sensei_e2e_gen(&e2) == 0 && !e2.r.pending);
+  CHECK(sensei_e2e_seal(&e2, SENSEI_SECURE_KIND_UPLINK, pl, sizeof(pl), env, sizeof(env)) > 0);
+  CHECK(!sensei_secure_is_ratchet(env) && sensei_e2e_rekey_due(&e2, req, sizeof(req)) == 0);
+  /* a build with the ratchet takes the same record as before */
+  node_boot(&e2);
+  CHECK(!e2.damaged && e2.r.pending && sensei_e2e_gen(&e2) == 0);
+  /* a record of generation 1 is not dropped: damaged */
+  sensei_e2e_rekey_unsent(&e);
+  to_gen(&e, &col, 1);
+  nv = flash;
+  CHECK(sensei_e2e_init(&e2, &c2, &ops, NULL, &nv, 64) == 0 && e2.damaged);
+  /* provisioning again clears the old pending record in the build without the ratchet too */
+  setup(&e, &col, &b);
+  CHECK(sensei_e2e_rekey_due(&e, req, sizeof(req)) > 0 && flash.have_rat);
+  nv = flash;
+  CHECK(sensei_e2e_init(&e2, &c2, &ops, NULL, &nv, 64) == 0 && !e2.damaged);
+  CHECK(sensei_e2e_provision(&e2, b.pub, 65) == 0 && !flash.have_rat && !e2.damaged);
+}
+
+/* I-4: a failing key hook is its own error, and the checks at the hook hold the line. */
+static void test_fs_tx_key_error(void) {
+  struct sensei_e2e e;
+  struct collector col;
+  struct backend b;
+  uint8_t pl[8] = {1}, env[100];
+  uint32_t last, res, fidx;
+
+  CHECK(sensei_e2e_errno(SENSEI_SECURE_ERR_TXKEY) == -EPROTO);
+  setup(&e, &col, &b);
+  to_gen(&e, &col, 1);
+  CHECK(sensei_e2e_seal(&e, SENSEI_SECURE_KIND_UPLINK, pl, sizeof(pl), env, sizeof(env)) > 0);
+  last = e.s.tx_last;
+  /* a counter above the stored mark never gets a key */
+  res = e.nv.tx_reserved;
+  e.nv.tx_reserved = last;
+  CHECK(sensei_e2e_seal(&e, SENSEI_SECURE_KIND_UPLINK, pl, sizeof(pl), env, sizeof(env)) == -EPROTO);
+  CHECK(e.s.tx_last == last);
+  e.nv.tx_reserved = res;
+  /* a chain key in flash that is ahead of the epoch in use never gets a key either */
+  fidx = e.flash_idx;
+  e.flash_idx = fidx + 1000;
+  CHECK(sensei_e2e_seal(&e, SENSEI_SECURE_KIND_UPLINK, pl, sizeof(pl), env, sizeof(env)) == -EPROTO);
+  e.flash_idx_valid = false;
+  CHECK(sensei_e2e_seal(&e, SENSEI_SECURE_KIND_UPLINK, pl, sizeof(pl), env, sizeof(env)) == -EPROTO);
+  e.flash_idx = fidx;
+  e.flash_idx_valid = true;
+  CHECK(sensei_e2e_seal(&e, SENSEI_SECURE_KIND_UPLINK, pl, sizeof(pl), env, sizeof(env)) > 0 &&
+        env_counter(env) == last + 1);
+}
+
+/* L-5: the design's property through sensei_e2e and the collector model: 100 000 uplinks, 20 mixes (by the request of
+ * the node, some answers dropped), restarts, bursts and pauses. Every envelope opens at the collector; the counter is
+ * above every counter before it (so no (key, nonce) pair twice); the check at the key hook runs for every seal
+ * (chk_tx_key); the flash is written about once a minute while streaming. */
+static void test_fs_property(void) {
+  struct sensei_e2e e;
+  struct collector col;
+  struct backend b;
+  uint32_t top = 0, gen_seen = 0, first_mix_msg = 0;
+  long msgs = 0, writes0;
+  int mixes = 0;
+  unsigned what;
+
+  setup(&e, &col, &b);
+  hook_check_install(&e);
+  chk_calls = 0;
+  writes0 = write_count;
+  for (long i = 0; i < 100000; i++) {
+    int m;
+
+    if (i % 20 == 19) {
+      t_up += 1; /* 20 messages a second */
+    }
+    if (i % 7000 == 6999) {
+      t_up += 300; /* a pause: the next block is half the size */
+    }
+    if (i % 9000 == 8999) {
+      node_reboot(&e);
+      hook_check_install(&e);
+    }
+    if (i % 5000 == 2500 && sensei_e2e_gen(&e) != 0 && mixes < 20) {
+      int rc = sensei_e2e_rekey_now(&e);
+
+      CHECK(rc == 0 || rc == -EALREADY);
+    }
+    m = cycle(&e, &col, i % 13 == 5, &what); /* some answers are dropped; the request is sent again after retry_h */
+    CHECK(m > 0);
+    if (m > 0) {
+      uint32_t c = hist[n_hist - 1].ctr;
+
+      CHECK(c > top);
+      top = c;
+      msgs++;
+    }
+    if (n_hist == MAX_HIST) {
+      n_hist = 0; /* only the last counter is needed: it is checked against top */
+    }
+    if (what & 2u) {
+      mixes++;
+      if (!first_mix_msg) {
+        first_mix_msg = (uint32_t)i;
+      }
+    }
+    if (sensei_e2e_gen(&e) < gen_seen) {
+      CHECK(0);
+    }
+    gen_seen = sensei_e2e_gen(&e);
+    if (what & 1u && i % 13 == 5) {
+      t_up += SENSEI_E2E_REKEY_RETRY_H * 3600u; /* the answer was dropped: the request is sent again */
+    }
+  }
+  printf("property: %ld messages, %d mixes, generation %u, %ld key hook calls, %ld flash writes\n", msgs, mixes,
+         sensei_e2e_gen(&e), chk_calls, (long)(write_count - writes0));
+  CHECK(msgs == 100000 && mixes >= 20 && sensei_e2e_gen(&e) >= 20);
+  CHECK(chk_calls >= msgs);
+  /* the wear of the counters is checked in test_fs_wear; here the writes of the mixes, answers, restarts add up */
+  CHECK(write_count - writes0 < 400);
+}
+
 int main(void) {
   C = sensei_secure_crypto_openssl();
   test_first_start();
@@ -1900,6 +2251,12 @@ int main(void) {
   test_fs_reprovision();
   test_fs_damaged();
   test_fs_transcript();
+  test_fs_wear();
+  test_fs_age();
+  test_fs_init_wipes();
+  test_fs_no_ratchet_pending();
+  test_fs_tx_key_error();
   test_fs_power_loss();
+  test_fs_property();
   return CHECK_DONE();
 }

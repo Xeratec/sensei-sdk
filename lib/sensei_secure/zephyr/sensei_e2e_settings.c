@@ -14,6 +14,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/settings/settings.h>
+#include <zephyr/sys/atomic.h>
 
 #ifdef CONFIG_SENSEI_SECURE_SETTINGS_CONFIRM_ON_OTA
 #include "ota/sensei_ota.h"
@@ -44,8 +45,12 @@ static void wipe(void *p, size_t n) {
   }
 }
 
-/* A plain e2e_priv is still stored next to the sealed key and may be deleted (sensei_e2e_settings_confirm()). */
-static bool plain_pending;
+/* A plain e2e_priv is still stored next to the sealed key and may be deleted (sensei_e2e_settings_confirm()). The flag
+ * is read and written by the key store thread and by the thread that confirms the image: atomic. */
+static atomic_t plain_pending_flag;
+
+#define plain_pending_get() (atomic_get(&plain_pending_flag) != 0)
+#define plain_pending_set(v) ((void)atomic_set(&plain_pending_flag, (v) ? 1 : 0))
 
 #ifdef CONFIG_SENSEI_SECURE_SETTINGS_SEAL
 
@@ -184,6 +189,8 @@ static void key_fp(const uint8_t priv[SENSEI_SECURE_PRIV_SIZE], uint8_t fp[MRK_S
   }
 }
 
+/* A marker that names another key than the sealed one would make a plain key of a later downgrade look older than it
+ * is. If the new marker cannot be written, the old one goes (no marker: the plain key is taken for the newer one). */
 static void write_marker(const uint8_t priv[SENSEI_SECURE_PRIV_SIZE]) {
   uint8_t fp[MRK_SIZE];
   int err;
@@ -192,6 +199,10 @@ static void write_marker(const uint8_t priv[SENSEI_SECURE_PRIV_SIZE]) {
   err = settings_save_one(PFX "/" NAME_MRK, fp, sizeof(fp));
   if (err) {
     LOG_WRN("key marker not written: %d", err);
+    err = settings_delete(PFX "/" NAME_MRK);
+    if (err) {
+      LOG_ERR("old key marker not deleted: %d", err);
+    }
   }
 }
 #endif
@@ -213,9 +224,16 @@ static int save_priv(void *u, const uint8_t *priv) {
     LOG_ERR("plain key record not deleted: %d", err);
     return err;
   }
+  /* The marker names the key that was sealed last: the old one goes before the new key is written, so that it never
+   * names a key that is not the sealed one (a failed marker write below leaves none, not a stale one). */
+  err = settings_delete(PFX "/" NAME_MRK);
+  if (err) {
+    LOG_ERR("old key marker not deleted: %d", err);
+    return err;
+  }
   err = settings_save_one(PFX "/" NAME_PRIVX, rec, (size_t)n);
   if (err == 0) {
-    plain_pending = false;
+    plain_pending_set(false);
     write_marker(priv);
   }
   return err;
@@ -295,7 +313,7 @@ static int erase(void *u) {
       return err;
     }
   }
-  plain_pending = false;
+  plain_pending_set(false);
   return 0;
 }
 
@@ -406,6 +424,12 @@ static int migrate(struct load *l) {
   int err = n < 0 ? n : 0;
   bool written = false;
 
+  if (err == 0) { /* the old marker goes first (see save_priv()) */
+    err = settings_delete(PFX "/" NAME_MRK);
+    if (err) {
+      LOG_ERR("old key marker not deleted: %d", err);
+    }
+  }
   if (err == 0) {
     err = settings_save_one(PFX "/" NAME_PRIVX, rec, (size_t)n);
     written = err == 0;
@@ -430,7 +454,7 @@ static int migrate(struct load *l) {
   if (err) {
     LOG_ERR("key migration failed: %d (the plain key stays)", err);
   } else {
-    plain_pending = true;
+    plain_pending_set(true);
     write_marker(nv->priv);
     LOG_INF("private key sealed (e2e_privx); the plain record stays until the image is confirmed");
   }
@@ -445,27 +469,51 @@ static bool marker_matches(const struct load *l, const uint8_t priv[SENSEI_SECUR
   return l->have_mrk && memcmp(l->mrk, fp, MRK_SIZE) == 0;
 }
 
+/* Two stored keys, the plain one valid and different from the sealed one: which one does the ratchet record belong to?
+ * The record starts with its key id; the key id of a key is derived with the collector key. A key whose id is the one
+ * in the record is the key that talked last. 1: the plain key, -1: the sealed key, 0: the record tells nothing (none,
+ * no collector key, both or none match). */
+static int rat_tiebreak(const struct load *l, const struct sensei_e2e_nv *nv,
+                        const uint8_t sealed[SENSEI_SECURE_PRIV_SIZE]) {
+  const struct sensei_secure_crypto *c = sensei_secure_crypto_zephyr();
+  uint32_t rec_id, id_plain, id_sealed;
+
+  if (!l->have_rat || !nv->have_backend) {
+    return 0;
+  }
+  rec_id = (uint32_t)l->rat[0] | ((uint32_t)l->rat[1] << 8) | ((uint32_t)l->rat[2] << 16) | ((uint32_t)l->rat[3] << 24);
+  if (sensei_e2e_key_id_of(c, nv->priv, nv->backend_pub, &id_plain) != 0 ||
+      sensei_e2e_key_id_of(c, sealed, nv->backend_pub, &id_sealed) != 0 || id_plain == id_sealed) {
+    return 0;
+  }
+  return rec_id == id_plain ? 1 : (rec_id == id_sealed ? -1 : 0);
+}
+
 /* Settle the private key of the node: open the sealed record, or migrate the plain one. */
 static int resolve_priv(struct load *l) {
   struct sensei_e2e_nv *nv = l->nv;
   int n;
 
-  plain_pending = false;
+  plain_pending_set(false);
   if (l->have_privx || l->bad_privx) {
     uint8_t key[SENSEI_SECURE_PRIV_SIZE];
 
     n = l->have_privx ? sensei_e2e_settings_unseal(NAME_PRIVX, l->privx, sizeof(l->privx), key, sizeof(key)) : -EBADMSG;
     if (n == (int)sizeof(key)) {
       if (l->have_plain && memcmp(key, nv->priv, sizeof(key)) != 0) {
-        if (!sensei_secure_priv_valid(nv->priv)) { /* the plain record is damaged, not a key: the sealed one stands */
+        bool plain_ok = sensei_secure_priv_valid(nv->priv);
+        int tb = plain_ok ? rat_tiebreak(l, nv, key) : 0;
+
+        if (!plain_ok) { /* the plain record is damaged, not a key: the sealed one stands */
           LOG_WRN("plain key record is not a valid key, the sealed key stands");
           memcpy(nv->priv, key, sizeof(key));
           wipe(key, sizeof(key));
-          plain_pending = true;
-        } else if (l->have_mrk && !marker_matches(l, key)) {
-          /* The marker names another key than the sealed one: the sealed key was written after this firmware last
-           * sealed, by one that does not write the marker (the first keys-at-rest image seals first and ignores a
-           * failed delete). The plain key is the older one: the sealed key stands and the plain record goes now. */
+          plain_pending_set(true);
+        } else if (tb < 0 || (tb == 0 && l->have_mrk && !marker_matches(l, key))) {
+          /* The ratchet record belongs to the sealed key, or (no help from it) the marker names another key than the
+           * sealed one: the sealed key was written after this firmware last sealed, by one that does not write the
+           * marker (the first keys-at-rest image seals first and ignores a failed delete). The plain key is the older
+           * one: the sealed key stands and the plain record goes now. */
           LOG_WRN("plain key next to a newer sealed key: the sealed key stands");
           n = settings_delete(PFX "/" NAME_PRIV);
           memcpy(nv->priv, key, sizeof(key));
@@ -474,14 +522,15 @@ static int resolve_priv(struct load *l) {
             write_marker(nv->priv);
           } else {
             LOG_ERR("plain key record not deleted: %d", n);
-            plain_pending = true;
+            plain_pending_set(true);
           }
         } else {
-          /* Both records, different keys, and the marker names the sealed key (or there is none): an older firmware
-           * made a new plain key after the key was sealed (downgrade, then upgrade). This firmware deletes the plain
-           * record before it writes a new sealed key, so a plain key next to its own sealed key is the newer one: the
-           * collector was provisioned for it. Seal it again. Without a marker the sealed key may come from the first
-           * keys-at-rest image, which can leave an older plain key behind: this case is not told apart. */
+          /* Both records, different keys, and the ratchet record belongs to the plain key, or it tells nothing and the
+           * marker names the sealed key (or there is none): an older firmware made a new plain key after the key was
+           * sealed (downgrade, then upgrade). This firmware deletes the plain record before it writes a new sealed key,
+           * so a plain key next to its own sealed key is the newer one: the collector was provisioned for it. Seal it
+           * again. Without a marker and without a record the sealed key may come from the first keys-at-rest image,
+           * which can leave an older plain key behind: this case is not told apart. */
           LOG_WRN("plain key next to a different sealed key: the plain key is newer, sealing it again");
           wipe(key, sizeof(key));
           n = migrate(l);
@@ -492,7 +541,7 @@ static int resolve_priv(struct load *l) {
           }
         }
       } else {
-        plain_pending = l->have_plain; /* the same key twice: the migration of an image that is not confirmed yet */
+        plain_pending_set(l->have_plain); /* the same key twice: the migration of an image that is not confirmed yet */
         memcpy(nv->priv, key, sizeof(key));
         wipe(key, sizeof(key));
         if (!marker_matches(l, nv->priv)) {
@@ -533,7 +582,7 @@ static int resolve_priv(struct load *l) {
 int sensei_e2e_settings_confirm(void) {
   int err;
 
-  if (!plain_pending) {
+  if (!plain_pending_get()) {
     return 0;
   }
   err = settings_delete(PFX "/" NAME_PRIV);
@@ -541,17 +590,17 @@ int sensei_e2e_settings_confirm(void) {
     LOG_ERR("plain key record not deleted: %d (it stays until the next try)", err);
     return err;
   }
-  plain_pending = false;
+  plain_pending_set(false);
   LOG_INF("plain key record deleted");
   return 0;
 }
 
-bool sensei_e2e_settings_plain_pending(void) { return plain_pending; }
+bool sensei_e2e_settings_plain_pending(void) { return plain_pending_get(); }
 
 #else
 
 static int resolve_priv(struct load *l) {
-  plain_pending = false;
+  plain_pending_set(false);
   l->nv->have_priv = l->have_plain; /* a sealed record is ignored without sealing */
   return 0;
 }
@@ -594,9 +643,20 @@ static void resolve_rat(struct load *l) {
 }
 
 #if defined(CONFIG_SENSEI_SECURE_SETTINGS_CONFIRM_ON_OTA)
+/* The OTA module calls the hook from the system work queue (or the thread that confirms). The delete can block for the
+ * time of a garbage collection of the settings (NVS erases a sector), so it runs on a work queue of its own. */
+static K_THREAD_STACK_DEFINE(confirm_stack, CONFIG_SENSEI_SECURE_SETTINGS_CONFIRM_STACK_SIZE);
+static struct k_work_q confirm_q;
+static struct k_work confirm_work;
+
+static void confirm_work_fn(struct k_work *work) {
+  ARG_UNUSED(work);
+  (void)sensei_e2e_settings_confirm();
+}
+
 static void ota_confirmed(void *user) {
   ARG_UNUSED(user);
-  (void)sensei_e2e_settings_confirm();
+  (void)k_work_submit_to_queue(&confirm_q, &confirm_work);
 }
 #endif
 
@@ -622,8 +682,16 @@ int sensei_e2e_settings_load(struct sensei_e2e_nv *nv) {
 #if defined(CONFIG_SENSEI_SECURE_SETTINGS_CONFIRM_ON_OTA)
     /* The OTA module calls this when the running image is confirmed (also at once if it is already), whatever the
      * way: the node, an SMP confirm of the host, a start of a confirmed image. */
-    static bool registered;
+    static bool queue_started, registered;
 
+    if (!queue_started) {
+      k_work_queue_init(&confirm_q);
+      k_work_queue_start(&confirm_q, confirm_stack, K_THREAD_STACK_SIZEOF(confirm_stack),
+                         K_LOWEST_APPLICATION_THREAD_PRIO, NULL);
+      k_thread_name_set(&confirm_q.thread, "sensei_e2e_confirm");
+      k_work_init(&confirm_work, confirm_work_fn);
+      queue_started = true;
+    }
     if (!registered) {
       registered = sensei_ota_on_confirmed(ota_confirmed, NULL) == 0;
     }

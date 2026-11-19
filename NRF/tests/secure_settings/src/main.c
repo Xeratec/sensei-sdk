@@ -31,6 +31,26 @@
 
 static const struct sensei_secure_crypto *C;
 
+/* Failing writes and deletes (CMakeLists.txt wraps the two calls): a name that ends with fail_save / fail_delete gets
+ * -EIO instead of the real call. */
+extern int __real_settings_save_one(const char *name, const void *value, size_t val_len);
+extern int __real_settings_delete(const char *name);
+static const char *fail_save, *fail_delete;
+
+static bool name_ends(const char *name, const char *suffix) {
+  size_t n = strlen(name), m = suffix ? strlen(suffix) : 0;
+
+  return m != 0 && n >= m && strcmp(name + n - m, suffix) == 0;
+}
+
+int __wrap_settings_save_one(const char *name, const void *value, size_t val_len) {
+  return name_ends(name, fail_save) ? -EIO : __real_settings_save_one(name, value, val_len);
+}
+
+int __wrap_settings_delete(const char *name) {
+  return name_ends(name, fail_delete) ? -EIO : __real_settings_delete(name);
+}
+
 struct names {
   size_t len_priv, len_privx, len_rat, len_mrk, len_bpub, len_tx, len_rxs, len_rxf, other;
 };
@@ -86,6 +106,7 @@ static const uint8_t KEY_B[16] = {'B', 'B', 'B', 'B', 'B', 'B', 'B', 'B', 'B', '
 
 static void before(void *fixture) {
   ARG_UNUSED(fixture);
+  fail_save = fail_delete = NULL;
 #ifdef CONFIG_SENSEI_SECURE_SETTINGS_SEAL
   sensei_e2e_testkey_set(KEY_A);
   sensei_e2e_settings_seal_close();
@@ -115,6 +136,14 @@ static void boot(struct sensei_e2e *e) {
   boot_rc(e, &nv, &lrc, &irc);
   zassert_equal(lrc, 0);
   zassert_equal(irc, 0);
+  /* sensei_e2e_init() wiped the caller's copy of the key and of the ratchet state (the module has its own) */
+  for (size_t i = 0; i < sizeof(nv.priv); i++) {
+    zassert_equal(nv.priv[i], 0);
+  }
+  for (size_t i = 0; i < sizeof(nv.rat); i++) {
+    zassert_equal(nv.rat[i], 0);
+  }
+  zassert_false(nv.have_rat);
 }
 
 /* Free the PSA keys of a session (the key slots are few). */
@@ -1214,6 +1243,135 @@ ZTEST(secure_settings, test_without_a_marker_the_plain_key_is_the_newer_one) {
   zassert_mem_equal(e2.node_pub, pub_b, sizeof(pub_b));
   expect_marker_of(priv_b);
   stop(&e2);
+}
+
+/* A node with the collector provisioned and a ratchet record (generation 0, a request pending) for its key. */
+static void provisioned_with_record(struct sensei_e2e *e, struct backend *b, uint8_t priv[32], uint8_t pub[65]) {
+  uint8_t req[SENSEI_E2E_REKEY_MAX];
+
+  boot(e);
+  backend_session(b, e->node_pub);
+  zassert_equal(sensei_e2e_provision(e, b->pub, sizeof(b->pub)), 0);
+  zassert_true(sensei_e2e_rekey_due(e, req, sizeof(req)) > 0);
+  memcpy(priv, e->nv.priv, 32);
+  memcpy(pub, e->node_pub, 65);
+  stop(e);
+  sensei_secure_close(&b->s);
+}
+
+/* Two different keys are stored, the plain one a valid key: the key id in the ratchet record names the current one.
+ * The marker names another key than the sealed one (it is stale), which alone would make the sealed key win; the record
+ * belongs to the plain key, so it wins and the pending request survives. */
+ZTEST(secure_settings, test_the_rat_record_decides_for_the_plain_key_against_the_marker) {
+  struct sensei_e2e e, e2;
+  struct backend b;
+  uint8_t priv_b[32], pub_b[65], priv_a[32], pub_a[65], rec[SEALED_LEN], fp[4];
+
+  provisioned_with_record(&e, &b, priv_b, pub_b); /* key B: the record and the collector key are for B */
+  zassert_equal(sensei_secure_keygen(C, priv_a, pub_a), 0);
+  zassert_equal(sensei_e2e_settings_seal("e2e_privx", priv_a, sizeof(priv_a), rec, sizeof(rec)), SEALED_LEN);
+  zassert_equal(settings_save_one(PREFIX "/e2e_privx", rec, sizeof(rec)), 0); /* an older sealed key A */
+  marker_of(priv_a, fp);
+  fp[0] ^= 0xFF; /* a marker of some third key: not the sealed one */
+  zassert_equal(settings_save_one(PREFIX "/e2e_mrk", fp, sizeof(fp)), 0);
+  zassert_equal(settings_save_one(PREFIX "/e2e_priv", priv_b, sizeof(priv_b)), 0);
+  boot(&e2);
+  zassert_mem_equal(e2.node_pub, pub_b, sizeof(pub_b), "the key of the record");
+  zassert_false(e2.damaged);
+  zassert_true(e2.r.pending, "the record of B is in use");
+  expect_marker_of(priv_b);
+  stop(&e2);
+}
+
+/* The same state with the marker that names the sealed key: the rule "a plain key next to its own sealed key is the
+ * newer one" would take the plain key; the record belongs to the sealed key, so it stands and the plain record goes. */
+ZTEST(secure_settings, test_the_rat_record_decides_for_the_sealed_key_against_the_marker) {
+  struct sensei_e2e e, e2;
+  struct backend b;
+  uint8_t priv_a[32], pub_a[65], priv_b[32], pub_b[65];
+
+  provisioned_with_record(&e, &b, priv_a, pub_a); /* the sealed key A, marker A, record of A */
+  zassert_equal(sensei_secure_keygen(C, priv_b, pub_b), 0);
+  zassert_equal(settings_save_one(PREFIX "/e2e_priv", priv_b, sizeof(priv_b)), 0);
+  boot(&e2);
+  zassert_mem_equal(e2.node_pub, pub_a, sizeof(pub_a), "the key of the record");
+  zassert_true(e2.r.pending && !e2.damaged);
+  zassert_equal(stored().len_priv, 0, "the plain key is deleted");
+  expect_marker_of(priv_a);
+  stop(&e2);
+}
+
+/* L-3: the migration of a plain key writes the new marker after the key. If that fails, the old marker (it names the
+ * key that was sealed before) must not stay: a later plain key would then look older than the sealed one and be lost.
+ */
+ZTEST(secure_settings, test_a_failed_marker_write_leaves_no_stale_marker) {
+  struct sensei_e2e e, e2, e3;
+  uint8_t priv_b[32], pub_b[65], priv_c[32], pub_c[65];
+
+  boot(&e); /* key A, sealed, marker A */
+  stop(&e);
+  zassert_equal(sensei_secure_keygen(C, priv_b, pub_b), 0);
+  zassert_equal(settings_save_one(PREFIX "/e2e_priv", priv_b, sizeof(priv_b)), 0); /* a downgrade made key B */
+  fail_save = "e2e_mrk";
+  boot(&e2);
+  fail_save = NULL;
+  zassert_mem_equal(e2.node_pub, pub_b, sizeof(pub_b));
+  zassert_equal(stored().len_mrk, 0u, "no marker, not the one of key A");
+  stop(&e2);
+  /* a second downgrade makes key C: without a marker it is the newer one */
+  zassert_equal(sensei_secure_keygen(C, priv_c, pub_c), 0);
+  zassert_equal(settings_save_one(PREFIX "/e2e_priv", priv_c, sizeof(priv_c)), 0);
+  boot(&e3);
+  zassert_mem_equal(e3.node_pub, pub_c, sizeof(pub_c), "key C is not lost");
+  expect_marker_of(priv_c);
+  stop(&e3);
+}
+
+/* L-3: an old marker that cannot be deleted stops the new sealed key: nothing is written, no key is kept. */
+ZTEST(secure_settings, test_a_marker_that_cannot_be_deleted_stops_the_new_key) {
+  struct sensei_e2e e, e2;
+  struct sensei_e2e_nv nv;
+  uint8_t rec_before[SEALED_LEN], rec_after[SEALED_LEN], priv_b[32], pub_b[65];
+  int lrc, irc;
+
+  boot(&e); /* key A, sealed, marker A */
+  stop(&e);
+  zassert_equal(read_raw("e2e_privx", rec_before), SEALED_LEN);
+  /* a plain key B from a downgrade: the migration deletes the marker first and fails */
+  zassert_equal(sensei_secure_keygen(C, priv_b, pub_b), 0);
+  zassert_equal(settings_save_one(PREFIX "/e2e_priv", priv_b, sizeof(priv_b)), 0);
+  fail_delete = "e2e_mrk";
+  boot_rc(&e2, &nv, &lrc, &irc);
+  fail_delete = NULL;
+  zassert_not_equal(lrc, 0, "the key is not usable");
+  zassert_true(nv.key_unreadable);
+  zassert_not_equal(irc, 0);
+  zassert_equal(read_raw("e2e_privx", rec_after), SEALED_LEN);
+  zassert_mem_equal(rec_before, rec_after, SEALED_LEN, "the sealed key is untouched");
+  zassert_equal(stored().len_priv, SENSEI_SECURE_PRIV_SIZE, "and the plain key stays");
+  zassert_equal(stored().len_mrk, 4u);
+  /* the next start, with the delete working, migrates it */
+  boot(&e2);
+  stop(&e2);
+}
+
+/* Same for a new key pair of a first start. */
+ZTEST(secure_settings, test_a_new_key_pair_is_not_stored_if_the_old_marker_stays) {
+  struct sensei_e2e e;
+  struct sensei_e2e_nv nv;
+  int lrc, irc;
+
+  zassert_equal(settings_save_one(PREFIX "/e2e_mrk", (const uint8_t[]){1, 2, 3, 4}, 4), 0); /* a left-over marker */
+  fail_delete = "e2e_mrk";
+  boot_rc(&e, &nv, &lrc, &irc);
+  fail_delete = NULL;
+  zassert_equal(lrc, 0);
+  zassert_not_equal(irc, 0);
+  zassert_equal(stored().len_privx, 0u, "no key was stored");
+  zassert_false(e.nv.have_priv && e.nv.priv[0] != 0, "and none is kept");
+  boot(&e);
+  expect_marker_of(e.nv.priv);
+  stop(&e);
 }
 
 #ifdef CONFIG_SENSEI_SECURE_SETTINGS_CONFIRM_AFTER_LOAD

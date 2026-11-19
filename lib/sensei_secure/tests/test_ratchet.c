@@ -418,11 +418,11 @@ static void test_keyring(void) {
   m = sensei_secure_seal(&node, SENSEI_SECURE_KIND_UPLINK, NULL, pt, 5, env, sizeof(env));
   CHECK(sensei_secure_open(&back, 0, NULL, env, (size_t)m, pt, sizeof(pt), &n, NULL) == 0);
 
-  /* a seal hook that fails: ERR_GEN, the counter is not used, nothing is sealed */
+  /* a seal hook that fails: ERR_TXKEY, the counter is not used, nothing is sealed */
   ring = (struct sensei_secure_keyring){.tx_key = hook_tx_fail};
   sensei_secure_set_keyring(&node, &ring);
   CHECK(node.tx_last == 2);
-  CHECK(sensei_secure_seal(&node, SENSEI_SECURE_KIND_UPLINK, NULL, pt, 5, env, sizeof(env)) == SENSEI_SECURE_ERR_GEN);
+  CHECK(sensei_secure_seal(&node, SENSEI_SECURE_KIND_UPLINK, NULL, pt, 5, env, sizeof(env)) == SENSEI_SECURE_ERR_TXKEY);
   CHECK(node.tx_last == 2);
   sensei_secure_set_keyring(&node, NULL);
   CHECK(sensei_secure_seal(&node, SENSEI_SECURE_KIND_UPLINK, NULL, pt, 5, env, sizeof(env)) == 5 + 26 &&
@@ -530,8 +530,8 @@ static void test_tx_block(void) {
    * moved up (the keyring owner jumps first: after a restart or a switch of generation) */
   sensei_secure_set_keyring(&node, &ring);
   tx_fail_below = 128;
-  CHECK(sensei_secure_seal(&node, SENSEI_SECURE_KIND_UPLINK, NULL, pt, 8, env, sizeof(env)) == SENSEI_SECURE_ERR_GEN);
-  CHECK(sensei_secure_seal(&node, SENSEI_SECURE_KIND_UPLINK, NULL, pt, 8, env, sizeof(env)) == SENSEI_SECURE_ERR_GEN);
+  CHECK(sensei_secure_seal(&node, SENSEI_SECURE_KIND_UPLINK, NULL, pt, 8, env, sizeof(env)) == SENSEI_SECURE_ERR_TXKEY);
+  CHECK(sensei_secure_seal(&node, SENSEI_SECURE_KIND_UPLINK, NULL, pt, 8, env, sizeof(env)) == SENSEI_SECURE_ERR_TXKEY);
   CHECK(node.tx_last == 65);
   CHECK(sensei_secure_tx_jump(&node, 128) == 0);
   CHECK(sensei_secure_seal(&node, SENSEI_SECURE_KIND_UPLINK, NULL, pt, 8, env, sizeof(env)) > 0 && node.tx_last == 128);

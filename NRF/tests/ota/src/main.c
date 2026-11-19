@@ -16,6 +16,8 @@
  * One scenario per build (Kconfig of this folder, testcase.yaml): an image is confirmed once and a reset ends the
  * run. The reset fake never returns, as the real one: it parks the system work queue, which ends the scenario. */
 
+#include <string.h>
+
 #include <zephyr/fff.h>
 #include <zephyr/mgmt/mcumgr/mgmt/callbacks.h>
 #include <zephyr/storage/flash_map.h>
@@ -164,6 +166,17 @@ ZTEST(ota_trial, test_00_image_id_from_slot0) {
 
 #define PLAIN_KEY_NAME CONFIG_SENSEI_SECURE_SETTINGS_PREFIX "/e2e_priv"
 
+/* settings_delete() is wrapped (CMakeLists.txt): the thread that deletes the plain key record is remembered. */
+extern int __real_settings_delete(const char *name);
+static k_tid_t plain_delete_thread;
+
+int __wrap_settings_delete(const char *name) {
+  if (strcmp(name, PLAIN_KEY_NAME) == 0) {
+    plain_delete_thread = k_current_get();
+  }
+  return __real_settings_delete(name);
+}
+
 static bool plain_key_stored(void) {
   uint8_t buf[SENSEI_SECURE_PRIV_SIZE];
 
@@ -298,8 +311,16 @@ ZTEST(ota_trial, test_03_the_plain_key_goes_with_the_confirmation) {
   at_s(CONFIG_SENSEI_OTA_CONFIRM_DELAY_S + 1);
   zassert_equal(sensei_ota_state(), SENSEI_OTA_CONFIRMED);
   zassert_equal(confirmed_calls, 1);
+  /* the delete runs on a work queue of its own, a moment after the confirmation */
+  for (int i = 0; i < 100 && plain_key_stored(); i++) {
+    k_msleep(10);
+  }
   zassert_false(plain_key_stored());
   zassert_false(sensei_e2e_settings_plain_pending());
+  zassert_not_null(plain_delete_thread);
+  zassert_not_equal(plain_delete_thread, k_work_queue_thread_get(&k_sys_work_q),
+                    "not on the system work queue (the delete can wait for a garbage collection)");
+  zassert_not_equal(plain_delete_thread, k_current_get());
 }
 
 #endif /* E2E_CONFIRM */

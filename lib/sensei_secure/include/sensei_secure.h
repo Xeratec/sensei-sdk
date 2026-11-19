@@ -101,6 +101,7 @@ enum {
   SENSEI_SECURE_ERR_EPOCH = -13,  /* epoch before the start of the chain, or behind the part of it that is kept */
   SENSEI_SECURE_ERR_GAP = -14,    /* the chain would have to be walked further than the limit (MAX_SKIP epochs) */
   SENSEI_SECURE_ERR_DH = -15,     /* X25519 result is all zero (low-order public key) */
+  SENSEI_SECURE_ERR_TXKEY = -16,  /* the tx_key hook of the keyring failed (no key for the counter): nothing was sent */
 };
 
 /** Opaque key handle of the backend (a PSA key id, or a pointer in the host backend). 0 is invalid.
@@ -213,7 +214,7 @@ struct sensei_secure_keyring {
    * Called by seal after it has taken the counter, before it encrypts. Set *gen to the generation to seal in. 0: the
    * session key is used (key is not written). 1 or more: write the key of the counter (for a node: the message key of
    * the epoch of the counter, for a backend: the downlink key of the generation); the envelope gets the ratchet bits
-   * of *gen mod 4. A nonzero return fails the seal with SENSEI_SECURE_ERR_GEN (the code is not passed on); nothing is
+   * of *gen mod 4. A nonzero return fails the seal with SENSEI_SECURE_ERR_TXKEY (the code is not passed on); nothing is
    * sent and the counter is not used: the next seal takes the same counter again, so the hook must not fail for a
    * counter that the keyring cannot serve (an epoch before the chain start): move the counter up first with
    * sensei_secure_tx_jump() (after a switch of generation, after a restart). The key buffer is zero when the hook is

@@ -20,3 +20,8 @@ zephyr_ld_options(
   -Wl,--wrap=boot_is_img_confirmed
   -Wl,--wrap=boot_write_img_confirmed
   -Wl,--wrap=sys_reboot)
+
+# The e2e confirm scenario looks at the thread that deletes the plain key record (it must not be the system work queue).
+if(CONFIG_SENSEI_TEST_E2E_CONFIRM)
+  zephyr_ld_options(-Wl,--wrap=settings_delete)
+endif()

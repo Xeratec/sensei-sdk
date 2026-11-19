@@ -74,7 +74,9 @@ config SENSEI_SECURE_SPAKE2P_MBEDTLS_ECP
 	help
 	  For simulators and tests. Uses the private ECP functions of Mbed TLS (mbedtls_ecp_muladd). It is not constant time
 	  and it allocates. A real board cannot select it (the option needs the POSIX architecture), and a node image must
-	  not use it.
+	  not use it. It needs the built-in P-256 code of Mbed TLS: an image with the Bluetooth host gets the p256-m driver by
+	  default (BT_ECC implies MBEDTLS_PSA_P256M_DRIVER_ENABLED), and then the ECP module is not built and the link fails
+	  (undefined mbedtls_ecp_muladd). Set CONFIG_MBEDTLS_PSA_P256M_DRIVER_ENABLED=n in such an image.
 
 endchoice
 

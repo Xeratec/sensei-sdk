@@ -466,6 +466,139 @@ static void test_tx_jump_persists(void) {
   sensei_secure_close(&node);
 }
 
+/* ---- M3: the block of counters is decided by the caller of the session, from its first counter ---- */
+
+static int blk_calls, blk_fail, blk_len; /* blk_len: counters of the block, 0: the proposal */
+static uint32_t blk_first, blk_mark;
+static int blk(void *u, uint32_t first, uint32_t *reserved) {
+  (void)u;
+  blk_calls++;
+  blk_first = first;
+  if (blk_fail) {
+    return -1;
+  }
+  if (blk_len == -1) {
+    *reserved = first - 1; /* below the first counter: refused */
+  } else if (blk_len > 0) {
+    *reserved = first + (uint32_t)blk_len - 1;
+  }
+  blk_mark = *reserved;
+  return 0;
+}
+
+static int tx_fail_below;
+static int tx_fail_hook(void *u, uint32_t counter, uint32_t *gen, uint8_t key[16]) {
+  (void)u;
+  *gen = 1;
+  memset(key, 0x77, 16);
+  return counter < (uint32_t)tx_fail_below ? -1 : 0;
+}
+
+static void test_tx_block(void) {
+  struct sensei_secure node;
+  struct sensei_secure_keys k = fixed_keys();
+  struct sensei_secure_store st = {.tx_block = blk, .tx = store_tx};
+  struct sensei_secure_keyring ring = {.tx_key = tx_fail_hook};
+  const uint8_t pt[8] = {0};
+  uint8_t env[64];
+
+  CHECK(sensei_secure_init(&node, C, SENSEI_SECURE_ROLE_NODE, &k, 0, 0, 16, NULL, 0, &st) == 0);
+  store_calls = 0;
+  /* the proposal is first + ctr_step - 1; tx is not called when tx_block is set */
+  CHECK(sensei_secure_seal(&node, SENSEI_SECURE_KIND_UPLINK, NULL, pt, 8, env, sizeof(env)) > 0);
+  CHECK(blk_calls == 1 && blk_first == 1 && blk_mark == 16 && node.tx_reserved == 16 && store_calls == 0);
+  /* the callback sets the end of the block (an epoch boundary): counters up to it need no further call */
+  blk_len = 64 - 16; /* from counter 17: 17 .. 64 */
+  CHECK(sensei_secure_tx_jump(&node, 17) == 0);
+  CHECK(sensei_secure_seal(&node, SENSEI_SECURE_KIND_UPLINK, NULL, pt, 8, env, sizeof(env)) > 0);
+  CHECK(blk_calls == 2 && blk_first == 17 && node.tx_reserved == 64);
+  CHECK(sensei_secure_tx_jump(&node, 64) == 0 &&
+        sensei_secure_seal(&node, SENSEI_SECURE_KIND_UPLINK, NULL, pt, 8, env, sizeof(env)) > 0 && blk_calls == 2);
+  /* a failing callback: ERR_STORE, nothing used, the mark does not move */
+  blk_fail = 1;
+  CHECK(sensei_secure_seal(&node, SENSEI_SECURE_KIND_UPLINK, NULL, pt, 8, env, sizeof(env)) == SENSEI_SECURE_ERR_STORE);
+  CHECK(node.tx_last == 64 && node.tx_reserved == 64 && blk_first == 65);
+  blk_fail = 0;
+  blk_len = -1; /* a mark below the first counter */
+  CHECK(sensei_secure_seal(&node, SENSEI_SECURE_KIND_UPLINK, NULL, pt, 8, env, sizeof(env)) == SENSEI_SECURE_ERR_STORE);
+  CHECK(node.tx_last == 64 && node.tx_reserved == 64);
+  blk_len = 0;
+  CHECK(sensei_secure_seal(&node, SENSEI_SECURE_KIND_UPLINK, NULL, pt, 8, env, sizeof(env)) > 0 &&
+        node.tx_reserved == 80 && node.tx_last == 65);
+
+  /* a hook that cannot serve the counter: the seal fails and the same counter is tried again, until the counter is
+   * moved up (the keyring owner jumps first: after a restart or a switch of generation) */
+  sensei_secure_set_keyring(&node, &ring);
+  tx_fail_below = 128;
+  CHECK(sensei_secure_seal(&node, SENSEI_SECURE_KIND_UPLINK, NULL, pt, 8, env, sizeof(env)) == SENSEI_SECURE_ERR_GEN);
+  CHECK(sensei_secure_seal(&node, SENSEI_SECURE_KIND_UPLINK, NULL, pt, 8, env, sizeof(env)) == SENSEI_SECURE_ERR_GEN);
+  CHECK(node.tx_last == 65);
+  CHECK(sensei_secure_tx_jump(&node, 128) == 0);
+  CHECK(sensei_secure_seal(&node, SENSEI_SECURE_KIND_UPLINK, NULL, pt, 8, env, sizeof(env)) > 0 && node.tx_last == 128);
+  CHECK(sensei_secure_gen_bits(env) == 1);
+  sensei_secure_close(&node);
+}
+
+/* ---- L6: the key buffer is zero when a hook is called, and the codes a hook may return ---- */
+
+static int zero_tx(void *u, uint32_t counter, uint32_t *gen, uint8_t key[16]) {
+  (void)u;
+  (void)counter;
+  *gen = 1; /* returns 0 without writing the key */
+  (void)key;
+  return 0;
+}
+
+static int errno_rx(void *u, bool ratchet, unsigned bits, uint32_t counter, uint8_t key[16]) {
+  (void)u;
+  (void)ratchet;
+  (void)bits;
+  (void)counter;
+  (void)key;
+  return -5; /* -EIO: also the value of SENSEI_SECURE_ERR_SPACE */
+}
+
+static int silent_rx(void *u, bool ratchet, unsigned bits, uint32_t counter, uint8_t key[16]) {
+  (void)u;
+  (void)ratchet;
+  (void)bits;
+  (void)counter;
+  (void)key; /* returns 0 without writing the key */
+  return 0;
+}
+
+static void test_hook_contract(void) {
+  struct sensei_secure node, back;
+  struct sensei_secure_keyring nring = {.tx_key = zero_tx}, bring = {.rx_key = silent_rx};
+  const uint8_t pt[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+  uint8_t env[64], out[64], zero[16] = {0}, nonce[12] = {0};
+  sensei_secure_key_t zk = 0;
+  size_t n = 0;
+  int m;
+
+  open_session(&node, SENSEI_SECURE_ROLE_NODE, 0, 0);
+  open_session(&back, SENSEI_SECURE_ROLE_BACKEND, BSENDER, 0);
+  sensei_secure_set_keyring(&node, &nring);
+  m = sensei_secure_seal(&node, SENSEI_SECURE_KIND_UPLINK, NULL, pt, 8, env, sizeof(env));
+  CHECK(m == 8 + 26);
+  /* it was sealed under the zero key: not under stack garbage */
+  CHECK(C->aead_import(C->ctx, zero, &zk) == 0);
+  nonce[8] = 1; /* counter 1, direction 0, sender 0 */
+  CHECK(C->aead_decrypt(C->ctx, zk, nonce, env, 10, env + 10, 8 + 16, out, sizeof(out), &n) == 0 && n == 8 &&
+        memcmp(out, pt, 8) == 0);
+  C->key_destroy(C->ctx, zk);
+  /* the same on the receive side: a hook that writes nothing leaves the zero key */
+  sensei_secure_set_keyring(&back, &bring);
+  CHECK(sensei_secure_open(&back, 0, NULL, env, (size_t)m, out, sizeof(out), &n, NULL) == 0 && n == 8);
+  /* an errno is not a code of this library: it becomes ERR_GEN, not ERR_SPACE */
+  bring.rx_key = errno_rx;
+  sensei_secure_set_keyring(&back, &bring);
+  m = sensei_secure_seal(&node, SENSEI_SECURE_KIND_UPLINK, NULL, pt, 8, env, sizeof(env));
+  CHECK(sensei_secure_open(&back, 0, NULL, env, (size_t)m, out, sizeof(out), &n, NULL) == SENSEI_SECURE_ERR_GEN);
+  sensei_secure_close(&node);
+  sensei_secure_close(&back);
+}
+
 /* The reserved bit, generation bits without the ratchet bit, kinds: refused at the header. Generation 0 keeps its
  * bytes. */
 static void test_kind_byte(void) {
@@ -810,6 +943,8 @@ int main(void) {
   test_envelope_tamper();
   test_keyring();
   test_tx_jump_persists();
+  test_tx_block();
+  test_hook_contract();
   test_kind_byte();
   test_transcript();
   test_property();

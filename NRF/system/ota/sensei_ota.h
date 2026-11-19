@@ -65,6 +65,21 @@ enum sensei_ota_state sensei_ota_state(void);
 /** Make the running image permanent now. 0 on success. */
 int sensei_ota_confirm(void);
 
+/** A function that runs once the running image is confirmed (see sensei_ota_on_confirmed()). Short, does not block for
+ * long (it may run on the system work queue); the app defers longer work to its own thread. */
+typedef void (*sensei_ota_confirmed_fn)(void *user);
+
+/**
+ * Register a function that is called once when the running image becomes confirmed, whichever way:
+ * sensei_ota_confirm(), the self-confirm of the trial supervision, an SMP confirm from the host (seen within
+ * CHECK_PERIOD_S, 5 s, by the trial supervision), or at sensei_ota_init() when the image was confirmed already. A
+ * function that is registered after that moment is called at once, from this call. Holds up to 4 functions; returns 0,
+ * or -ENOMEM if the table is full. Call sensei_ota_init() at the end of the start-up, or nothing is called on a
+ * confirmed image. Use: delete state that only the old image needs (the plain key record of
+ * sensei_e2e_settings_confirm()). Any thread.
+ */
+int sensei_ota_on_confirmed(sensei_ota_confirmed_fn fn, void *user);
+
 /** First 4 bytes of the SHA-256 of the running image (the image id of mcumgr), little endian; 0 if unknown. */
 uint32_t sensei_ota_image_id(void);
 

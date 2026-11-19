@@ -16,14 +16,15 @@ config SENSEI_SECURE
 
 config SENSEI_SECURE_RATCHET
 	bool "Forward secrecy: root key, mix and uplink chain (X25519, HMAC-SHA256)"
-	default y
 	depends on SENSEI_SECURE
 	select SENSEI_CRYPTO_HMAC
 	select SENSEI_CRYPTO_X25519
 	help
-	  lib/sensei_secure/src/sensei_ratchet.c and the X25519, HMAC functions of the cipher backend. The envelope itself
-	  reads generation 1 and later (the ratchet bits of the kind byte) with or without this option, but needs a keyring
-	  for it (struct sensei_secure_keyring). Without it about 1 kB of flash less, and the node cannot mix.
+	  The X25519 and HMAC functions of the cipher backend, which the mix needs. Off by default: an application that
+	  runs the mix (the node: SENSEI_E2E_REKEY) turns it on. The envelope itself reads generation 1 and later (the ratchet
+	  bits of the kind byte) with or without this option, but needs a keyring for it (struct sensei_secure_keyring). Without
+	  it sensei_e2e never asks for a mix and stays in generation 0 (sensei_ratchet_available() is false); a stored
+	  state of generation 1 or later cannot be used then and the device refuses to talk until it is provisioned again.
 
 config SENSEI_SECURE_SETTINGS
 	bool "Keep the end-to-end keys and counters in the settings subsystem"
@@ -47,13 +48,32 @@ config SENSEI_SECURE_SETTINGS_SEAL
 	help
 	  The private key is stored as e2e_privx, a sealed record (sensei_e2e_seal.h: version, nonce, AES-128-GCM
 	  ciphertext, tag), not as plain e2e_priv. A plain e2e_priv of an earlier version is migrated at the first
-	  start: sealed, read back and checked. The plain record stays until the application calls
-	  sensei_e2e_settings_confirm() after it has confirmed the image (a trial image that MCUboot reverts finds its
-	  key); a plain record that is not a valid key is not sealed, the key store replaces it. The key comes from the function
+	  start: sealed, read back and checked. The plain record stays until the image is confirmed (the OTA module does it
+	  for the application, see below; otherwise the application calls sensei_e2e_settings_confirm() after it has
+	  confirmed the image (a trial image that MCUboot reverts finds its
+	  key)); a plain record that is not a valid key is not sealed, the key store replaces it. The key comes from the function
 	  sensei_e2e_settings_seal_key() (sensei_e2e_settings.h): one of the providers below, or the application's
 	  own. If the key is not available, or a sealed record does not open, the key store does not start
-	  (sensei_e2e_init() fails) and no new key pair is made over the old one. The name e2e_rat is reserved for
-	  the ratchet state of a later version.
+	  (sensei_e2e_init() fails) and no new key pair is made over the old one. The ratchet state e2e_rat is sealed
+	  the same way (with the key id of its key as context).
+
+config SENSEI_SECURE_SETTINGS_CONFIRM_ON_OTA
+	bool "Delete the plain key record when the OTA module confirms the image"
+	default y
+	depends on SENSEI_SECURE_SETTINGS_SEAL && SENSEI_OTA
+	help
+	  Registers sensei_e2e_settings_confirm() with sensei_ota_on_confirmed() at the first sensei_e2e_settings_load():
+	  the plain e2e_priv that the migration kept is deleted when the running image is confirmed (by the node, by an SMP
+	  confirm of the host, or at the start of an image that is confirmed already; the OTA module must be started with
+	  sensei_ota_init()). A trial image that MCUboot reverts finds its key.
+
+config SENSEI_SECURE_SETTINGS_CONFIRM_AFTER_LOAD
+	bool "Delete the plain key record right after the load (no bootloader that reverts)"
+	default y if !BOOTLOADER_MCUBOOT
+	depends on SENSEI_SECURE_SETTINGS_SEAL
+	help
+	  Without MCUboot no old image can come back, so there is nothing to wait for. With MCUboot and without
+	  SENSEI_OTA the application calls sensei_e2e_settings_confirm() after it has confirmed the image.
 
 if SENSEI_SECURE_SETTINGS_SEAL
 

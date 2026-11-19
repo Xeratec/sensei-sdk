@@ -24,6 +24,12 @@
 
 #include "ota/sensei_ota.h"
 
+#if defined(CONFIG_SENSEI_TEST_E2E_CONFIRM)
+#include <zephyr/settings/settings.h>
+
+#include "sensei_e2e_settings.h"
+#endif
+
 DEFINE_FFF_GLOBALS;
 
 FAKE_VALUE_FUNC(bool, __wrap_boot_is_img_confirmed);
@@ -53,6 +59,17 @@ void __wrap_sys_reboot(int type) {
   for (;;) {
     k_sleep(K_FOREVER); /* the real call does not return */
   }
+}
+
+/* The functions that wait for the confirmation (sensei_ota_on_confirmed()). */
+static int confirmed_calls, late_calls;
+static void confirmed_hook(void *user) {
+  zassert_equal(user, &confirmed_calls);
+  confirmed_calls++;
+}
+static void __maybe_unused late_hook(void *user) {
+  ARG_UNUSED(user);
+  late_calls++;
 }
 
 /* The app's check */
@@ -143,24 +160,75 @@ ZTEST(ota_trial, test_00_image_id_from_slot0) {
 
 /* ---- start ---- */
 
+#if defined(CONFIG_SENSEI_TEST_E2E_CONFIRM)
+
+#define PLAIN_KEY_NAME CONFIG_SENSEI_SECURE_SETTINGS_PREFIX "/e2e_priv"
+
+static bool plain_key_stored(void) {
+  uint8_t buf[SENSEI_SECURE_PRIV_SIZE];
+
+  return settings_load_one(PLAIN_KEY_NAME, buf, sizeof(buf)) == (ssize_t)sizeof(buf);
+}
+
+#endif
+
 ZTEST(ota_trial, test_01_start_on_trial) {
+#if defined(CONFIG_SENSEI_TEST_E2E_CONFIRM)
+  /* A plain key of the old firmware: the key store seals it at its first start and keeps the plain record for a revert.
+   * It registers with the OTA module (CONFIG_SENSEI_SECURE_SETTINGS_CONFIRM_ON_OTA), so the plain record goes when the
+   * image is confirmed. */
+  struct sensei_e2e_nv nv;
+  uint8_t priv[SENSEI_SECURE_PRIV_SIZE], pub[SENSEI_SECURE_PUB_SIZE];
+
+  zassert_ok(settings_subsys_init());
+  zassert_ok(sensei_secure_keygen(sensei_secure_crypto_zephyr(), priv, pub));
+  zassert_ok(settings_save_one(PLAIN_KEY_NAME, priv, sizeof(priv)));
+  zassert_ok(sensei_e2e_settings_load(&nv));
+  zassert_true(nv.have_priv && nv.priv_sealed);
+  zassert_true(sensei_e2e_settings_plain_pending());
+  zassert_true(plain_key_stored());
+#endif
+#if defined(CONFIG_SENSEI_TEST_ALREADY_CONFIRMED)
+  image_confirmed = true;
+  zassert_ok(sensei_ota_on_confirmed(confirmed_hook, &confirmed_calls));
+  zassert_equal(confirmed_calls, 0, "nothing is called before sensei_ota_init()");
+  zassert_ok(sensei_ota_init(app_check));
+  zassert_equal(sensei_ota_state(), SENSEI_OTA_CONFIRMED);
+  zassert_equal(confirmed_calls, 1, "at the start of an image that is confirmed already");
+  zassert_ok(sensei_ota_init(app_check)); /* again: not twice */
+  zassert_equal(confirmed_calls, 1);
+  zassert_ok(sensei_ota_on_confirmed(late_hook, NULL));
+  zassert_equal(late_calls, 1, "a function that registers later is called at once");
+  zassert_equal(WRITES(), 0);
+  return;
+#endif
+  zassert_ok(sensei_ota_on_confirmed(confirmed_hook, &confirmed_calls));
   zassert_equal(sensei_ota_state(), SENSEI_OTA_TRIAL);
   check_result = !IS_ENABLED(CONFIG_SENSEI_TEST_UNHEALTHY);
 #if defined(CONFIG_SENSEI_TEST_LATE_LINK)
   check_result = false;
 #endif
 #if defined(CONFIG_SENSEI_TEST_EARLY_LINK) || defined(CONFIG_SENSEI_TEST_UNHEALTHY) ||                                 \
-    defined(CONFIG_SENSEI_TEST_HOST_CONFIRM)
+    defined(CONFIG_SENSEI_TEST_HOST_CONFIRM) || defined(CONFIG_SENSEI_TEST_E2E_CONFIRM)
   smp_request(); /* before sensei_ota_init(): the hook was registered at boot */
 #endif
   zassert_ok(sensei_ota_init(app_check));
   zassert_equal(sensei_ota_state(), SENSEI_OTA_TRIAL);
   zassert_equal(WRITES(), 0);
+  zassert_equal(confirmed_calls, 0);
 }
 
 /* ---- the check starts after the delay ---- */
 
 ZTEST(ota_trial, test_02_no_check_before_the_delay) {
+#if defined(CONFIG_SENSEI_TEST_ALREADY_CONFIRMED)
+  at_s(CONFIG_SENSEI_OTA_TRIAL_TIMEOUT_S + 10);
+  zassert_equal(check_calls, 0, "a confirmed image has no trial");
+  zassert_equal(reboots, 0);
+  zassert_equal(WRITES(), 0);
+  zassert_equal(confirmed_calls, 1);
+  return;
+#endif
   at_s(CONFIG_SENSEI_OTA_CONFIRM_DELAY_S - 1);
   zassert_equal(check_calls, 0, "the check may start work: not before the delay");
   zassert_equal(WRITES(), 0);
@@ -197,6 +265,7 @@ ZTEST(ota_trial, test_04_request_confirms_and_a_failed_write_is_retried) {
   at_s(CONFIG_SENSEI_OTA_CONFIRM_DELAY_S + 28 + 10);
   zassert_equal(WRITES(), 2, "tried again");
   zassert_equal(sensei_ota_state(), SENSEI_OTA_CONFIRMED);
+  zassert_equal(confirmed_calls, 1, "called once, when the confirm write worked (not for the failed one)");
 
   /* the trial is over: no more checks, no more writes, no reset at the end of the trial time */
   calls = check_calls;
@@ -204,9 +273,36 @@ ZTEST(ota_trial, test_04_request_confirms_and_a_failed_write_is_retried) {
   zassert_equal(check_calls, calls);
   zassert_equal(WRITES(), 2);
   zassert_equal(reboots, 0);
+  zassert_equal(confirmed_calls, 1);
+  zassert_ok(sensei_ota_on_confirmed(late_hook, NULL));
+  zassert_equal(late_calls, 1, "a function that registers after the confirmation is called at once");
+  zassert_equal(confirmed_calls, 1);
+}
+
+/* The table of functions: 4 places, one used by the test above; a function is called once. */
+ZTEST(ota_trial, test_05_the_table_of_functions) {
+  zassert_ok(sensei_ota_on_confirmed(late_hook, NULL)); /* latched: called, not stored */
+  zassert_equal(late_calls, 2);
+  zassert_equal(sensei_ota_on_confirmed(NULL, NULL), -EINVAL);
 }
 
 #endif /* LATE_LINK */
+
+#if defined(CONFIG_SENSEI_TEST_E2E_CONFIRM)
+
+/* The plain key record stays during the trial and goes when the image is confirmed (the self-confirm here). */
+ZTEST(ota_trial, test_03_the_plain_key_goes_with_the_confirmation) {
+  at_s(CONFIG_SENSEI_OTA_CONFIRM_DELAY_S - 1);
+  zassert_true(plain_key_stored(), "a revert needs it");
+  zassert_true(sensei_e2e_settings_plain_pending());
+  at_s(CONFIG_SENSEI_OTA_CONFIRM_DELAY_S + 1);
+  zassert_equal(sensei_ota_state(), SENSEI_OTA_CONFIRMED);
+  zassert_equal(confirmed_calls, 1);
+  zassert_false(plain_key_stored());
+  zassert_false(sensei_e2e_settings_plain_pending());
+}
+
+#endif /* E2E_CONFIRM */
 
 #if defined(CONFIG_SENSEI_TEST_EARLY_LINK)
 
@@ -216,6 +312,7 @@ ZTEST(ota_trial, test_03_request_during_start_up_counts) {
   zassert_equal(check_calls, 1);
   zassert_equal(WRITES(), 1);
   zassert_equal(sensei_ota_state(), SENSEI_OTA_CONFIRMED);
+  zassert_equal(confirmed_calls, 1);
   at_s(CONFIG_SENSEI_OTA_CONFIRM_DELAY_S + 20);
   zassert_equal(check_calls, 1);
   zassert_equal(reboots, 0);
@@ -238,9 +335,11 @@ ZTEST(ota_trial, test_03_without_request) {
     zassert_equal(reboots, 1, "the node resets, MCUboot reverts");
     zassert_equal(reboot_type, SYS_REBOOT_COLD);
     zassert_equal(WRITES(), 0);
+    zassert_equal(confirmed_calls, 0, "reverted: never confirmed");
   } else {
     zassert_equal(WRITES(), 1);
     zassert_equal(sensei_ota_state(), SENSEI_OTA_CONFIRMED);
+    zassert_equal(confirmed_calls, 1);
     at_s(CONFIG_SENSEI_OTA_TRIAL_TIMEOUT_S + 1);
     zassert_equal(reboots, 0);
   }
@@ -261,6 +360,7 @@ ZTEST(ota_trial, test_03_check_never_passes) {
   zassert_equal(reboots, 1);
   zassert_equal(reboot_type, SYS_REBOOT_COLD);
   zassert_equal(WRITES(), 0);
+  zassert_equal(confirmed_calls, 0);
 }
 
 #endif /* UNHEALTHY */
@@ -281,6 +381,7 @@ ZTEST(ota_trial, test_03_only_the_host_confirms) {
   zassert_equal(reboots, 0, "confirmed by the host: no reset");
   zassert_equal(WRITES(), 0);
   zassert_equal(check_calls, 0);
+  zassert_equal(confirmed_calls, 1, "the supervision saw the SMP confirm and called the function");
 }
 
 #endif /* HOST_CONFIRM */

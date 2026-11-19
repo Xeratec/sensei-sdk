@@ -64,6 +64,58 @@ static int smp_hook_init(void) {
 
 SYS_INIT(smp_hook_init, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);
 
+/* Functions that wait for the confirmation. confirmed_now() runs them once; one that registers later runs at once. */
+#define MAX_CONFIRMED_HOOKS 4
+
+static struct {
+  sensei_ota_confirmed_fn fn;
+  void *user;
+} confirmed_hooks[MAX_CONFIRMED_HOOKS];
+static int n_confirmed_hooks;
+static bool confirmed_latched;
+static K_MUTEX_DEFINE(confirmed_lock);
+
+int sensei_ota_on_confirmed(sensei_ota_confirmed_fn fn, void *user) {
+  bool run;
+
+  if (fn == NULL) {
+    return -EINVAL;
+  }
+  k_mutex_lock(&confirmed_lock, K_FOREVER);
+  run = confirmed_latched;
+  if (!run) {
+    if (n_confirmed_hooks == MAX_CONFIRMED_HOOKS) {
+      k_mutex_unlock(&confirmed_lock);
+      return -ENOMEM;
+    }
+    confirmed_hooks[n_confirmed_hooks].fn = fn;
+    confirmed_hooks[n_confirmed_hooks].user = user;
+    n_confirmed_hooks++;
+  }
+  k_mutex_unlock(&confirmed_lock);
+  if (run) {
+    fn(user);
+  }
+  return 0;
+}
+
+static void confirmed_now(void) {
+  int n;
+
+  k_mutex_lock(&confirmed_lock, K_FOREVER);
+  if (confirmed_latched) {
+    k_mutex_unlock(&confirmed_lock);
+    return;
+  }
+  confirmed_latched = true;
+  n = n_confirmed_hooks;
+  n_confirmed_hooks = 0; /* they run once; the table is free again */
+  k_mutex_unlock(&confirmed_lock);
+  for (int i = 0; i < n; i++) {
+    confirmed_hooks[i].fn(confirmed_hooks[i].user);
+  }
+}
+
 enum sensei_ota_state sensei_ota_state(void) {
   return boot_is_img_confirmed() ? SENSEI_OTA_CONFIRMED : SENSEI_OTA_TRIAL;
 }
@@ -73,6 +125,7 @@ int sensei_ota_confirm(void) {
 
   if (rc == 0) {
     LOG_INF("image confirmed");
+    confirmed_now();
   } else {
     LOG_ERR("confirm failed: %d", rc);
   }
@@ -98,6 +151,7 @@ uint32_t sensei_ota_image_id(void) {
 static void trial_fn(struct k_work *work) {
   if (boot_is_img_confirmed()) { /* confirmed over SMP */
     LOG_INF("image confirmed by the host");
+    confirmed_now();
     return;
   }
   struct sensei_ota_trial_in in = {
@@ -130,6 +184,7 @@ static void trial_fn(struct k_work *work) {
 int sensei_ota_init(sensei_ota_check_fn check) {
   check_fn = check;
   if (boot_is_img_confirmed()) {
+    confirmed_now();
     return 0;
   }
   LOG_WRN("image is on trial: confirm within %d s or it reverts", CONFIG_SENSEI_OTA_TRIAL_TIMEOUT_S);

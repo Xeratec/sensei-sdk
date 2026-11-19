@@ -22,6 +22,12 @@ config SENSEI_TEST_UNHEALTHY
 config SENSEI_TEST_HOST_CONFIRM
 	bool "The host confirms over SMP (use with SENSEI_OTA_CONFIRM=n)"
 
+config SENSEI_TEST_ALREADY_CONFIRMED
+	bool "The image is confirmed at the start"
+
+config SENSEI_TEST_E2E_CONFIRM
+	bool "The key store waits for the confirmation (plain key record, sensei_e2e_settings_confirm())"
+
 endchoice
 
 # BOOTLOADER_MCUBOOT (which SENSEI_OTA needs) selects USE_DT_CODE_PARTITION, and native_sim has no flash load offset

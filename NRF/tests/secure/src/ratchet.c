@@ -40,6 +40,8 @@ ZTEST(sensei_ratchet, test_envelopes) { test_envelopes(); }
 ZTEST(sensei_ratchet, test_envelope_tamper) { test_envelope_tamper(); }
 ZTEST(sensei_ratchet, test_keyring) { test_keyring(); }
 ZTEST(sensei_ratchet, test_tx_jump_persists) { test_tx_jump_persists(); }
+ZTEST(sensei_ratchet, test_tx_block) { test_tx_block(); }
+ZTEST(sensei_ratchet, test_hook_contract) { test_hook_contract(); }
 ZTEST(sensei_ratchet, test_kind_byte) { test_kind_byte(); }
 ZTEST(sensei_ratchet, test_transcript) { test_transcript(); }
 ZTEST(sensei_ratchet, test_property) { test_property(); }

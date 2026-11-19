@@ -12,6 +12,15 @@
 
 #define X25519_KEY_TYPE PSA_KEY_TYPE_ECC_KEY_PAIR(PSA_ECC_FAMILY_MONTGOMERY)
 
+/* A plain memset of a buffer that is not read again may be removed by the compiler. */
+static void wipe(void *p, size_t n) {
+  volatile uint8_t *v = (volatile uint8_t *)p;
+
+  while (n--) {
+    *v++ = 0;
+  }
+}
+
 sensei_crypto_status_t sensei_crypto_x25519(const uint8_t priv[SENSEI_CRYPTO_X25519_SIZE],
                                             const uint8_t peer[SENSEI_CRYPTO_X25519_SIZE],
                                             uint8_t out[SENSEI_CRYPTO_X25519_SIZE]) {
@@ -40,7 +49,7 @@ sensei_crypto_status_t sensei_crypto_x25519(const uint8_t priv[SENSEI_CRYPTO_X25
   psa_set_key_algorithm(&attr, PSA_ALG_ECDH);
   st = psa_import_key(&attr, scalar, sizeof(scalar), &id);
   psa_reset_key_attributes(&attr);
-  memset(scalar, 0, sizeof(scalar));
+  wipe(scalar, sizeof(scalar));
   if (st != PSA_SUCCESS) {
     return sensei_crypto_from_psa(st);
   }
@@ -65,7 +74,7 @@ sensei_crypto_status_t sensei_crypto_x25519_keygen(uint8_t priv[SENSEI_CRYPTO_X2
     st = sensei_crypto_x25519(priv, base, pub);
   }
   if (st != SENSEI_CRYPTO_OK) {
-    memset(priv, 0, SENSEI_CRYPTO_X25519_SIZE);
+    wipe(priv, SENSEI_CRYPTO_X25519_SIZE);
   }
   return st;
 }

@@ -96,6 +96,8 @@ int sensei_ratchet_mix_dh(const struct sensei_secure_crypto *c, const uint8_t ro
  * A whole mix to generation gen. role: the side that calls; own_priv is its ephemeral private key (e_N for the
  * node, e_C for the collector), the other public key is taken from e_n_pub or e_c_pub. Both public keys go into the
  * transcript. The caller erases own_priv and root (R_g) after the switch. SENSEI_SECURE_ERR_DH or _CRYPTO on failure.
+ * out is cleared first: it must not overlap root, own_priv or the public keys (root and out are different structures
+ * in every caller; passing out.root as root would read zeros).
  */
 int sensei_ratchet_mix(const struct sensei_secure_crypto *c, enum sensei_secure_role role,
                        const uint8_t own_priv[SENSEI_RATCHET_KEY_SIZE], const uint8_t root[SENSEI_RATCHET_KEY_SIZE],

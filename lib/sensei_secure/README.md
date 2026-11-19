@@ -76,6 +76,10 @@ n+4/8   4     counter   per sender, starts at 1
 - The sender persists a high-water mark every `ctr_step` messages through `store.tx`. After a reboot it sends above the
   mark, so up to `ctr_step` counters are skipped (a gap is harmless). If the write fails, the message is not sent. The mark
   belongs to the sender, not to the key: never lower it when the key changes.
+- `store.tx_block(user, first, &reserved)` replaces `tx` when set. The session passes the first counter of the block and
+  the proposal (`first + ctr_step - 1`); the callback may move the end of the block to any value `>= first`, stores it and
+  leaves the stored value in `reserved`. The device key store uses it to end blocks on an epoch boundary and to store the
+  chain key of the block with the mark. A failing callback, or a value below `first`, fails the seal with `ERR_STORE`.
 - The receiver keeps, per sender (up to `SENSEI_SECURE_MAX_SENDERS`, 8), the highest counter and a 64-bit bitmap of the 64
   counters up to it. A counter is accepted once if it is above the highest, or inside the window and not seen. Counter 0
   and anything 64 behind is dropped. The tag is checked first; the window changes only after a valid tag.
@@ -99,13 +103,15 @@ opens the session and persists the counters. No Zephyr and no allocation; the ci
   the cleared entries becomes a floor, kept in flash: from then on a downlink at or below it is refused (`-EALREADY`)
   whatever its sender, so recorded downlinks cannot be replayed. The floor only rises. A host that takes a new sender must
   go on from the counter of the device.
-- `sensei_e2e_reset()` erases the stored state and makes a new key pair.
+- `sensei_e2e_reset()` erases the stored state and makes a new key pair. If the erase fails the reset is refused and
+  `sensei_e2e_provision()` returns `-EBUSY` until a reset works (it would store a collector key for a key pair that may be
+  gone from flash).
 - The callbacks of `struct sensei_e2e_ops` are called one at a time. The RAM state follows the flash state: if a write
   fails, the call fails and the state stays as it was.
 
 Zephyr: `CONFIG_SENSEI_SECURE_SETTINGS=y` adds the storage on the settings subsystem (`sensei_e2e_settings.h`):
 `sensei_e2e_settings_ops` and `sensei_e2e_settings_load()`. The keys are `<prefix>/e2e_priv`, `e2e_bpub`, `e2e_tx`,
-`e2e_rxs` and `e2e_rxf`; the prefix is `CONFIG_SENSEI_SECURE_SETTINGS_PREFIX` (default `sensei_comm`, the one of the SENSEI
+`e2e_rxs`, `e2e_rxf` and `e2e_rat`; the prefix is `CONFIG_SENSEI_SECURE_SETTINGS_PREFIX` (default `sensei_comm`, the one of the SENSEI
 IEQ node, so a node that updates keeps its keys). Without `CONFIG_SENSEI_SECURE_SETTINGS_SEAL` the private key is plain in
 flash: protect the chip (APPROTECT) in the field. ECC needs a few kB of stack: run the calls on a thread or
 work queue with enough stack (the node uses one work queue, 6 kB).
@@ -167,7 +173,7 @@ The settings code imports the key once as a volatile PSA key and wipes the copy 
   CryptoCell library, without the flash driver lock). Without the call the first key request does it. A HUK that was only
   partly written (power cut during the very first start) gives `HW_UNIQUE_KEY_ERR_MISSING` for good: only a chip erase
   (`nrfutil device recover`) helps.
-- The name `e2e_rat` is reserved for the ratchet state of a later version (sealed the same way). `erase` deletes it.
+- `e2e_rat` is the ratchet state (sealed the same way, see "Device side of forward secrecy"); `erase` deletes it and `e2e_mrk`.
 - `sensei_e2e_settings_seal()`, `_unseal()`, `_seal_status()` and `_seal_close()` are the pieces, for the application and tests.
   Call everything from the one thread that uses the key store.
 
@@ -202,7 +208,8 @@ uplink chain: epoch(c) = c >> 6, i = epoch(c) - up_base (below 0: refused)
 - The cipher backend has three more functions: `hmac_sha256`, `x25519_keygen`, `x25519` (OpenSSL; PSA with
   `PSA_WANT_ECC_MONTGOMERY_255`, `CONFIG_SENSEI_CRYPTO_X25519` in the crypto library; Python `cryptography`). `x25519` clamps
   the scalar and ignores the top bit of u (RFC 7748). A backend without them leaves them NULL (`sensei_ratchet_available()`).
-  Zephyr: `CONFIG_SENSEI_SECURE_RATCHET` (default y) selects them and builds `sensei_ratchet.c`.
+  Zephyr: `CONFIG_SENSEI_SECURE_RATCHET` (default n: the application that mixes turns it on) selects them; `sensei_ratchet.c`
+  is always built. Without the option `sensei_ratchet_available()` is false and the key store stays in generation 0.
 - Envelope: generation 0 is unchanged byte for byte. From generation 1 on the kind byte has the ratchet bit and the generation
   mod 4 (see Envelope). `sensei_secure_kind()`, `_is_ratchet()`, `_gen_bits()` read it; `sensei_secure_peek()` reads the whole
   header without opening it (kind, generation bits, key id, sender, counter).
@@ -215,8 +222,73 @@ uplink chain: epoch(c) = c >> 6, i = epoch(c) - up_base (below 0: refused)
   returned 0.
 - `sensei_secure_tx_jump(s, next)` raises the sending counter (never lowers it): an epoch jump after a reboot or an old epoch,
   or the first epoch of a new generation (`next = 64 * up_base`).
-- Not in this version: the device state machine (request, answer, switch, flash records), the Python key store v3, the node and
-  the collector. The test `tests/test_ratchet.c` has a small model of both sides for the scripted transcript.
+- Not in this file: the device state machine (see "Device side of forward secrecy"), the Python key store v3, the node and the
+  collector. The test `tests/test_ratchet.c` has a small model of both sides for the scripted transcript.
+
+### Device side of forward secrecy (`sensei_e2e.h`)
+
+The key store runs the mix on the device. Generation 0 (after provisioning) is the static key; the node asks for a mix at
+once and from generation 1 on seals uplinks under the chain and accepts downlinks under the downlink key of its generation.
+The collector side is in the Python key store (a later phase). What the application calls:
+
+| Call | When | What |
+|---|---|---|
+| `sensei_e2e_configure(e, &cfg)` | once, after init | `rekey` (off: stays in its generation, never asks), `rekey_days` (7), `retry_h` (6), `epoch_max_s` (86400) |
+| `sensei_e2e_rekey_due(e, out, cap)` | before sealing every Uplink of kind 1 (not kind 3) | returns the encoded `Uplink.rekey` (field 14: tag `0x72`, length, `RekeyRequest{gen = 1, pub = 2, up_base = 3}`, at most `SENSEI_E2E_REKEY_MAX` = 48 B) to append to the encoded Uplink, 0 if nothing is due, or a negative errno. It starts a mix when one is due and stores it first |
+| `sensei_e2e_rekey_unsent(e)` | the Uplink was not sealed or sent | the request goes out with the next one |
+| `sensei_e2e_rekey_answer(e, gen, pub, len, up_base)` | a downlink carries `Downlink.rekey` (14), after `sensei_e2e_open()` accepted it | 0 switched, `-EALREADY` repeated or no request, `-EBADMSG` no match, `-EACCES` low-order key, or the error of the write (nothing changed) |
+| `sensei_e2e_rekey_now(e)` | a sealed `Downlink.rekey_now` (8) | creates the request now (`-EALREADY` if one is pending, `-ENOTSUP` if the node cannot mix) |
+| `sensei_e2e_gen(e)`, `sensei_e2e_status(e, &st)` | `sensei e2e status` | generation, pending, previous generation kept, damaged, up_base, up_idx, mixes and refusals since start |
+| `sensei_e2e_settings_plain_pending()` | `sensei e2e status` | a plain `e2e_priv` waits for the confirmation of the image |
+
+`ops` has three more members: `save_rat` (store the 156 B plain record as one atomic write, NULL record: delete),
+`uptime_s` (monotonic seconds) and `unix_s` (wall clock, 0 if not set). Without a clock the time rules stand still.
+`sensei_e2e_settings_ops` has them: uptime from the kernel, the wall clock from `sensei_e2e_unix_time()`, a weak function that
+returns 0; the application (the node) defines it.
+
+- **Trigger.** Generation 0 after provisioning (at once); `rekey_days` since the generation started (wall clock, or
+  uptime from the start of the boot if the clock is not set); a chain of 4096 epochs; `sensei_e2e_rekey_now()`. A pending
+  request is returned again after `retry_h` hours and at the first call after a start; there is no give-up.
+- **Request.** A new X25519 key, `up_base = max(epoch(mark) + 1, up_base of this generation + 1)` (above every counter that
+  was sent), the previous downlink key dropped, then one write of the record with the request pending. Only after that
+  the request is returned.
+- **Answer.** Only for the pending request: `gen` is the generation plus 1, `up_base` equal, the key 32 B and not of low
+  order. The new generation is computed, the first counter is `max(last + 1, 64 * up_base)`, the chain is walked to that
+  epoch, and the new state goes to flash in one write. Then the RAM state switches and the ephemeral key, `R_g` and the
+  chain of generation g are erased. A failed write leaves generation g with the request pending; the same answer works later.
+  The previous downlink key (generation g, for generation 0 the static key) is kept until the next request.
+- **Keys of the session.** Uplinks: the message key of the epoch of the counter. Downlinks: `k_down` of the generation, the
+  previous generation's key while it is kept, the static key (generation 0 format) only while the previous generation is
+  generation 0. Anything else is refused (`-EACCES`).
+- **Counter blocks.** The mark always ends on an epoch boundary (`res = c | 63`): one epoch, or 16 epochs if the last persist
+  is less than 60 s ago (streaming), so about one write a minute at most. From generation 1 on the chain key at the start of
+  the block is written first, then the mark: a crash between the two leaves the old mark (nothing of the block was used) and
+  a key that is not behind it. After a restart the node resumes at `mark + 1` (an epoch boundary, so a restart starts a new
+  epoch) and walks at most 16 steps. The counter never goes below the epoch of the chain: after a switch or restart the
+  sealing moves it up first (`sensei_secure_tx_jump()`), so a missing key cannot block the node. An epoch that is in use for
+  more than `epoch_max_s` ends at the next seal (the counter jumps to the next multiple of 64).
+- **Provisioning again.** Back to generation 0 with the new static keys; the collector key is stored, then the ratchet record
+  is deleted; the counters and the windows stay; a mix is requested at once. If only the delete fails, the node refuses to seal
+  and open until the call is repeated.
+- **Damaged state.** A ratchet record that exists but does not open, has the wrong size or is not valid, or a record of
+  generation 1 or later in a build without X25519: no fallback to generation 0 (that would be a downgrade). The node refuses to
+  seal and open (`-EPERM`, counted) until it is provisioned again. A record that opens but belongs to another key id is old and
+  ignored.
+- **Record e2e_rat** (v1, 156 B, little endian): `u8 ver = 1 | u8 flags (bit 0 previous, bit 1 pending) | u16 0 | u32 key_id |
+  u32 gen | u32 gen_start_unix | root[32] | k_down[16] | u32 up_base | u32 up_idx | up_ck[32] | prev_k_down[16] |
+  u32 pend_up_base | pend_priv[32]` (the design had no key id: 152 B). Generation 0 has a record only while a request is pending.
+  In settings: `key_id (4 B, plain) || sealed record` (the key id is the context of the seal, 185 B + 4), or the plain record
+  without sealing. One entry, one atomic write. Wear: one record and one 4 B mark per block.
+- **Keys at rest of the new state.** `e2e_rat` is sealed like the key. The marker `e2e_mrk` (4 B of a hash of the sealed key) is
+  written whenever a key is sealed. With sealing, a plain `e2e_priv` next to a different sealed key is the newer one (a downgrade
+  to a firmware that does not know `e2e_privx` made it) unless the marker names another key than the sealed one: then the
+  sealed key was written later by the first keys-at-rest image (it seals first and ignores a failed delete), the plain key is the
+  older one and goes at once. Without a marker the first rule applies (not told apart from a downgrade).
+- **Confirmation of the image.** The plain key stays after the migration until the image is confirmed.
+  `sensei_ota_on_confirmed()` (`NRF/system/ota`) calls `sensei_e2e_settings_confirm()` through
+  `CONFIG_SENSEI_SECURE_SETTINGS_CONFIRM_ON_OTA` (default on with `SENSEI_OTA`): when the node confirms, when the host confirms over
+  SMP (seen within 5 s) and at the start of an image that is confirmed already. Builds without MCUboot delete it after the load
+  (`CONFIG_SENSEI_SECURE_SETTINGS_CONFIRM_AFTER_LOAD`, default on without `BOOTLOADER_MCUBOOT`).
 
 ## API (`include/sensei_secure.h`)
 
@@ -256,7 +328,15 @@ without the library).
   and a property test: no (key, nonce) pair twice over 100 000 uplinks, 20 mixes and 40 000 downlinks of 8 senders, and no
   message key for more than 64 counters.
 - `test_seal` checks the sealed settings records against the Python vectors (vector 7, `tests/generated/vectors.h`): the same bytes
-  both ways, every byte covered by the tag, wrong name and key, short and long records, new nonce at every seal.
+  both ways, every byte covered by the tag, wrong name, context and key, short and long records, new nonce at every seal.
+- `test_e2e` also covers the device side of forward secrecy against a model of the collector: the mix both ways up to generation
+  6 (generation bits wrap), previous generation and its drop at the next request, a repeated and a mismatched answer, low-order keys,
+  a write that fails at every site (the 40 writes of a 420-step run, each failed once: no (generation, counter) used twice, the
+  restarted node holds the state of its flash and talks), the power-loss replay (a snapshot of the flash after every write; from each one
+  a restart, no (generation, counter) used again, the node talks to the collector as it was just before the next write, also across a
+  mix), adaptive blocks and the stored chain key, time-bound epochs, triggers and retry timing, provisioning again, a damaged or
+  foreign record, and the transcript of vector 6 replayed on the device (the Python side as the collector: the device makes the same
+  bytes).
 
 `test_ratchet.c` and `test_secure.c` also check the generation 0 bytes and the refusals of the kind byte. The same test files run with the Zephyr backend (PSA, Mbed TLS) on `native_sim`: `NRF/tests/secure` (`test_secure`) and
 `NRF/tests/secure_settings` (the settings storage: names, sizes, restart, erase; a second build with sealing and the fixed-key

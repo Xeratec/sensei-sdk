@@ -249,7 +249,7 @@ static int p_rx(void *u, uint32_t sender, uint32_t h) {
   return 0;
 }
 
-static const struct sensei_secure_store STORE = {p_tx, p_rx, NULL};
+static const struct sensei_secure_store STORE = {.tx = p_tx, .rx = p_rx};
 
 static void test_counters(void) {
   struct sensei_secure node, back;

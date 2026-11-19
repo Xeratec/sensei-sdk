@@ -343,13 +343,17 @@ int sensei_secure_seal(struct sensei_secure *s, enum sensei_secure_kind kind, co
   if (ctr > s->tx_reserved) {
     uint32_t res = (CTR_MAX - ctr < s->ctr_step - 1) ? CTR_MAX : ctr + s->ctr_step - 1;
 
-    if (s->store.tx && s->store.tx(s->store.user, res) != 0) {
+    if (s->store.tx_block) {
+      if (s->store.tx_block(s->store.user, ctr, &res) != 0 || res < ctr) {
+        return SENSEI_SECURE_ERR_STORE;
+      }
+    } else if (s->store.tx && s->store.tx(s->store.user, res) != 0) {
       return SENSEI_SECURE_ERR_STORE;
     }
     s->tx_reserved = res;
   }
   if (s->ring.tx_key) {
-    uint8_t gkey[SENSEI_SECURE_KEY_SIZE];
+    uint8_t gkey[SENSEI_SECURE_KEY_SIZE] = {0}; /* a hook that returns 0 without writing leaves zeros, not stack */
 
     if (s->ring.tx_key(s->ring.user, ctr, &gen, gkey) != 0) {
       wipe(gkey, sizeof(gkey));
@@ -386,6 +390,21 @@ int sensei_secure_seal(struct sensei_secure *s, enum sensei_secure_kind kind, co
   }
   s->tx_last = ctr;
   return (int)(hs + n);
+}
+
+/* The refusals a keyring hook may report. Anything else (an errno of a storage or crypto call) is a missing key: the
+ * codes of this library and the errnos share small negative numbers, so a pass-through would name the wrong error. */
+static int rx_hook_code(int err) {
+  switch (err) {
+  case SENSEI_SECURE_ERR_GEN:
+  case SENSEI_SECURE_ERR_EPOCH:
+  case SENSEI_SECURE_ERR_GAP:
+  case SENSEI_SECURE_ERR_DH:
+  case SENSEI_SECURE_ERR_CRYPTO:
+    return err;
+  default:
+    return SENSEI_SECURE_ERR_GEN;
+  }
 }
 
 int sensei_secure_open(struct sensei_secure *s, enum sensei_secure_kind want, const uint64_t *own_id, const uint8_t *in,
@@ -430,13 +449,13 @@ int sensei_secure_open(struct sensei_secure *s, enum sensei_secure_kind want, co
     return SENSEI_SECURE_ERR_SPACE;
   }
   if (h.ratchet || s->ring.rx_key) {
-    uint8_t gkey[SENSEI_SECURE_KEY_SIZE];
+    uint8_t gkey[SENSEI_SECURE_KEY_SIZE] = {0};
 
     err = h.ratchet && !s->ring.rx_key ? SENSEI_SECURE_ERR_GEN
                                        : s->ring.rx_key(s->ring.user, h.ratchet, h.gen_bits, h.counter, gkey);
     if (err < 0) {
       wipe(gkey, sizeof(gkey));
-      return err < SENSEI_SECURE_ERR_DH ? SENSEI_SECURE_ERR_GEN : err; /* an unknown code is a missing key */
+      return rx_hook_code(err);
     }
     if (err > 0 && h.ratchet) { /* "use the session key" is for generation 0 only */
       wipe(gkey, sizeof(gkey));

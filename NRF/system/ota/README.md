@@ -48,6 +48,14 @@ Debug and Release can use the same setting; turn it off only when the host never
 the image list) after the reboot, or the image reverts. The decision is the pure function in
 [`sensei_ota_trial.h`](sensei_ota_trial.h); its host test is in `tests/` (`make test-host` of the SDK).
 
+**On confirmed.** `sensei_ota_on_confirmed(fn, user)` registers a function (up to 4) that is called once when the running image
+becomes confirmed, whichever way: `sensei_ota_confirm()`, the self-confirm of the trial supervision, an SMP confirm from the
+host (the supervision polls every 5 s, so it is seen within 5 s), or `sensei_ota_init()` on an image that is confirmed already.
+A function that registers after that moment is called at once. It runs on the system work queue or on the caller, so it must be
+short. Use it for state that only the old image needs: `sensei_e2e_settings_confirm()` (the plain key record that the migration to
+sealed keys keeps for a revert) is registered by `lib/sensei_secure` with `CONFIG_SENSEI_SECURE_SETTINGS_CONFIRM_ON_OTA`. Call
+`sensei_ota_init()` at the end of the start-up, or nothing is called on a confirmed image.
+
 The app sets the access to the Bluetooth service with the Zephyr choice `MCUMGR_TRANSPORT_BT_PERM_*` (open by
 default; `RW_ENCRYPT` needs `BT_SMP`). The mcumgr groups beyond image and OS reset (echo, info, ...) are the app's
 choice.
@@ -91,7 +99,8 @@ The trial rule, the writer and the update flow for the GAP9 firmware slots (A or
 - Host (`tests/`, `make test-host`): the trial decision, the image TLVs, the recovery reset rule.
 - Zephyr, native_sim (`NRF/tests/ota_reset`, `NRF/tests/ota`, see `NRF/tests/README.md`): the reset hook in the mcumgr
   callback chain; the trial supervision (check after the delay, SMP request needed to confirm, retry of a failed
-  confirm write, reset at the end of the trial, confirm by the host) with MCUboot's image state and the reset as fakes.
+  confirm write, reset at the end of the trial, confirm by the host, the on-confirmed functions in each case and for an image that
+  is confirmed at the start) with MCUboot's image state and the reset as fakes.
 
 ## Not covered
 

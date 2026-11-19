@@ -126,12 +126,13 @@ SEAL_KEY = bytes(range(0x90, 0xA0))  # fixed test key of the sealed settings rec
 SEAL_NONCE = bytes(range(0xB0, 0xBC))
 
 
-def seal_cases() -> list[tuple[str, bytes, bytes]]:
-    """(setting name, nonce, plaintext) of the sealed settings records (keys at rest). Vector 7 of the design."""
+def seal_cases() -> list[tuple[str, bytes, bytes, bytes]]:
+    """(setting name, nonce, plaintext, context) of the sealed settings records (keys at rest). Vector 7 of the design.
+    The context is appended to the associated data: e2e_rat carries the key id of its key."""
     return [
-        ("e2e_privx", SEAL_NONCE, bytes(range(1, 33))),  # the node private key of the test keys above
-        ("e2e_rat", bytes(range(0xC0, 0xCC)), pattern(152, 9)),  # the name reserved for the ratchet state
-        ("e2e_privx", bytes(12), b""),  # empty value, all-zero nonce
+        ("e2e_privx", SEAL_NONCE, bytes(range(1, 33)), b""),  # the node private key of the test keys above
+        ("e2e_rat", bytes(range(0xC0, 0xCC)), pattern(156, 9), bytes.fromhex("78563412")),  # ratchet state, key id
+        ("e2e_privx", bytes(12), b"", b""),  # empty value, all-zero nonce
     ]
 
 
@@ -148,14 +149,19 @@ UP_BASE_T = 1  # of the generation 1 of the transcript
 RAT_SENDER = 0x01020304  # sender id of the downlinks of the transcript
 X25519_BASE = bytes([9]) + bytes(31)
 
-# Public keys of low order: X25519 gives all zero. u = 0, 1, p - 1 and the two other points of order 8 of RFC 7748.
-LOW_ORDER = [
+# Public keys of low order: X25519 gives all zero. u = 0, 1, p - 1 and the two other points of order 8 of RFC 7748, then
+# the same values in the other encodings that a peer can send: the non-canonical p and p + 1 (u mod p is 0 and 1) and
+# every one of them with the top bit set (bit 255 of u is ignored).
+_P = 2**255 - 19
+_BASE_LOW = [
     bytes(32),
     bytes([1]) + bytes(31),
     bytes.fromhex("e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b800"),
     bytes.fromhex("5f9c95bca3508c24b1d0b1559c83ef5b04445cc4581c8e86d8224eddd09f1157"),
-    bytes.fromhex("ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
+    (_P - 1).to_bytes(32, "little"),
 ]
+LOW_ORDER = _BASE_LOW + [_P.to_bytes(32, "little"), (_P + 1).to_bytes(32, "little")]
+LOW_ORDER += [bytes(v[:31]) + bytes([v[31] | 0x80]) for v in LOW_ORDER]
 
 # Error codes of sensei_secure.h that a vector expects.
 ERR_FORMAT, ERR_AUTH, ERR_REPLAY, ERR_GEN, ERR_EPOCH = -1, -3, -4, -12, -13
@@ -498,15 +504,17 @@ def render_secure() -> str:
     # sealed settings records (keys at rest): AES-128-GCM under a fixed key, the setting name is in the associated data
     parts.append(array("vec_seal_key", SEAL_KEY))
     parts.append("typedef struct {\n    const char *name;\n    const uint8_t *nonce;\n    const uint8_t *plain;\n"
-                 "    size_t plain_len;\n    const uint8_t *record;\n    size_t record_len;\n} vec_seal_t;\n")
+                 "    size_t plain_len;\n    const uint8_t *record;\n    size_t record_len;\n"
+                 "    const uint8_t *ctx;\n    size_t ctx_len;\n} vec_seal_t;\n")
     rows = []
-    for i, (name, nonce, plain) in enumerate(seal_cases()):
-        record = secure.seal_record(SEAL_KEY, name, plain, nonce)
+    for i, (name, nonce, plain, ctx) in enumerate(seal_cases()):
+        record = secure.seal_record(SEAL_KEY, name, plain, nonce, ctx)
         parts.append(array(f"vec_seal_nonce_{i}", nonce))
         parts.append(array(f"vec_seal_plain_{i}", plain))
         parts.append(array(f"vec_seal_record_{i}", record))
+        parts.append(array(f"vec_seal_ctx_{i}", ctx))
         rows.append(f'    {{"{name}", vec_seal_nonce_{i}, vec_seal_plain_{i}, {len(plain)}, vec_seal_record_{i}, '
-                    f"{len(record)}}}")
+                    f"{len(record)}, vec_seal_ctx_{i}, {len(ctx)}}}")
     parts.append("static const vec_seal_t vec_seal[] = {\n" + ",\n".join(rows) + ",\n};\n")
     parts.append(f"#define VEC_SEAL_COUNT {len(rows)}\n")
     parts += render_ratchet()

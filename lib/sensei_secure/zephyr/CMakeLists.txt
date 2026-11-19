@@ -11,10 +11,10 @@ zephyr_library_named(sensei_secure)
 zephyr_library_sources(
   ${SENSEI_SECURE_DIR}/src/sensei_secure.c
   ${SENSEI_SECURE_DIR}/src/sensei_e2e.c
+  ${SENSEI_SECURE_DIR}/src/sensei_ratchet.c
   ${SENSEI_SECURE_DIR}/src/sensei_e2e_seal.c
   ${SENSEI_SECURE_DIR}/src/sensei_secure_zephyr.c
 )
-zephyr_library_sources_ifdef(CONFIG_SENSEI_SECURE_RATCHET ${SENSEI_SECURE_DIR}/src/sensei_ratchet.c)
 zephyr_include_directories(${SENSEI_SECURE_DIR}/include)
 # <crypto/sensei_crypto.h> of the SDK crypto library
 zephyr_library_include_directories(${SENSEI_SECURE_DIR}/../../NRF/system)

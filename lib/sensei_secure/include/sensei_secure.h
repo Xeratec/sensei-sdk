@@ -184,14 +184,23 @@ struct sensei_secure_rx_state {
   uint32_t highest;
 };
 
-/** Where the counters go. Both callbacks may be NULL (no storage: tests, host tools). */
+/** Where the counters go. The callbacks may be NULL (no storage: tests, host tools). */
 struct sensei_secure_store {
-  /** Store the new high-water mark of sent counters. Return 0 on success. */
+  /** Store the new high-water mark of sent counters. Return 0 on success. Not called when tx_block is set. */
   int (*tx)(void *user, uint32_t reserved);
   /** Store the highest counter received from a sender (called when it grows). Return 0 on success; on failure
    * the message is refused and the window does not change. */
   int (*rx)(void *user, uint32_t sender, uint32_t highest);
   void *user;
+  /**
+   * Optional, replaces tx: the caller decides how far the block goes. Called by seal when counter first is above the
+   * persisted mark. *reserved is the proposal (first + ctr_step - 1). The callback may set it to any value >= first
+   * (for example the end of an epoch, or of 16 epochs), stores what it leaves there and returns 0. All counters
+   * of the block, first included, may be used once it returned 0. A nonzero return, or a value below first, fails the
+   * seal with SENSEI_SECURE_ERR_STORE and nothing is used. first is the first counter of the block, which a keyring
+   * needs to store the key state that belongs to it.
+   */
+  int (*tx_block)(void *user, uint32_t first, uint32_t *reserved);
 };
 
 /**
@@ -204,15 +213,20 @@ struct sensei_secure_keyring {
    * Called by seal after it has taken the counter, before it encrypts. Set *gen to the generation to seal in. 0: the
    * session key is used (key is not written). 1 or more: write the key of the counter (for a node: the message key of
    * the epoch of the counter, for a backend: the downlink key of the generation); the envelope gets the ratchet bits
-   * of *gen mod 4. A nonzero return fails the seal with SENSEI_SECURE_ERR_GEN; nothing is sent and the counter is not
-   * used (the next seal takes it again).
+   * of *gen mod 4. A nonzero return fails the seal with SENSEI_SECURE_ERR_GEN (the code is not passed on); nothing is
+   * sent and the counter is not used: the next seal takes the same counter again, so the hook must not fail for a
+   * counter that the keyring cannot serve (an epoch before the chain start): move the counter up first with
+   * sensei_secure_tx_jump() (after a switch of generation, after a restart). The key buffer is zero when the hook is
+   * called; a hook that returns 0 with *gen >= 1 must write all 16 bytes.
    */
   int (*tx_key)(void *user, uint32_t counter, uint32_t *gen, uint8_t key[SENSEI_SECURE_KEY_SIZE]);
   /**
    * Called by open for a header that passed the checks (kind, key id, node id, replay window), before it decrypts.
    * ratchet false: a generation 0 envelope, gen_bits is 0; true: generation gen_bits mod 4. Return 0 and write the key
    * to use; or, for a generation 0 envelope only, a positive value to use the session key; or a negative
-   * SENSEI_SECURE_ERR_* code to refuse the envelope (for example ERR_GEN: no such generation, or ERR_EPOCH). Without
+   * SENSEI_SECURE_ERR_* code to refuse the envelope: ERR_GEN (no such generation), ERR_EPOCH, ERR_GAP, ERR_DH or
+   * ERR_CRYPTO; any other negative value (an errno, say) is reported as ERR_GEN. The key buffer is zero when the hook
+   * is called. Without
    * this hook generation 0 uses the session key and every ratchet envelope is refused with ERR_GEN. The hook must not
    * change what it keeps (a chain, a generation) for an envelope that is not yet authenticated: it is called before the
    * tag is checked.

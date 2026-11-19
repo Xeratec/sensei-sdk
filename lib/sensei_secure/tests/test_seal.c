@@ -33,14 +33,28 @@ static void test_vectors(void) {
     uint8_t rec[256], plain[256];
 
     /* the C side makes the same record the Python side made */
-    int n = sensei_e2e_seal_record(C, k, v->name, v->nonce, v->plain, v->plain_len, rec, sizeof(rec));
+    int n = sensei_e2e_seal_record_ctx(C, k, v->name, v->ctx, v->ctx_len, v->nonce, v->plain, v->plain_len, rec,
+                                       sizeof(rec));
     CHECK(n == (int)v->record_len);
     CHECK(n == (int)(v->plain_len + SENSEI_E2E_SEAL_OVERHEAD));
     CHECK(n > 0 && memcmp(rec, v->record, v->record_len) == 0);
     /* and opens it */
-    n = sensei_e2e_open_record(C, k, v->name, v->record, v->record_len, plain, sizeof(plain));
+    n = sensei_e2e_open_record_ctx(C, k, v->name, v->ctx, v->ctx_len, v->record, v->record_len, plain, sizeof(plain));
     CHECK(n == (int)v->plain_len);
     CHECK(n >= 0 && memcmp(plain, v->plain, v->plain_len) == 0);
+    if (v->ctx_len) { /* the context is part of the associated data: without it, or another one, it does not open */
+      uint8_t other[SENSEI_E2E_SEAL_CTX_MAX];
+
+      memcpy(other, v->ctx, v->ctx_len);
+      CHECK(sensei_e2e_open_record(C, k, v->name, v->record, v->record_len, plain, sizeof(plain)) == -EACCES);
+      other[0] ^= 1;
+      CHECK(sensei_e2e_open_record_ctx(C, k, v->name, other, v->ctx_len, v->record, v->record_len, plain,
+                                       sizeof(plain)) == -EACCES);
+      CHECK(sensei_e2e_open_record_ctx(C, k, v->name, v->ctx, v->ctx_len - 1, v->record, v->record_len, plain,
+                                       sizeof(plain)) == -EACCES);
+      CHECK(sensei_e2e_seal_record_ctx(C, k, v->name, v->ctx, SENSEI_E2E_SEAL_CTX_MAX + 1, NULL, v->plain, v->plain_len,
+                                       rec, sizeof(rec)) == -EINVAL);
+    }
   }
   C->key_destroy(C->ctx, k);
 }

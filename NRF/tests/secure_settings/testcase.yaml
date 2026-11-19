@@ -13,3 +13,11 @@ tests:
     extra_configs:
       - CONFIG_SENSEI_SECURE_SETTINGS_SEAL=y
       - CONFIG_SENSEI_SECURE_SETTINGS_SEAL_TEST_KEY=y
+      # as with MCUboot: the plain record stays until sensei_e2e_settings_confirm()
+      - CONFIG_SENSEI_SECURE_SETTINGS_CONFIRM_AFTER_LOAD=n
+  # The same without MCUboot (the default of a build without a bootloader that reverts): the plain key record is deleted
+  # right after the load.
+  sensei.secure.settings.seal.nomcuboot:
+    extra_configs:
+      - CONFIG_SENSEI_SECURE_SETTINGS_SEAL=y
+      - CONFIG_SENSEI_SECURE_SETTINGS_SEAL_TEST_KEY=y

@@ -369,29 +369,33 @@ SEAL_VERSION = 1
 SEAL_NONCE_SIZE = 12
 SEAL_OVERHEAD = 1 + SEAL_NONCE_SIZE + TAG_SIZE  # 29 B more than the plain value
 SEAL_NAME_MAX = 32
+SEAL_CTX_MAX = 8
 _SEAL_AAD = b"sensei-e2e/"
 
 
-def _seal_aad(name: str) -> bytes:
+def _seal_aad(name: str, ctx: bytes = b"") -> bytes:
     raw = name.encode()
     if not raw or len(raw) > SEAL_NAME_MAX:
         raise SecureError("bad setting name")
-    return _SEAL_AAD + raw + bytes([SEAL_VERSION])
+    if len(ctx) > SEAL_CTX_MAX:
+        raise SecureError("bad context")
+    return _SEAL_AAD + raw + bytes([SEAL_VERSION]) + ctx
 
 
-def seal_record(key: bytes, name: str, plaintext: bytes, nonce: bytes | None = None) -> bytes:
+def seal_record(key: bytes, name: str, plaintext: bytes, nonce: bytes | None = None, ctx: bytes = b"") -> bytes:
     """A sealed settings record as the node stores it: u8 version (1) | nonce[12] | AES-128-GCM ciphertext | tag[16].
-    Associated data: "sensei-e2e/" || setting name || version, so a record does not open under another name. `nonce`
-    is for test vectors; leave it out to take 12 random bytes (a nonce must never repeat under one key)."""
+    Associated data: "sensei-e2e/" || setting name || version [|| ctx], so a record does not open under another name
+    (or another context: e2e_rat carries the key id of its key, 4 bytes little endian). `nonce` is for test vectors;
+    leave it out to take 12 random bytes (a nonce must never repeat under one key)."""
     if len(key) != 16:
         raise SecureError("the sealing key is 16 bytes")
     nonce = secrets.token_bytes(SEAL_NONCE_SIZE) if nonce is None else nonce
     if len(nonce) != SEAL_NONCE_SIZE:
         raise SecureError("the nonce is 12 bytes")
-    return bytes([SEAL_VERSION]) + nonce + AESGCM(key).encrypt(nonce, plaintext, _seal_aad(name))
+    return bytes([SEAL_VERSION]) + nonce + AESGCM(key).encrypt(nonce, plaintext, _seal_aad(name, ctx))
 
 
-def open_record(key: bytes, name: str, record: bytes) -> bytes:
+def open_record(key: bytes, name: str, record: bytes, ctx: bytes = b"") -> bytes:
     """Open a sealed settings record of the node (see `seal_record`). Raises SecureError for a short record, an unknown
     version, a wrong key, a wrong name or a changed record."""
     if len(key) != 16:
@@ -399,7 +403,7 @@ def open_record(key: bytes, name: str, record: bytes) -> bytes:
     if len(record) < SEAL_OVERHEAD or record[0] != SEAL_VERSION:
         raise SecureError("not a sealed record of this version")
     try:
-        return AESGCM(key).decrypt(record[1:1 + SEAL_NONCE_SIZE], record[1 + SEAL_NONCE_SIZE:], _seal_aad(name))
+        return AESGCM(key).decrypt(record[1:1 + SEAL_NONCE_SIZE], record[1 + SEAL_NONCE_SIZE:], _seal_aad(name, ctx))
     except InvalidTag as exc:
         raise SecureError("sealed record does not open (wrong key or name, or changed)") from exc
 

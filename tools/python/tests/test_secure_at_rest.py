@@ -36,12 +36,15 @@ def test_record_layout_and_roundtrip():
 
 def test_record_vectors_are_the_ones_of_the_c_header():
     """Vector 7: the generator and the committed header agree (the C test checks the C side against the header)."""
-    for name, nonce, plain in vectors.seal_cases():
-        rec = secure.seal_record(vectors.SEAL_KEY, name, plain, nonce)
-        assert rec[1:13] == nonce and secure.open_record(vectors.SEAL_KEY, name, rec) == plain
+    for name, nonce, plain, ctx in vectors.seal_cases():
+        rec = secure.seal_record(vectors.SEAL_KEY, name, plain, nonce, ctx)
+        assert rec[1:13] == nonce and secure.open_record(vectors.SEAL_KEY, name, rec, ctx) == plain
+        if ctx:  # the context is in the associated data
+            with pytest.raises(SecureError):
+                secure.open_record(vectors.SEAL_KEY, name, rec)
     header = (vectors.SDK_ROOT / vectors.SECURE_HEADER).read_text()
-    name, nonce, plain = vectors.seal_cases()[0]
-    first = secure.seal_record(vectors.SEAL_KEY, name, plain, nonce)
+    name, nonce, plain, ctx = vectors.seal_cases()[0]
+    first = secure.seal_record(vectors.SEAL_KEY, name, plain, nonce, ctx)
     assert ", ".join(f"0x{b:02X}" for b in first[:16]) in header
 
 

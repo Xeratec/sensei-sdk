@@ -28,3 +28,24 @@ tests:
     extra_configs:
       - CONFIG_SENSEI_TEST_HOST_CONFIRM=y
       - CONFIG_SENSEI_OTA_CONFIRM=n
+  sensei.ota.trial.already_confirmed:
+    extra_configs:
+      - CONFIG_SENSEI_TEST_ALREADY_CONFIRMED=y
+  # The key store of lib/sensei_secure with the OTA module: the plain key record that the migration to sealed keys keeps
+  # for a revert is deleted when the image is confirmed (CONFIG_SENSEI_SECURE_SETTINGS_CONFIRM_ON_OTA).
+  sensei.ota.trial.e2e_confirm:
+    extra_configs:
+      - CONFIG_SENSEI_TEST_E2E_CONFIRM=y
+      - CONFIG_SENSEI_SECURE=y
+      - CONFIG_SENSEI_SECURE_SETTINGS=y
+      - CONFIG_SENSEI_SECURE_SETTINGS_SEAL=y
+      - CONFIG_SENSEI_SECURE_SETTINGS_SEAL_TEST_KEY=y
+      - CONFIG_MBEDTLS_ENABLE_HEAP=y
+      - CONFIG_MBEDTLS_HEAP_SIZE=16384
+      - CONFIG_MAIN_STACK_SIZE=16384
+      - CONFIG_ZTEST_STACK_SIZE=16384
+      - CONFIG_FLASH=y
+      - CONFIG_FLASH_MAP=y
+      - CONFIG_NVS=y
+      - CONFIG_SETTINGS=y
+      - CONFIG_SETTINGS_NVS=y

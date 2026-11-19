@@ -14,23 +14,34 @@
 #define AAD_PREFIX "sensei-e2e/"
 #define AAD_PREFIX_LEN (sizeof(AAD_PREFIX) - 1)
 
-/* AAD = prefix || name || version. Returns its length, or 0 for a bad name. */
-static size_t make_aad(const char *name, uint8_t *aad) {
+#define AAD_MAX (AAD_PREFIX_LEN + SENSEI_E2E_SEAL_NAME_MAX + 1 + SENSEI_E2E_SEAL_CTX_MAX)
+
+/* AAD = prefix || name || version || ctx. Returns its length, or 0 for a bad name or context. */
+static size_t make_aad(const char *name, const uint8_t *ctx, size_t ctx_len, uint8_t *aad) {
   size_t n = name ? strlen(name) : 0;
 
-  if (n == 0 || n > SENSEI_E2E_SEAL_NAME_MAX) {
+  if (n == 0 || n > SENSEI_E2E_SEAL_NAME_MAX || ctx_len > SENSEI_E2E_SEAL_CTX_MAX || (ctx == NULL && ctx_len != 0)) {
     return 0;
   }
   memcpy(aad, AAD_PREFIX, AAD_PREFIX_LEN);
   memcpy(aad + AAD_PREFIX_LEN, name, n);
   aad[AAD_PREFIX_LEN + n] = SENSEI_E2E_SEAL_VERSION;
-  return AAD_PREFIX_LEN + n + 1;
+  if (ctx_len) {
+    memcpy(aad + AAD_PREFIX_LEN + n + 1, ctx, ctx_len);
+  }
+  return AAD_PREFIX_LEN + n + 1 + ctx_len;
 }
 
 int sensei_e2e_seal_record(const struct sensei_secure_crypto *c, sensei_secure_key_t key, const char *name,
                            const uint8_t *nonce, const uint8_t *pt, size_t len, uint8_t *out, size_t cap) {
-  uint8_t aad[AAD_PREFIX_LEN + SENSEI_E2E_SEAL_NAME_MAX + 1];
-  size_t aad_len = make_aad(name, aad);
+  return sensei_e2e_seal_record_ctx(c, key, name, NULL, 0, nonce, pt, len, out, cap);
+}
+
+int sensei_e2e_seal_record_ctx(const struct sensei_secure_crypto *c, sensei_secure_key_t key, const char *name,
+                               const uint8_t *ctx, size_t ctx_len, const uint8_t *nonce, const uint8_t *pt, size_t len,
+                               uint8_t *out, size_t cap) {
+  uint8_t aad[AAD_MAX];
+  size_t aad_len = make_aad(name, ctx, ctx_len, aad);
   size_t n = 0;
 
   if (c == NULL || aad_len == 0 || (pt == NULL && len != 0) || out == NULL) {
@@ -55,8 +66,14 @@ int sensei_e2e_seal_record(const struct sensei_secure_crypto *c, sensei_secure_k
 
 int sensei_e2e_open_record(const struct sensei_secure_crypto *c, sensei_secure_key_t key, const char *name,
                            const uint8_t *rec, size_t len, uint8_t *out, size_t cap) {
-  uint8_t aad[AAD_PREFIX_LEN + SENSEI_E2E_SEAL_NAME_MAX + 1];
-  size_t aad_len = make_aad(name, aad);
+  return sensei_e2e_open_record_ctx(c, key, name, NULL, 0, rec, len, out, cap);
+}
+
+int sensei_e2e_open_record_ctx(const struct sensei_secure_crypto *c, sensei_secure_key_t key, const char *name,
+                               const uint8_t *ctx, size_t ctx_len, const uint8_t *rec, size_t len, uint8_t *out,
+                               size_t cap) {
+  uint8_t aad[AAD_MAX];
+  size_t aad_len = make_aad(name, ctx, ctx_len, aad);
   size_t n = 0;
 
   if (c == NULL || aad_len == 0 || rec == NULL || (out == NULL && cap != 0)) {

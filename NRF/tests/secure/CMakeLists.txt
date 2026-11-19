@@ -14,5 +14,5 @@ project(sensei_secure_test)
 
 # The tests are those of the host build (lib/sensei_secure/tests, same file and vectors), here with the PSA backend.
 set(SECURE_TESTS ${CMAKE_CURRENT_LIST_DIR}/../../../lib/sensei_secure/tests)
-target_sources(app PRIVATE src/main.c src/ratchet.c)
+target_sources(app PRIVATE src/main.c src/ratchet.c src/e2e.c)
 target_include_directories(app PRIVATE ${SECURE_TESTS} ${SECURE_TESTS}/generated)

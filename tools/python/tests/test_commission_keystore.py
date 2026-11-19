@@ -110,3 +110,57 @@ def test_a_new_node_or_key_is_added_as_add_node_does_and_rolls_back(tmp_path):
     assert backup.changed and rig.store.key_id(NODE_ID) != old_id
     rig.store.rollback_node(backup)
     assert rig.store.key_id(NODE_ID) == old_id
+
+
+def _gen1_store_with_restarted_node(tmp_path):
+    rig = make_rig(tmp_path)
+    rig.mix()
+    rig.promote()
+    rig.store.add_node_for_commissioning(NODE_ID, rig.node.node_pub)
+    fresh = secure.NodeSession(rig.node_priv, rig.store.backend_public_key())
+    return rig, fresh
+
+
+def test_a_fake_generation_zero_proof_writes_nothing(tmp_path):
+    """The header is not authenticated: a proof with the real key id and generation 0 whose tag is wrong must neither reset nor
+    save the store."""
+    rig, fresh = _gen1_store_with_restarted_node(tmp_path)
+    good = proof_of(fresh)
+    fake = good[:-1] + bytes([good[-1] ^ 1])  # the tag does not fit
+    prov, text = rig.store._nodes[NODE_ID].prov, rig.path.read_bytes()
+    assert rig.store.reset_if_node_restarted(NODE_ID, fake) is None
+    with pytest.raises(ProofError):
+        com.check_key_proof(fake, rig.store, NODE_ID, NG, NN, SID)
+    assert rig.store._nodes[NODE_ID].prov == prov and rig.path.read_bytes() == text
+    assert rig.store.generation(NODE_ID) == 1
+    # a counter that the store has seen does not pass the in-memory check either
+    rig.store._nodes[NODE_ID].up.update(secure.parse_header(good).counter)
+    assert rig.store.reset_if_node_restarted(NODE_ID, good) is None
+    assert rig.store._nodes[NODE_ID].prov == prov and rig.path.read_bytes() == text
+
+
+def test_a_save_that_fails_raises_and_leaves_the_store_as_it_was(tmp_path, monkeypatch):
+    rig, fresh = _gen1_store_with_restarted_node(tmp_path)
+    prov = rig.store._nodes[NODE_ID].prov
+
+    def broken(*_a, **_k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(rig.store, "_touch", broken)
+    with pytest.raises(secure.SecureError) as e:
+        com.check_key_proof(proof_of(fresh), rig.store, NODE_ID, NG, NN, SID)
+    assert not isinstance(e.value, ProofError) and "could not be saved" in str(e.value)
+    assert rig.store._nodes[NODE_ID].prov == prov and rig.store.generation(NODE_ID) == 1
+
+
+def test_a_rollback_that_fails_raises(tmp_path, monkeypatch):
+    rig, fresh = _gen1_store_with_restarted_node(tmp_path)
+    other = bytes([SID[0] ^ 1]) + SID[1:]  # a good generation 0 proof of another PAKE run: reset, then the check fails
+
+    def broken(_backup):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(rig.store, "rollback_node", broken)
+    with pytest.raises(secure.SecureError) as e:
+        com.check_key_proof(proof_of(fresh, other), rig.store, NODE_ID, NG, NN, SID)
+    assert not isinstance(e.value, ProofError) and "put back" in str(e.value)

@@ -386,7 +386,7 @@ transcript TT that both sides have and nobody else (not K_main itself, which sta
 (`verifier->session_id`), the prover from `finish` (`prover->session_id`). The proof plaintext is `"SENSEI-COMMISSION-pop-v2" || node
 id (8 B BE) || nonce_G || nonce_N || session_id` (80 B). A relay that holds the code and runs one PAKE with the node and another with
 the commissioner passes the same nonces on, but the two runs have different ids, so the proof of the node does not pass at the
-commissioner. The node can also name its session to the application (the node's `open_commissioning` carries it).
+commissioner. The application gets the id as `verifier->session_id`; the commissioner's `open_commissioning` downlink carries its own run's id to the node (the node applies it only to the live session with that id).
 Python: `proof_plain(node_id, nonce_g, nonce_n, session_id)`, `make_proof`, `check_proof(..., session_id)`,
 `check_key_proof()` (see "Key store" in `sensei_sdk.secure`: `KeyStore.add_node_for_commissioning()` leaves a node that is known
 with the same key alone, whatever generation it is in, and `reset_if_node_restarted()` resets the store only if the proof says the

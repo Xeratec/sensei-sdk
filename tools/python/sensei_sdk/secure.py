@@ -1636,8 +1636,12 @@ class KeyStore:
         node is in. A node that was provisioned again drops its ratchet state and seals in generation 0 (no ratchet bit); if the
         store is ahead of that (generation 1 or later), the store must start at generation 0 as well: `add_node` with the reset
         (saved at once, `rollback_node` undoes it). Returns that backup, or None if nothing had to be reset: the store is at
-        generation 0, the proof is of a ratchet generation (the same state continues), or it is not a proof for this node
-        (the check of the proof refuses it)."""
+        generation 0, the proof is of a ratchet generation (the same state continues), or it is not a valid proof for this
+        node (the check of the proof refuses it).
+
+        The header is not authenticated, so the proof is opened first, in memory, with the generation 0 keys and the replay
+        window of the node; the store is reset and saved only if that worked. A save that fails (OSError) raises SecureError
+        and leaves the store as it was."""
         with self._lock:
             node = self._nodes.get(node_id)
             if node is None:
@@ -1649,7 +1653,21 @@ class KeyStore:
             if h.ratchet or h.key_id != node.key_id or self.generation(node_id) == 0:
                 return None
             node_pub = node.node_pub
-        return self.add_node(node_id, node_pub, reset = True)
+            seen = ReplayWindow(node.up.highest, node.up.bitmap)
+        if self._priv is None or self._pub is None:
+            raise SecureError("the backend private key is not loaded")
+        keys = derive_keys(self._priv, node_pub, node_pub, self._pub)
+        if keys.key_id != h.key_id or h.direction != DIR_UP:
+            return None
+        try:
+            seen.check(h.counter)
+            open_raw(keys.k_up, proof, h)
+        except SecureError:
+            return None  # not from the node: nothing is reset, nothing is saved
+        try:
+            return self.add_node(node_id, node_pub, reset = True)
+        except OSError as exc:
+            raise SecureError(f"the key store could not be saved: {exc}") from exc
 
     def rollback_node(self, backup: NodeBackup) -> None:
         """Undo an `add_node` that changed the node, because the provisioning of the node failed: the node has its old keys

@@ -93,15 +93,18 @@ bool sensei_secure_priv_valid(const uint8_t priv[SENSEI_SECURE_PRIV_SIZE]) {
       0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
       0xBC, 0xE6, 0xFA, 0xAD, 0xA7, 0x17, 0x9E, 0x84, 0xF3, 0xB9, 0xCA, 0xC2, 0xFC, 0x63, 0x25, 0x51};
   uint8_t any = 0;
-  int cmp = 0; /* sign of priv - order, decided by the first byte that differs */
+  uint32_t lt = 0, gt = 0; /* priv below / above the order, decided by the first byte that differs */
 
+  /* No early exit and no branch on the bytes: a valid key is secret, and so is how far it is below the order. */
   for (size_t i = 0; i < SENSEI_SECURE_PRIV_SIZE; i++) {
+    uint32_t a = priv[i], b = order[i];
+    uint32_t undecided = (lt | gt) ^ 1u;
+
     any |= priv[i];
-    if (cmp == 0 && priv[i] != order[i]) {
-      cmp = priv[i] < order[i] ? -1 : 1;
-    }
+    lt |= undecided & (((a - b) >> 31) & 1u);
+    gt |= undecided & (((b - a) >> 31) & 1u);
   }
-  return any != 0 && cmp < 0;
+  return any != 0 && lt != 0;
 }
 
 int sensei_secure_derive(const struct sensei_secure_crypto *c, sensei_secure_key_t own, enum sensei_secure_role role,

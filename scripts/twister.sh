@@ -61,7 +61,8 @@ out="$(cd "$out" && pwd)"
 rm -rf "${out:?}"/* "${out:?}"/.cache
 mkdir "$out/.cache" # Zephyr caches compiler checks in $HOME/.cache (HOME=$out in the container)
 
-# Twister arguments. -x passes the SDK as Zephyr module to every test build. A build that fails to configure because
+# Twister arguments. -x passes the SDK as Zephyr module to every test build; --board-root lets a test name the SENSEI
+# board (platform_allow), as secure_ocrypto does. A build that fails to configure because
 # parallel jobs race on the compiler-check cache is run once more (--retry-build-errors); a test that fails is run once
 # more too, so a real failure shows twice and a flake does not stop CI.
 tw_args() {
@@ -71,7 +72,7 @@ tw_args() {
   for p in $platform; do TW+=(-p "$p"); done
   TW+=(-T "$sdk_dir/NRF/tests" -O "$out_dir" --inline-logs --no-detailed-test-id
     --retry-failed 1 --retry-build-errors
-    "-x=EXTRA_ZEPHYR_MODULES=$sdk_dir/NRF")
+    "-x=EXTRA_ZEPHYR_MODULES=$sdk_dir/NRF" --board-root "$sdk_dir/NRF/boards")
   if [ "$coverage" = 1 ]; then
     # Coverage of native_sim only. The base directory is the SDK, so Zephyr and NCS files are not in the report.
     TW+=(--coverage --coverage-tool gcovr --coverage-platform native_sim/native/64 --coverage-basedir "$sdk_dir"

@@ -188,7 +188,9 @@ enum sensei_commission_state {
   SENSEI_COMMISSION_OPEN,     /* confirmed: the channel is open */
 };
 
-/** The node's session. Fill with zeros or leave it uninitialised: begin clears it. About 500 bytes. */
+/** The node's session, about 380 bytes on a 32-bit target. Zero it once (static storage, or memset) before the first
+ * begin: begin ends a session that is still running (state not IDLE) and then clears the struct, so garbage in it is
+ * not allowed. The prover and the channel work the same way. */
 struct sensei_commission_verifier {
   struct sensei_commission_verifier_cfg cfg;
   enum sensei_commission_state state;

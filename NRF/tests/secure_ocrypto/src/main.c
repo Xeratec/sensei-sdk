@@ -32,7 +32,7 @@
 #ifdef NODE_FOOTPRINT
 /* What the node's commissioning code calls (the state machine around it is in the node repository). */
 static int node_calls(void) {
-  struct sensei_commission_verifier v;
+  struct sensei_commission_verifier v = {0};
   struct sensei_commission_verifier_cfg cfg = {.c = sensei_secure_crypto_zephyr(),
                                                .save_counters = sensei_commission_settings_counters_save};
   struct sensei_commission_record rec;
@@ -92,7 +92,7 @@ static int selftest(void) {
   struct sensei_commission_record rec;
   struct sensei_commission_counters cnt = {0, 0}, flash = {0, 0};
   struct sensei_commission_verifier_cfg cfg = {0};
-  struct sensei_commission_verifier v;
+  struct sensei_commission_verifier v = {0};
   uint8_t a[65], b[65], z[65], vv[65], red[32], nn[16], sv[65], cv[32], out[40];
   size_t ol = 0;
   int fails = 0;
@@ -146,7 +146,7 @@ static int selftest(void) {
   sensei_commission_verifier_end(&v);
 
   {
-    struct sensei_commission_prover p;
+    struct sensei_commission_prover p = {0};
     uint8_t sp[65], cp[32];
 
     rng_load(NULL, s->x);

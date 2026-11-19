@@ -1457,6 +1457,10 @@ ZTEST(secure_settings, test_commission_verifier_roundtrip) {
 
   cm_record(0, &rec);
   zassert_equal(sensei_commission_settings_verifier_load(&got), -ENOENT);
+  /* a record below the name is not the verifier */
+  zassert_equal(settings_save_one(PREFIX "/e2e_cmv/x", "junk", 4), 0);
+  zassert_equal(sensei_commission_settings_verifier_load(&got), -ENOENT);
+  zassert_equal(settings_delete(PREFIX "/e2e_cmv/x"), 0);
   zassert_equal(sensei_commission_settings_verifier_erase(), 0, "erase of nothing");
   zassert_equal(sensei_commission_settings_verifier_store(&rec), 0);
   n = stored();
@@ -1693,8 +1697,8 @@ ZTEST(secure_settings, test_reset_erases_the_commissioning_records) {
 ZTEST(secure_settings, test_commission_session_counts_in_the_settings) {
   struct sensei_commission_record rec;
   struct sensei_commission_counters cnt, flash;
-  struct sensei_commission_verifier v;
-  struct sensei_commission_prover p;
+  struct sensei_commission_verifier v = {0};
+  struct sensei_commission_prover p = {0};
   struct sensei_commission_verifier_cfg cfg;
   uint8_t ng[16] = {1}, nn[16], sp[65], sv[65], cv[32], cp[32];
   const uint64_t node = 0x1122334455667788ull;

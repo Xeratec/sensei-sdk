@@ -80,11 +80,24 @@ sensei_crypto_status_t sensei_crypto_destroy_key(sensei_crypto_key_id_t key) {
 
 sensei_crypto_status_t sensei_crypto_sha256(const uint8_t *msg, size_t msg_len,
                                             uint8_t digest[SENSEI_CRYPTO_SHA256_SIZE]) {
+  psa_hash_operation_t op = PSA_HASH_OPERATION_INIT;
   size_t out_len = 0;
+  psa_status_t st;
 
   if (digest == NULL || (msg == NULL && msg_len != 0)) {
     return SENSEI_CRYPTO_ERR_INVALID_ARG;
   }
-  return sensei_crypto_from_psa(psa_hash_compute(PSA_ALG_SHA_256, SENSEI_CRYPTO_PTR(msg, msg_len), msg_len, digest,
-                                                 SENSEI_CRYPTO_SHA256_SIZE, &out_len));
+  /* The multi-part calls, not psa_hash_compute(): the Oberon driver has a second copy of SHA-256 for the one-shot call
+   * (about 1 kB) and the incremental one is in the image already (HMAC and HKDF use it). */
+  st = psa_hash_setup(&op, PSA_ALG_SHA_256);
+  if (st == PSA_SUCCESS) {
+    st = psa_hash_update(&op, SENSEI_CRYPTO_PTR(msg, msg_len), msg_len);
+  }
+  if (st == PSA_SUCCESS) {
+    st = psa_hash_finish(&op, digest, SENSEI_CRYPTO_SHA256_SIZE, &out_len);
+  }
+  if (st != PSA_SUCCESS) {
+    (void)psa_hash_abort(&op);
+  }
+  return sensei_crypto_from_psa(st);
 }

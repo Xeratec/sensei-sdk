@@ -31,6 +31,7 @@ struct rng {
   int fail_random;                    /* random() fails from this call on (1 = the next one), 0 = never */
   int calls;                          /* random() calls */
   int fail_share, fail_hkdf, fail_zv; /* the next call of this function fails */
+  int imports, destroys;              /* AES key handles made and destroyed: a leak shows as a difference */
 };
 
 static struct rng R;
@@ -87,6 +88,18 @@ static int t_zv(void *ctx, const uint8_t *w0, const uint8_t *w1, const uint8_t *
   return C0->spake2p_zv(C0->ctx, w0, w1, xy, peer, nm, l, z, v);
 }
 
+static int t_aead_import(void *ctx, const uint8_t *key, sensei_secure_key_t *handle) {
+  (void)ctx;
+  R.imports++;
+  return C0->aead_import(C0->ctx, key, handle);
+}
+
+static int t_key_destroy(void *ctx, sensei_secure_key_t key) {
+  (void)ctx;
+  R.destroys++;
+  return C0->key_destroy(C0->ctx, key);
+}
+
 static void rng_reset(void) { memset(&R, 0, sizeof(R)); }
 
 static void rng_put(const uint8_t *p, size_t n) {
@@ -110,6 +123,8 @@ static void ct_init(void) {
   CT.spake2p_share = t_share;
   CT.hkdf = t_hkdf;
   CT.spake2p_zv = t_zv;
+  CT.aead_import = t_aead_import;
+  CT.key_destroy = t_key_destroy;
   rng_reset();
 }
 
@@ -264,6 +279,13 @@ static void test_v9(void) {
   CHECK(sensei_commission_transcript(tt, n - 1, ARR(vec_com_rfc_context), ARR(vec_com_rfc_id_prover),
                                      ARR(vec_com_rfc_id_verifier), vec_com_rfc_share_p, vec_com_rfc_share_v,
                                      vec_com_rfc_z, vec_com_rfc_v, vec_com_rfc_w0) == 0);
+  /* lengths that would wrap the sum are refused, nothing is written */
+  CHECK(sensei_commission_transcript(tt, sizeof(tt), vec_com_rfc_context, (size_t)-8, ARR(vec_com_rfc_id_prover),
+                                     ARR(vec_com_rfc_id_verifier), vec_com_rfc_share_p, vec_com_rfc_share_v,
+                                     vec_com_rfc_z, vec_com_rfc_v, vec_com_rfc_w0) == 0);
+  CHECK(sensei_commission_transcript(tt, sizeof(tt), ARR(vec_com_rfc_context), vec_com_rfc_id_prover, (size_t)-1,
+                                     vec_com_rfc_id_verifier, (size_t)-1, vec_com_rfc_share_p, vec_com_rfc_share_v,
+                                     vec_com_rfc_z, vec_com_rfc_v, vec_com_rfc_w0) == 0);
   CHECK(sensei_commission_schedule(C0, tt, n, vec_com_rfc_share_p, vec_com_rfc_share_v, &sch) == 0);
   CHECK(memcmp(sch.k_main, vec_com_rfc_k_main, 32) == 0);
   CHECK(memcmp(sch.k_confirm_p, vec_com_rfc_k_confirm_p, 32) == 0);
@@ -350,8 +372,8 @@ static void test_v11(void) {
     uint8_t ctx[73], idv[19], z[65], v[65], tt[SENSEI_COMMISSION_TT_SIZE];
     uint8_t k_c2n[16], k_n2c[16], nonce_n[16], share_p[65], share_v[65], confirm_v[32], confirm_p[32], pt[65];
     uint32_t sid = 0;
-    struct sensei_commission_verifier ver;
-    struct sensei_commission_prover pro;
+    struct sensei_commission_verifier ver = {0};
+    struct sensei_commission_prover pro = {0};
 
     record_of(s->reg, &rec);
     params = rec.params;
@@ -438,7 +460,7 @@ static void test_v11(void) {
 
 static void test_v12(void) {
   const vec_com_ses_t *s = &vec_com_ses[0];
-  struct sensei_commission_channel node, host, rx_a, rx_b;
+  struct sensei_commission_channel node = {0}, host = {0}, rx_a = {0}, rx_b = {0};
   struct sensei_commission_channel *chs[2] = {&host, &node}; /* role 0: the commissioner receives; 1: the node */
 
   CHECK(sensei_commission_channel_open(&node, C0, SENSEI_COMMISSION_VERIFIER, s->k_c2n, s->k_n2c, s->sid) == 0);
@@ -495,7 +517,7 @@ static void test_v12(void) {
   /* seal: limits, closed channel, counters */
   {
     uint8_t big[400] = {0}, out[400];
-    struct sensei_commission_channel ch;
+    struct sensei_commission_channel ch = {0};
     int n;
 
     CHECK(sensei_commission_channel_open(&ch, C0, SENSEI_COMMISSION_VERIFIER, s->k_c2n, s->k_n2c, s->sid) == 0);
@@ -711,7 +733,7 @@ static void test_v15b(void) {
     const vec_com_w0m_t *w = &vec_com_w0m[i];
     const vec_com_ses_t *s = &vec_com_ses[w->ses];
     struct sensei_commission_record rec;
-    struct sensei_commission_verifier v;
+    struct sensei_commission_verifier v = {0};
     struct sensei_commission_verifier_cfg cfg;
     uint8_t nonce_n[16], sv[65], cv[32];
 
@@ -765,7 +787,7 @@ static void test_v15c(void) {
 static void test_v15d(void) {
   const vec_com_ses_t *s = &vec_com_ses[VEC_COM_WRONG_SES];
   struct sensei_commission_record rec;
-  struct sensei_commission_verifier v;
+  struct sensei_commission_verifier v = {0};
   struct sensei_commission_verifier_cfg cfg;
   uint8_t nonce_n[16], sv[65], cv[32];
 
@@ -823,7 +845,7 @@ static void pair_pake1(struct pair *a, uint32_t now) {
 }
 
 static void test_flow(void) {
-  struct pair a;
+  struct pair a = {0};
 
   /* the whole run with real random numbers */
   {
@@ -893,8 +915,53 @@ static void test_flow(void) {
   }
 }
 
+/* begin on a session that is still open ends it first: its key handles are destroyed, none leaks (a PSA key slot is
+ * not given back by clearing the struct). The same for the prover and the channel. */
+static void test_begin_twice(void) {
+  struct pair a = {0};
+  struct sensei_commission_verifier_cfg cfg;
+  struct sensei_commission_channel ch = {0};
+  const vec_com_ses_t *s = &vec_com_ses[0];
+  uint8_t nn[16];
+
+  flash_reset(0, 0);
+  pair_begin(&a, 0);
+  pair_pake1(&a, 1); /* the prover is open */
+  CHECK(sensei_commission_verifier_pake3(&a.v, 2, a.confirm_p) == 0);
+  CHECK(R.imports == 4 && R.destroys == 0); /* two keys each */
+  rng_put(s->nonce_n, 16);
+  rng_put_scalar(s->x);
+  cfg = cfg_for(&a.rec, NODE);
+  CHECK(sensei_commission_verifier_begin(&a.v, &cfg, a.nonce_g, 3, nn) == 0);
+  CHECK(R.destroys == 2 && sensei_commission_verifier_state(&a.v) == SENSEI_COMMISSION_BEGUN);
+  CHECK(sensei_commission_prover_begin(&a.p, &CT, a.w0, a.w1, NODE, &a.rec.params, a.nonce_g, nn) == 0);
+  CHECK(R.destroys == 4 && a.p.state == SENSEI_COMMISSION_BEGUN);
+  sensei_commission_verifier_end(&a.v);
+  sensei_commission_prover_end(&a.p);
+  CHECK(R.imports == R.destroys);
+  /* a begin that fails (bad record) after a running session also ends the old one */
+  pair_begin(&a, 0);
+  pair_pake1(&a, 1);
+  CHECK(sensei_commission_verifier_pake3(&a.v, 2, a.confirm_p) == 0);
+  a.rec.params.log2n = 13;
+  cfg = cfg_for(&a.rec, NODE);
+  CHECK(sensei_commission_verifier_begin(&a.v, &cfg, a.nonce_g, 3, nn) == SENSEI_SECURE_ERR_FORMAT);
+  CHECK(R.destroys == 2 && is_zeros(&a.v, sizeof(a.v)));
+  sensei_commission_prover_end(&a.p);
+  CHECK(R.imports == R.destroys);
+  /* the channel */
+  ct_init();
+  CHECK(sensei_commission_channel_open(&ch, &CT, SENSEI_COMMISSION_VERIFIER, s->k_c2n, s->k_n2c, s->sid) == 0);
+  CHECK(sensei_commission_channel_open(&ch, &CT, SENSEI_COMMISSION_PROVER, s->k_c2n, s->k_n2c, s->sid) == 0);
+  CHECK(R.imports == 4 && R.destroys == 2 && ch.to_node);
+  CHECK(sensei_commission_channel_open(&ch, &CT, SENSEI_COMMISSION_PROVER, s->k_c2n, s->k_n2c, 0) ==
+        SENSEI_SECURE_ERR_STATE);
+  CHECK(R.destroys == 4 && !ch.open); /* the old one is gone also when the new one is refused */
+  CHECK(R.imports == R.destroys);
+}
+
 static void test_aborts(void) {
-  struct pair a;
+  struct pair a = {0};
   uint8_t out[100], sv[65], cv[32];
   size_t ol;
 
@@ -988,7 +1055,7 @@ static void test_aborts(void) {
 }
 
 static void test_tamper(void) {
-  struct pair a;
+  struct pair a = {0};
   uint8_t sv[65], cv[32], bad[65];
 
   /* every byte of shareP changed: never accepted as a valid exchange; an invalid point is not counted, a valid
@@ -1090,7 +1157,7 @@ static void test_tamper(void) {
 }
 
 static void test_time(void) {
-  struct pair a;
+  struct pair a = {0};
   uint8_t out[100], msg[2] = {1, 2};
   size_t ol;
   int n;
@@ -1165,7 +1232,7 @@ static void test_time(void) {
 }
 
 static void test_counting(void) {
-  struct pair a;
+  struct pair a = {0};
   uint8_t sv[65], cv[32];
 
   /* lockout: 30 failures since the last success (the default) stop a session at begin and at pake1 */
@@ -1259,7 +1326,7 @@ static void test_counting(void) {
 }
 
 static void test_backend_faults(void) {
-  struct pair a;
+  struct pair a = {0};
   uint8_t sv[65], cv[32];
 
   for (int what = 0; what < 3; what++) {
@@ -1292,7 +1359,7 @@ static void test_backend_faults(void) {
 /* Random garbage at the receivers of kind 5 and at the share and record parsers never opens or accepts anything. */
 static void test_garbage(void) {
   const vec_com_ses_t *s = &vec_com_ses[0];
-  struct sensei_commission_channel ch;
+  struct sensei_commission_channel ch = {0};
   uint8_t f[330], out[400];
   uint32_t seed = 12345;
   size_t ol;
@@ -1344,6 +1411,7 @@ int main(void) {
   test_v15c();
   test_v15d();
   test_flow();
+  test_begin_twice();
   test_aborts();
   test_tamper();
   test_time();

@@ -44,6 +44,7 @@ ZTEST(sensei_commission, test_v15b) { test_v15b(); }
 ZTEST(sensei_commission, test_v15c) { test_v15c(); }
 ZTEST(sensei_commission, test_v15d) { test_v15d(); }
 ZTEST(sensei_commission, test_flow) { test_flow(); }
+ZTEST(sensei_commission, test_begin_twice) { test_begin_twice(); }
 ZTEST(sensei_commission, test_aborts) { test_aborts(); }
 ZTEST(sensei_commission, test_tamper) { test_tamper(); }
 ZTEST(sensei_commission, test_time) { test_time(); }

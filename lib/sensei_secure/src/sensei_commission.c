@@ -198,11 +198,12 @@ size_t sensei_commission_transcript(uint8_t *out, size_t cap, const uint8_t *ctx
                                     const uint8_t z[SENSEI_COMMISSION_POINT_SIZE],
                                     const uint8_t v[SENSEI_COMMISSION_POINT_SIZE],
                                     const uint8_t w0[SENSEI_COMMISSION_SCALAR_SIZE]) {
-  size_t need =
-      10 * 8 + ctx_len + id_p_len + id_v_len + 6 * SENSEI_COMMISSION_POINT_SIZE + SENSEI_COMMISSION_SCALAR_SIZE;
+  const size_t fixed = 10 * 8 + 6 * SENSEI_COMMISSION_POINT_SIZE + SENSEI_COMMISSION_SCALAR_SIZE;
   size_t pos = 0;
 
-  if (cap < need) {
+  /* the lengths come from the caller: compare without adding them up first (the sum could wrap) */
+  if (cap < fixed || ctx_len > cap - fixed || id_p_len > cap - fixed - ctx_len ||
+      id_v_len > cap - fixed - ctx_len - id_p_len) {
     return 0;
   }
   pos = tt_item(out, pos, ctx, ctx_len);
@@ -348,6 +349,7 @@ int sensei_commission_channel_open(struct sensei_commission_channel *ch, const s
                                    uint32_t sid) {
   const bool prover = role == SENSEI_COMMISSION_PROVER;
 
+  sensei_commission_channel_close(ch); /* a channel that is open is closed first: its key handles must not leak */
   memset(ch, 0, sizeof(*ch));
   if (sid == 0) {
     return ERR_STATE;
@@ -468,6 +470,9 @@ int sensei_commission_verifier_begin(struct sensei_commission_verifier *v,
                                      uint8_t nonce_n_out[SENSEI_COMMISSION_NONCE_SIZE]) {
   const struct sensei_secure_crypto *c;
 
+  if (v->state != SENSEI_COMMISSION_IDLE) {
+    sensei_commission_verifier_end(v); /* a session that is still running: destroy its key handles first */
+  }
   memset(v, 0, sizeof(*v));
   if (!cfg || !nonce_g || !nonce_n_out || !cfg->record || !cfg->counters || !cfg->save_counters ||
       !backend_ok(cfg->c)) {
@@ -670,6 +675,9 @@ int sensei_commission_prover_begin(struct sensei_commission_prover *p, const str
                                    const uint8_t nonce_n[SENSEI_COMMISSION_NONCE_SIZE]) {
   int err;
 
+  if (p->state != SENSEI_COMMISSION_IDLE) {
+    sensei_commission_prover_end(p);
+  }
   memset(p, 0, sizeof(*p));
   if (!w0 || !w1 || !params || !nonce_g || !nonce_n || !backend_ok(c)) {
     return ERR_STATE;

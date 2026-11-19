@@ -80,12 +80,13 @@ endchoice
 
 config SENSEI_SECURE_COMMISSION_PLAIN_VERIFIER
 	bool "Keep the verifier record in plain flash when sealing is off (simulators)"
-	default y if ARCH_POSIX
-	depends on SENSEI_SECURE_SETTINGS && !SENSEI_SECURE_SETTINGS_SEAL
+	default y
+	depends on ARCH_POSIX && SENSEI_SECURE_SETTINGS && !SENSEI_SECURE_SETTINGS_SEAL
 	help
 	  Without CONFIG_SENSEI_SECURE_SETTINGS_SEAL the record e2e_cmv would be stored unsealed, and anyone who reads the
-	  flash could guess the setup code offline. Without this option the store function refuses (-ENOTSUP). It is on
-	  for the simulators; a device that keeps verifiers must seal (HUK).
+	  flash could guess the setup code offline. Only the POSIX simulators can have it (the option depends on
+	  ARCH_POSIX); on a board the store function refuses (-ENOTSUP) without sealing, so a device that keeps verifiers
+	  must seal (HUK).
 
 endif # SENSEI_SECURE_COMMISSION
 
@@ -164,6 +165,7 @@ config SENSEI_SECURE_SETTINGS_SEAL_HUK
 
 config SENSEI_SECURE_SETTINGS_SEAL_TEST_KEY
 	bool "Fixed key for tests (native_sim)"
+	depends on ARCH_POSIX
 	help
 	  zephyr/sensei_e2e_testkey.c: a fixed key that a test can change or make fail. Never for a product: the
 	  key is in the image.

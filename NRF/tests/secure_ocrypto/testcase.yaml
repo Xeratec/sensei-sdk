@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+# SPDX-License-Identifier: Apache-2.0
+---
+# Build only (nothing runs on hardware here): the SPAKE2+ commissioning with the ocrypto backend on the application core of
+# the nRF5340 (SENSEI board). The default platforms of scripts/twister.sh do not include it; run it with
+#   TWISTER_PLATFORM=nrf5340_senseiv1/nrf5340/cpuapp scripts/twister.sh -- -s sensei.secure.ocrypto -s sensei.secure.ocrypto.node -s sensei.secure.ocrypto.base
+# The flash of the three builds is in the README of this folder.
+common:
+  platform_allow:
+    - nrf5340_senseiv1/nrf5340/cpuapp
+  build_only: true
+  tags: sensei secure crypto
+tests:
+  # With the self-check, the vectors and the commissioner side.
+  sensei.secure.ocrypto: {}
+  # What a node pays: only the calls of the node (no vectors, no prover). Its size minus the base is the cost.
+  sensei.secure.ocrypto.node:
+    extra_args: EXTRA_CFLAGS=-DNODE_FOOTPRINT
+  # The key store of the node without the commissioning, to compare with.
+  sensei.secure.ocrypto.base:
+    extra_configs:
+      - CONFIG_SENSEI_SECURE_COMMISSION=n

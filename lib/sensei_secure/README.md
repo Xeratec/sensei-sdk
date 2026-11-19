@@ -396,9 +396,9 @@ mod n, again in the 2^-250 case of 0). A test gives a backend whose `random()` r
 The NCS PSA API has SPAKE2+ only in the Oberon driver, which does not exist on native_sim, and its API takes the secret
 scalar from inside PSA; ocrypto takes it as an argument, so the RFC vectors run on the chip. The Zephyr option is
 `CONFIG_SENSEI_SECURE_COMMISSION` (selects HMAC and HKDF of the crypto library; `sensei_commission.c` is built only with it).
-Flash on the nRF5340 (NCS v3.4.1, SENSEI board, Oberon driver; `NRF/tests/secure_ocrypto`): about 7.9 kB for what a node
-calls (verifier, record, settings, fingerprint; includes about 2 kB of ocrypto that was not linked before, mainly SHA-256), no
-static RAM. A session is about 380 B. `pake1` needs about 1.5 kB of stack in this library (544 B of its own and 864 B in
+Flash on the nRF5340 (NCS v3.4.1, SENSEI board, Oberon driver; `NRF/tests/secure_ocrypto`): about 7.1 kB for what a node
+calls (verifier, record, settings, fingerprint; includes about 1 kB of ocrypto that was not linked before: the point and
+scalar functions; SHA-256 reuses the incremental copy that HMAC and HKDF have), no static RAM. A session is about 380 B. `pake1` needs about 1.5 kB of stack in this library (544 B of its own and 864 B in
 the key derivation, which holds the 613 B transcript), plus what the crypto backend uses.
 
 **Settings** (`include/sensei_commission_settings.h`, with `CONFIG_SENSEI_SECURE_SETTINGS`): `e2e_cmv` is the verifier record,
@@ -480,4 +480,4 @@ and its deletion at the confirmation, a damaged plain key, the key id of the rat
 `NRF/tests/secure_settings` the records `e2e_cmv` and `e2e_cmf` (sealed, plain in the simulator build, tampered, wrong key,
 failing provider and writes, erase by reset, a session with the counters in the settings). `NRF/tests/spake2p_ocrypto`
 runs the ocrypto backend on a Cortex-M33 in QEMU against the vectors; `NRF/tests/secure_ocrypto` is the build check for the
-nRF5340 (sizes, and a self-check for the first run on a board).
+nRF5340 (Twister, build only; sizes, and a self-check for the first run on a board).

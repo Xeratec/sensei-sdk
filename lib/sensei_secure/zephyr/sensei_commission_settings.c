@@ -60,7 +60,9 @@ struct got {
 static int read_cb(const char *key, size_t len, settings_read_cb read_cb, void *cb_arg, void *param) {
   struct got *g = param;
 
-  ARG_UNUSED(key);
+  if (key != NULL) { /* a record below this name, not the one we want */
+    return 0;
+  }
   g->found = true;
   g->len = len;
   if (len == g->cap && read_cb(cb_arg, g->buf, len) != (ssize_t)len) {

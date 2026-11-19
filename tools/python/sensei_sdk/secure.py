@@ -658,6 +658,7 @@ class _Next:
     root: bytes | None
     k_down: bytes
     up: ChainState
+    seq: int = 0  # 1 for the first answer of a generation, +1 for each answer that replaces it: the newer one wins a merge
 
     def same_request(self, gen: int, up_base: int, e_n_pub: bytes) -> bool:
         return self.gen == gen and self.up.up_base == up_base and self.e_n_pub == e_n_pub
@@ -674,6 +675,7 @@ class _Node:
     next: _Next | None = None
     prev: ChainState | None = None  # previous generation; gen 0: only gen, c1 and t count (the key is k_up)
     t_up: float = 0.0  # unix time of the last uplink that verified (any generation), 0 if unknown
+    prov: int = 0  # provisioning counter: `add_node` raises it, a copy of the node with a higher one replaces the ratchet state
 
     @property
     def keys(self) -> SessionKeys:
@@ -691,6 +693,7 @@ class _Retired:
     key_id: int
     up: ReplayWindow
     down_ctr: int = 0  # files of version 1 only: folded into KeyStore._down when the key returns
+    prov: int = 0  # `prov` of the node, so that the same key added again goes on above it
 
 
 def _node_text(node_id: int) -> str:
@@ -741,6 +744,7 @@ def _node_to_json(n: _Node) -> dict:
         "up_highest": n.up.highest,
         "up_window": f"{n.up.bitmap:016x}",
         "t_up": round(n.t_up, 3),
+        "prov": n.prov,
         "cur": {
             "gen": n.cur.gen,
             "root": _hex(n.cur.root),
@@ -760,6 +764,7 @@ def _node_to_json(n: _Node) -> dict:
             "k_down": n.next.k_down.hex(),
             "ck": n.next.up.ck.hex(),
             "t": round(n.next.up.t, 3),
+            "seq": n.next.seq,
         }
     if n.prev is not None:
         out["prev_up"] = {"gen": n.prev.gen, "c1": n.prev.c1, **_chain_to_json(n.prev)}
@@ -773,6 +778,7 @@ def _retired_to_json(r: _Retired) -> dict:
         "up_highest": r.up.highest,
         "up_window": f"{r.up.bitmap:016x}",
         "down_ctr": r.down_ctr,
+        "prov": r.prov,
     }
 
 
@@ -797,7 +803,14 @@ def _node_from_json(n: dict) -> _Node:
         cur.up = _chain_from_json(gen, c)
         if cur.up is None:
             raise ValueError("a generation without its chain")
-    node = _Node(node_pub, key_id, k_up, k_down, window, cur, t_up = float(n.get("t_up") or 0.0))
+    node = _Node(node_pub,
+                 key_id,
+                 k_up,
+                 k_down,
+                 window,
+                 cur,
+                 t_up = float(n.get("t_up") or 0.0),
+                 prov = int(n.get("prov", 0)))
     x = n.get("next")
     if x is not None:
         ck = _unhex(x["ck"], 32)
@@ -811,6 +824,7 @@ def _node_from_json(n: dict) -> _Node:
             _unhex(x.get("root"), 32),
             _unhex(x["k_down"], 16),
             ChainState(gen + 1, base, 0, ck, float(x.get("t") or 0.0)),
+            int(x.get("seq", 0)),
         )
     p = n.get("prev_up")
     if p is not None:
@@ -832,7 +846,8 @@ def _node_from_json(n: dict) -> _Node:
 
 def _retired_from_json(n: dict) -> _Retired:
     return _Retired(bytes.fromhex(n["node_pub"]), int(n["key_id"]),
-                    ReplayWindow(int(n["up_highest"]), int(n["up_window"], 16)), int(n.get("down_ctr", 0)))
+                    ReplayWindow(int(n["up_highest"]), int(n["up_window"], 16)), int(n.get("down_ctr", 0)),
+                    int(n.get("prov", 0)))
 
 
 @dataclass
@@ -991,6 +1006,16 @@ class NodeState:
     static_keys: bool  # the static keys of generation 0 are still held
 
 
+@dataclass(frozen = True)
+class NodeBackup:
+    """What `KeyStore.add_node` replaced, for `KeyStore.rollback_node`. `changed` is False if add_node did nothing."""
+
+    node_id: int
+    old: _Node | None  # the node before (None: it was new)
+    prov: int  # provisioning counter of the node that add_node made
+    changed: bool
+
+
 def _prune_prev(node: _Node) -> None:
     """Drop what is no longer needed: the previous chain once the replay window is past its end (highest - 63 >= c1, all
     its counters are refused anyway), one that does not belong to the generation before `cur`, and the static keys of
@@ -1004,13 +1029,23 @@ def _prune_prev(node: _Node) -> None:
         node.k_up = node.k_down = None
 
 
+def _adopt_ratchet(mine: _Node, theirs: _Node) -> None:
+    """`theirs` was provisioned again (higher `prov`): its whole ratchet state replaces ours, whatever the generations."""
+    mine.cur, mine.next, mine.prev = theirs.cur, theirs.next, theirs.prev
+    mine.k_up, mine.k_down = theirs.k_up, theirs.k_down
+    mine.t_up = max(mine.t_up, theirs.t_up)
+    mine.prov = theirs.prov
+    _prune_prev(mine)
+
+
 def _cur_pos(c: _Cur) -> tuple[int, int]:
     return c.gen, c.up.idx if c.up is not None else 0
 
 
 def _merge_ratchet(mine: _Node, theirs: _Node) -> None:
-    """Merge the ratchet state of the same node from another copy of the file (design 1.5): the higher generation wins, in
-    one generation the chain that is further; `next` only if it is the generation after `cur` (the file wins);
+    """Merge the ratchet state of the same node from another copy of the file (design 1.5), for copies with the same
+    `prov`: the higher generation wins, in one generation the chain that is further; `next` only if it is the generation
+    after `cur` (the newer answer, `seq`, wins; the file on a tie);
     `prev_up` of the generation before `cur`, the further chain and the later end; the static keys only while a
     generation 0 chain is in use."""
     a, b = mine.cur, theirs.cur
@@ -1021,11 +1056,9 @@ def _merge_ratchet(mine: _Node, theirs: _Node) -> None:
             a.root = b.root
         if a.up is not None and b.up is not None and a.gen == b.gen:
             a.up.t = max(a.up.t, b.up.t)
-    nxt = None
-    for cand in (theirs.next, mine.next):
-        if cand is not None and cand.gen == a.gen + 1:
-            nxt = cand
-            break
+    # `next`: the newer answer wins (a node that asked again with a new key), the file on a tie
+    cands = [c for c in (theirs.next, mine.next) if c is not None and c.gen == a.gen + 1]
+    nxt = max(cands, key = lambda c: c.seq) if cands else None
     if nxt is not None and mine.next is not None and nxt.same_request(mine.next.gen, mine.next.up.up_base,
                                                                       mine.next.e_n_pub):
         nxt = mine.next  # the same mix: keep the object (its cache) and the later time
@@ -1081,6 +1114,11 @@ class KeyStore:
     key of the current generation. A GUI that keeps its own file and does not answer follows the file of the collector
     (`follow=`): it takes over the current generation, the answered mix and the previous chain (not the root key, the
     sender ids and the counters). A key store without it loses access at the next mix of a node.
+
+    Provisioning again (`add_node`) raises the node's `prov`; the copy with the higher `prov` wins in a merge and in a
+    follower, so the reset is not undone by a process that holds an older state. `add_node` returns a `NodeBackup` for
+    `rollback_node`. `generation`, `node_state`, the follower refresh and every change take the store lock (re-entrant);
+    the walk and the tag check run outside it.
     """
 
     def __init__(
@@ -1257,7 +1295,11 @@ class KeyStore:
                     self._by_key_id[theirs.key_id] = node_id
             elif same:
                 mine.up = _merge_window(mine.up, theirs.up)
-                if node_id not in self._added:  # a node added here again starts in generation 0, whatever the file has
+                # a node that was provisioned again (`add_node`) starts in generation 0 with a higher `prov`: that copy
+                # wins in every process, the older one is ignored; the counters merge in any case
+                if theirs.prov > mine.prov:
+                    _adopt_ratchet(mine, theirs)
+                elif theirs.prov == mine.prov:
                     _merge_ratchet(mine, theirs)
                 else:
                     _prune_prev(mine)
@@ -1267,6 +1309,7 @@ class KeyStore:
                 self._retired[key_id] = theirs
             else:
                 mine.down_ctr = max(mine.down_ctr, theirs.down_ctr)
+                mine.prov = max(mine.prov, theirs.prov)
                 mine.up = _merge_window(mine.up, theirs.up)
 
     def save(self) -> None:
@@ -1331,16 +1374,25 @@ class KeyStore:
         """The sender id of this store in the downlinks it seals (32 bit, not 0). Made at random the first time and
         kept in the file."""
         if self._sender is None:
-            self._sender = secrets.randbelow(2**32 - 1) + 1
+            self._sender = self._unused_sender()
         self._senders[self._host] = self._sender
         return self._sender
+
+    def _unused_sender(self) -> int:
+        """A random sender id that no host of the file uses (the same sender twice would use one nonce twice under the
+        downlink key). The file is merged before: `save` and `new_sender` do it, `load` has read it."""
+        taken = set(self._senders.values())
+        while True:
+            sender = secrets.randbelow(2**32 - 1) + 1
+            if sender not in taken:
+                return sender
 
     def new_sender(self) -> int:
         """Take a new sender id and save it. For a copy of a key store file that another host uses: without it both
         hosts seal with the same sender and could use one counter twice."""
         with self._lock, self._file_lock():
             self._merge_from_disk()
-            self._sender = secrets.randbelow(2**32 - 1) + 1
+            self._sender = self._unused_sender()
             self._senders[self._host] = self._sender
             self._new_sender = True  # the save must not take the old one back from the file
             try:
@@ -1348,6 +1400,13 @@ class KeyStore:
             finally:
                 self._new_sender = False
             return self._sender
+
+    def set_epoch_rate(self, node_id: int, rate: float | None) -> None:
+        """Epochs per second that a node may start, for the time bound of the chain walk (default 1, which is 64 messages
+        per second). Set it higher for a node that streams over another link (BLE, USB) and that the collector may not
+        hear for hours: without it its first frame after such a gap is refused (`GapError`). None: the default again. Not
+        saved; set it at start."""
+        self.walker.set_epoch_rate(node_id, rate)
 
     def down_counter(self, node_id: int) -> int:
         """Last downlink counter used for a node (0 if none)."""
@@ -1358,11 +1417,19 @@ class KeyStore:
             raise SecureError("no backend key: run backend_keygen and load the store with its PEM")
         return self._pub
 
-    def add_node(self, node_id: int, node_pub: bytes) -> None:
+    def add_node(self, node_id: int, node_pub: bytes, reset: bool = True) -> NodeBackup:
         """Derive the keys of a node from its public key and start it in generation 0 (the node does the same when it is
         provisioned: it drops its ratchet state). A node that is added again with the same key keeps its counters (also
         what the key store has seen of it), but loses the ratchet state: `cur`, `next` and the previous chain are gone. A
-        new key starts new counters. The key of a node counts as the same if the node public key and the key id are."""
+        new key starts new counters. The key of a node counts as the same if the node public key and the key id are.
+
+        The reset is saved at once and counts in every process that shares the file and in every follower: the node
+        gets a higher provisioning counter (`prov`), and a copy with a lower one is ignored in a merge, so another
+        process that still holds generation 1 cannot bring it back. With `reset=False` a node that is known with the
+        same key is left as it is (nothing is reset, nothing is saved).
+
+        The reset happens before the node confirms. Keep the returned `NodeBackup` while the node is provisioned and
+        call `rollback_node` if that fails: the node then still has its old keys and the key store would refuse it."""
         if self._priv is None or self._pub is None:
             raise SecureError("the backend private key is not loaded")
         if not 0 <= node_id < 2**64:
@@ -1374,24 +1441,89 @@ class KeyStore:
             owner = self._by_key_id.get(keys.key_id)
             if owner is not None and owner != node_id:
                 raise SecureError(f"key id {keys.key_id:08x} is used by node {_node_text(owner)}")
+            same = old is not None and (old.node_pub, old.key_id) == (node_pub, keys.key_id)
+            if same and (not reset or
+                         (old.cur.gen == 0 and old.next is None and old.prev is None and old.k_up is not None)):
+                return NodeBackup(node_id, old, old.prov, False)  # nothing to reset
+            retired_before, down_before = dict(self._retired), self._down.get(node_id)
             window = ReplayWindow()
-            if old is not None and (old.node_pub, old.key_id) == (node_pub, keys.key_id):
-                if old.cur.gen == 0 and old.next is None and old.prev is None and old.k_up is not None:
-                    return  # nothing to reset
-                window = old.up
+            prov = 0
+            if same:
+                window = ReplayWindow(old.up.highest, old.up.bitmap)  # a copy: the old node is kept for the backup
+                prov = old.prov + 1
                 del self._by_key_id[old.key_id]
             else:
                 if old is not None:
+                    prov = old.prov + 1
                     self._retire(old)
                     del self._by_key_id[old.key_id]
                 # the same key as before (removed and added again) goes on from its counters
                 back = self._retired.pop(keys.key_id, None)
                 if back is not None and back.node_pub == node_pub:
                     window = back.up
+                    prov = max(prov, back.prov + 1)
                     self._down[node_id] = max(self._down.get(node_id, 0), back.down_ctr)
             self.walker.forget_node(node_id)
-            self._nodes[node_id] = _fresh_node(node_pub, keys, window)
+            node = _fresh_node(node_pub, keys, window)
+            node.prov = prov
+            self._nodes[node_id] = node
             self._by_key_id[keys.key_id] = node_id
+            self._added.add(node_id)
+            self._removed.discard(node_id)
+            try:
+                self._touch(now = True)
+            except BaseException:  # not saved: nothing changed, in memory either
+                self._by_key_id.pop(keys.key_id, None)
+                if old is None:
+                    del self._nodes[node_id]
+                else:
+                    self._nodes[node_id] = old
+                    self._by_key_id[old.key_id] = node_id
+                self._retired = retired_before
+                if down_before is None:
+                    self._down.pop(node_id, None)
+                else:
+                    self._down[node_id] = down_before
+                self._added.discard(node_id)
+                raise
+            return NodeBackup(node_id, old, prov, True)
+
+    def rollback_node(self, backup: NodeBackup) -> None:
+        """Undo an `add_node` that changed the node, because the provisioning of the node failed: the node has its old keys
+        and ratchet state again, in this process, in the file, in the other processes and in the followers of it (the
+        restored node gets a `prov` above the reset one). Counters only go up: what was received or sent meanwhile stays
+        counted. A node that was new is removed again (its counters are kept for the same key). Does nothing for a
+        backup of an `add_node` that changed nothing."""
+        if not backup.changed:
+            return
+        node_id, old = backup.node_id, backup.old
+        with self._lock, self._file_lock():
+            self._merge_from_disk()
+            cur = self._nodes.get(node_id)
+            if old is None:
+                if cur is not None:
+                    self.remove_node(node_id)
+                return
+            owner = self._by_key_id.get(old.key_id)
+            if owner is not None and owner != node_id:
+                raise SecureError(f"key id {old.key_id:08x} is used by node {_node_text(owner)}")
+            window = ReplayWindow(old.up.highest, old.up.bitmap)
+            prov = max(backup.prov, old.prov)
+            if cur is not None:
+                prov = max(prov, cur.prov)
+                if (cur.node_pub, cur.key_id) == (old.node_pub, old.key_id):
+                    window = _merge_window(window, cur.up)
+                else:
+                    self._retire(cur)
+                del self._by_key_id[cur.key_id]
+            back = self._retired.pop(old.key_id, None)
+            if back is not None and back.node_pub == old.node_pub:
+                window = _merge_window(window, back.up)
+                prov = max(prov, back.prov)
+            self.walker.forget_node(node_id)
+            self._nodes[node_id] = _Node(old.node_pub, old.key_id, old.k_up, old.k_down, window, old.cur, old.next,
+                                         old.prev, old.t_up, prov + 1)
+            self._by_key_id[old.key_id] = node_id
             self._added.add(node_id)
             self._removed.discard(node_id)
             self._touch(now = True)
@@ -1411,7 +1543,7 @@ class KeyStore:
     def _retire(self, node: _Node) -> None:
         """Keep the counters of a key that is dropped: if the key comes back it must not restart them. The keys and the
         ratchet state are not kept."""
-        self._retired[node.key_id] = _Retired(node.node_pub, node.key_id, node.up)
+        self._retired[node.key_id] = _Retired(node.node_pub, node.key_id, node.up, prov = node.prov)
 
     def node_ids(self) -> list[int]:
         return sorted(self._nodes)
@@ -1424,26 +1556,28 @@ class KeyStore:
 
     def generation(self, node_id: int) -> int:
         """Generation in use for the node: 0 until its first mix is used."""
-        self._follow_refresh()
-        return self._nodes[node_id].cur.gen
+        with self._lock:
+            self._follow_refresh()
+            return self._nodes[node_id].cur.gen
 
     def node_state(self, node_id: int) -> NodeState:
         """What a GUI or the metrics show of a node: generation, an answered mix that waits, the previous chain."""
-        self._follow_refresh()
-        n = self._nodes[node_id]
-        up = n.cur.up
-        return NodeState(
-            gen = n.cur.gen,
-            next_gen = None if n.next is None else n.next.gen,
-            next_since = None if n.next is None else n.next.up.t,
-            prev_gen = None if n.prev is None else n.prev.gen,
-            prev_ends = None if n.prev is None else n.prev.c1,
-            up_idx = None if up is None else up.idx,
-            up_base = None if up is None else up.up_base,
-            last_verified = None if up is None or not up.t else up.t,
-            highest = n.up.highest,
-            static_keys = n.k_up is not None,
-        )
+        with self._lock:  # _import of a follower must not run in the middle of a commit or a promotion
+            self._follow_refresh()
+            n = self._nodes[node_id]
+            up = n.cur.up
+            return NodeState(
+                gen = n.cur.gen,
+                next_gen = None if n.next is None else n.next.gen,
+                next_since = None if n.next is None else n.next.up.t,
+                prev_gen = None if n.prev is None else n.prev.gen,
+                prev_ends = None if n.prev is None else n.prev.c1,
+                up_idx = None if up is None else up.idx,
+                up_base = None if up is None else up.up_base,
+                last_verified = None if up is None or not up.t else up.t,
+                highest = n.up.highest,
+                static_keys = n.k_up is not None,
+            )
 
     # ---- the mix: the collector answers a request of a node ----
 
@@ -1500,8 +1634,11 @@ class KeyStore:
                 return None
             finally:
                 del e_c_priv  # not kept anywhere
+            # a request that replaces the open answer (the node dropped its state and asked again) makes a newer one, which
+            # wins a merge with the file
             node.next = _Next(req.gen, req.pub, e_c_pub, mix.root, mix.k_down,
-                              ChainState(req.gen, req.up_base, 0, mix.ck, self._clock()))
+                              ChainState(req.gen, req.up_base, 0, mix.ck, self._clock()),
+                              1 if nxt is None else nxt.seq + 1)
             try:
                 self._touch(now = True)  # fsync before the answer leaves
             except BaseException:
@@ -1530,14 +1667,23 @@ class KeyStore:
                     want = max(0, idx - 1)
                 _advance(self, sel.st, idx, walked, want, now)
         _prune_prev(node)
-        self._touch(now = promoted)  # a promotion is synced to disk at once
+        try:
+            self._touch(now = promoted)  # a promotion is synced to disk at once
+        except (OSError, SecureError) as exc:
+            # The message is verified and the node is promoted in memory: keep both and save again with the next
+            # message (or `flush`). A crash before that is no loss: `next` is still in the file, the next uplink of the
+            # new generation promotes it again.
+            self.stats["save_failed"] += 1
+            log.warning("key store %s: the promotion of node %s is not saved yet, will retry: %s", self.path,
+                        _node_text(node_id), exc)
         return promoted
 
     # ---- followers ----
 
     def _follow_refresh(self) -> None:
-        """A follower (`follow=`): read the followed file again if it changed (a stat per call, no lock; the file is
-        replaced atomically) and take over the ratchet state of the nodes it knows."""
+        """A follower (`follow=`): read the followed file again if it changed (a stat per call; the file is replaced
+        atomically) and take over the ratchet state of the nodes it knows. Takes the store lock (re-entrant), so the
+        import never runs in the middle of a commit or a promotion on another thread."""
         if self._follow is None:
             return
         try:
@@ -1545,27 +1691,43 @@ class KeyStore:
         except OSError:
             return
         sig = (st.st_mtime_ns, st.st_size, st.st_ino)
-        if sig == self._follow_sig:
-            return
-        self._follow_sig = sig
+        with self._lock:
+            if sig == self._follow_sig:
+                return
+            self._follow_sig = sig
+            f = self._read_followed()
+            if f is None:
+                return
+            for node_id, theirs in f.nodes.items():
+                mine = self._nodes.get(node_id)
+                if mine is not None and (mine.node_pub, mine.key_id) == (theirs.node_pub, theirs.key_id):
+                    self._import(mine, theirs)
+                    self._dirty = True
+
+    def _read_followed(self) -> _File | None:
+        assert self._follow is not None
         try:
             data, _ = _open_text(self._follow.read_text(), self._follow_key, self._follow)
-            f = self._parse_file(data)
+            return self._parse_file(data)
         except (KeyError, ValueError, TypeError, OSError, SecureError) as exc:
             self._warn("follow", "cannot follow key store %s: %s", self._follow, exc)
-            return
-        for node_id, theirs in f.nodes.items():
-            mine = self._nodes.get(node_id)
-            if mine is not None and (mine.node_pub, mine.key_id) == (theirs.node_pub, theirs.key_id):
-                self._import(mine, theirs)
-                self._dirty = True
+            return None
 
     def _import(self, mine: _Node, theirs: _Node) -> None:
         """Take over cur, next (without root) and prev_up of the followed copy: never the root key, the replay window or
-        the counters. The chain of the followed file is used when it is a later generation, or further in the same one."""
+        the counters. The chain of the followed file is used when it is a later generation, or further in the same one. A
+        copy with a higher `prov` (the node was provisioned again there) replaces everything, a lower one is ignored."""
         a, b = mine.cur, theirs.cur
         mine.t_up = max(mine.t_up, theirs.t_up)
-        if _cur_pos(b) > _cur_pos(a):
+        if theirs.prov < mine.prov:
+            return
+        if theirs.prov > mine.prov:
+            mine.cur = _Cur(b.gen, None, b.k_down, None if b.up is None else b.up.copy())
+            mine.prev = None if theirs.prev is None else theirs.prev.copy()
+            mine.next = None
+            mine.k_up, mine.k_down = theirs.k_up, theirs.k_down
+            mine.prov = theirs.prov
+        elif _cur_pos(b) > _cur_pos(a):
             up = None if b.up is None else b.up.copy()
             mine.cur = _Cur(b.gen, None, b.k_down, up)
             if b.gen > a.gen:
@@ -1577,7 +1739,7 @@ class KeyStore:
             if mine.next is None or not mine.next.same_request(theirs.next.gen, theirs.next.up.up_base,
                                                                theirs.next.e_n_pub):
                 t = theirs.next
-                mine.next = _Next(t.gen, t.e_n_pub, t.e_c_pub, None, t.k_down, t.up.copy())
+                mine.next = _Next(t.gen, t.e_n_pub, t.e_c_pub, None, t.k_down, t.up.copy(), t.seq)
         elif mine.next is not None and (mine.next.gen != cur.gen + 1 or a.gen == b.gen):
             mine.next = None  # the followed file has dropped or replaced it
         if mine.prev is None and theirs.prev is not None and theirs.prev.gen == cur.gen - 1:
@@ -1683,7 +1845,7 @@ class _Selection:
     t_ref: float | None = None
 
 
-def _select(node: _Node, h: Header, walker: Walker, now: float) -> _Selection:
+def _select(node: _Node, h: Header, walker: Walker, now: float, node_id: int | None = None) -> _Selection:
     """The key material for an envelope, by its generation bits (cur, next and prev differ mod 4). Cheap: no walk, no
     crypto. Raises GenerationError (no such generation: a node that is ahead, or a generation that was dropped), EpochError
     or GapError."""
@@ -1718,7 +1880,7 @@ def _select(node: _Node, h: Header, walker: Walker, now: float) -> _Selection:
         # request waited long. Count from the epoch of the last verified uplink of the node, not from the head.
         ref_idx = max(0, ratchet.epoch(node.up.highest) - st.up_base)
         t_ref = node.t_up or st.t
-    walker.precheck(st, idx, now, None, ref_idx, t_ref)
+    walker.precheck(st, idx, now, None, ref_idx, t_ref, node_id)
     return _Selection(which, gen, st, None, (st.idx, st.ck), ref_idx, t_ref)
 
 
@@ -1741,7 +1903,7 @@ def _open_up(payload: bytes, store: KeyStore, commit: bool) -> Opened:
                 node.up.check(h.counter)
             now = store._clock()
             try:
-                sel = _select(node, h, store.walker, now)
+                sel = _select(node, h, store.walker, now, node_id)
             except GenerationError:
                 if not resynced and store._resync():
                     resynced = True
@@ -1788,7 +1950,7 @@ def _open_up(payload: bytes, store: KeyStore, commit: bool) -> Opened:
                 continue
             node.up.check(h.counter)  # a duplicate that was processed meanwhile
             try:
-                again = _select(node, h, store.walker, store._clock())
+                again = _select(node, h, store.walker, store._clock(), node_id)
             except (GenerationError, GapError, EpochError):
                 continue
             if (again.which, again.gen) != (sel.which, sel.gen) or again.st is not sel.st:

@@ -4,13 +4,15 @@
 # Authors:
 # - Philip Wiese <wiesep@iis.ee.ethz.ch>
 """Forged messages and the cost of the chain walk (Decision M2 of the Phase 2 review): time-bound gap, cache of walked
-keys, budgets, walk outside the store lock, and the legitimate long gap that must still open."""
+keys, budgets, walk outside the store lock, and the legitimate long gap that must still open. The last section is the
+review of Phase 4: a flood of forgeries next to a checkpoint, the atomic budget, the rate per node, the weakref callback."""
 
 from __future__ import annotations
 
 import os
 import threading
 import time
+from collections import Counter
 
 import pytest
 from fs_helpers import NODE_ID, Clock, make_rig, slack_walker
@@ -378,3 +380,158 @@ def test_timings_before_and_after(tmp_path, capsys):
               f" {sorted(ts)[50] * 1000:.2f} ms, max {max(ts[1:]) * 1000:.1f} ms")
     assert t_before > 0.2 and t_after < 0.02
     assert sorted(ts)[50] < 0.01
+
+
+# ---- review of Phase 4 (M2, L1, L2, L5) ----
+
+
+def test_a_forged_flood_next_to_a_checkpoint_does_not_starve_real_long_walks(tmp_path, capsys):
+    """20 forgeries a second name the key id at 65 to 85 steps past a checkpoint (what drained the budget when walks of 64
+    steps were free), while the node sends frames that need walks of hundreds of steps: they all open."""
+    rig = gen1_rig(tmp_path)
+    store, walker = rig.store, rig.store.walker
+    up_base = store.node_state(NODE_ID).up_base
+    rate, minutes = 20, 8
+    errors: Counter = Counter()
+    forged_ms, real_ms = [], []
+    for minute in range(minutes):
+        for s in range(60 * rate):
+            rig.clock.advance(1.0 / rate)
+            idx0 = store.node_state(NODE_ID).up_idx
+            k = ((idx0 >> 10) + 1 + s % 3) << 10  # a checkpoint ahead of the stored key
+            bad = forged(rig, (up_base + k + 65 + s % 20) << 6)
+            t, exc = timed(lambda bad = bad: secure.open_sealed(bad, store))
+            errors[type(exc).__name__] += 1
+            forged_ms.append(t * 1000)
+        if minute % 2 == 1:  # a real frame that needs a walk of 300 to 1500 steps
+            rig.node.tx_counter += 64 * (300 + 400 * (minute // 2))
+            env = rig.up(b"real %d" % minute)
+            t = time.perf_counter()
+            assert secure.open_sealed(env, store)[2] == b"real %d" % minute
+            real_ms.append((time.perf_counter() - t) * 1000)
+    assert set(errors) == {"SecureError"}, errors  # forged: authentication only, never WalkBudgetError or GapError
+    assert store.stats["budget_refused"] == 0
+    assert walker._nodes[NODE_ID].available(rig.clock()) > chainwalk.NODE_BURST // 2  # the bucket is not drained
+    with capsys.disabled():
+        fs = sorted(forged_ms)
+        print(
+            f"\n{sum(errors.values())} forged frames at {rate}/s over {minutes} min: median {fs[len(fs) // 2]:.2f} ms, max "
+            f"{fs[-1]:.1f} ms; real frames with walks of 300 to 1500 steps: " +
+            ", ".join(f"{m:.2f} ms" for m in real_ms) + f"; {walker.steps_total} steps in all")
+
+
+def test_a_walk_of_one_checkpoint_interval_is_free_and_only_new_ground_is_charged():
+    clock = Clock()
+    w = Walker(slack = 1 << 20, clock = clock)
+    st = ChainState(1, 1, 0, bytes(32))
+    assert chainwalk.FREE_STEPS == 1 << chainwalk.CHECKPOINT_SHIFT
+    w.walk(7, st, 1000)  # one interval from the stored key: free
+    assert 7 not in w._nodes or w._nodes[7].tokens == chainwalk.NODE_BURST
+    w.walk(7, st, 3000)  # 3000 steps from the stored key: charged
+    assert w._nodes[7].tokens == chainwalk.NODE_BURST - 3000
+    assert w._global.tokens == chainwalk.GLOBAL_BURST - 3000
+    assert w.cached(st) == 2  # the checkpoints 1024 and 2048
+    # forgeries up to one interval past the highest cached checkpoint cost nothing, however many
+    steps0, tokens = w.steps_total, w._nodes[7].tokens
+    for k in range(200):
+        w.walk(7, st, 2048 + 100 + k * 4)
+    assert w.steps_total - steps0 > 200 * 100  # they did walk
+    assert w._nodes[7].tokens == tokens and w._global.tokens == chainwalk.GLOBAL_BURST - 3000
+    # a walk past the next checkpoint grows the cache and is charged from the highest cached one
+    w.walk(7, st, 5000)
+    assert w._nodes[7].tokens == tokens - (5000 - 2048) and w.cached(st) == 4
+
+
+def test_the_budget_is_reserved_atomically_across_threads():
+    """Eight threads of one node ask for far walks at the same time: together they get the budget once, not eight times."""
+    burst = 20_000
+    w = Walker(slack = 1 << 20, node_burst = burst, node_steps_min = 1, clock = Clock())
+    states = [ChainState(1, 1, 0, bytes(32)) for _ in range(8)]
+    barrier = threading.Barrier(8)
+    results: list = []
+
+    def run(st):
+        barrier.wait()
+        try:
+            w.walk(5, st, 100_000)
+            results.append("done")
+        except WalkBudgetError:
+            results.append("budget")
+
+    threads = [threading.Thread(target = run, args = (st,)) for st in states]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join(60)
+    assert results.count("budget") == 8
+    assert 0 < w.steps_total <= burst
+    # what was reserved and not walked is back: another node's bucket and the global one are not charged for it
+    assert w._nodes[5].tokens <= burst - w.steps_total + 1 and w._global.tokens >= chainwalk.GLOBAL_BURST - w.steps_total
+
+
+def test_a_walk_that_ends_early_gives_back_what_it_did_not_use():
+    w = Walker(slack = 1 << 20, clock = Clock())
+    st = ChainState(1, 1, 0, bytes(32))
+    w.walk(1, st, 20_000)
+    assert w.steps_total == 20_000
+    assert w._nodes[1].tokens == chainwalk.NODE_BURST - 20_000  # not the reserved amount, the walked one
+    assert w._global.tokens == chainwalk.GLOBAL_BURST - 20_000
+
+
+def test_epoch_rate_per_node(tmp_path):
+    """A node that streams over BLE or USB (more than 64 messages a second) while the collector hears nothing for two
+    hours is refused with the default rate and opens with the rate of that node."""
+    rig = gen1_rig(tmp_path)
+    store = rig.store
+    rig.clock.advance(7200)
+    rig.node.tx_counter += 64 * 20_000  # 20000 epochs in two hours: 2.8 a second
+    env = rig.up(b"after the stream")
+    with pytest.raises(GapError):
+        secure.open_sealed(env, store)
+    with pytest.raises(ValueError):
+        store.set_epoch_rate(NODE_ID, 0)
+    store.set_epoch_rate(NODE_ID, 4)
+    assert store.walker.epoch_rate(NODE_ID) == 4 and store.walker.epoch_rate(NODE_ID + 1) == 1.0
+    assert store.walker.allowed_gap(0.0, 7200.0, NODE_ID + 1) == chainwalk.SLACK_EPOCHS + 7200  # another node: default
+    assert secure.open_sealed(env, store)[2] == b"after the stream"
+    store.set_epoch_rate(NODE_ID, None)
+    assert store.walker.epoch_rate(NODE_ID) == 1.0
+    # the override is not saved and does not depend on the walker's other state
+    assert KeyStore.load(rig.path, responder = True).walker.epoch_rate(NODE_ID) == 1.0
+
+
+def test_dropping_the_last_reference_inside_the_walker_lock_does_not_deadlock():
+    """The weakref callback of the LRU used to take the walker lock: the thread that held it and dropped the last
+    reference of a chain (in the eviction) blocked on itself."""
+    w = Walker(slack = 1 << 20)
+    st = ChainState(1, 1, 0, bytes(32))
+    w.walk(1, st, 3000)
+    holder = [st]
+    del st
+
+    def evict_like():
+        with w._lock:
+            holder.clear()
+
+    th = threading.Thread(target = evict_like, daemon = True)
+    th.start()
+    th.join(5)
+    assert not th.is_alive()
+    st2 = ChainState(1, 1, 0, bytes(32))
+    w.walk(2, st2, 3000)
+    assert len(w._lru) == 1 and w.cached(st2) == 2  # the freed chain is forgotten at the next use
+
+
+def test_a_chain_that_takes_the_id_of_a_freed_one_is_tracked():
+    """CPython reuses the id of a freed object; its entry in the LRU must not stand for the new chain."""
+    w = Walker(slack = 1 << 20, cache_entries = 3, node_burst = 1 << 40, global_burst = 1 << 40)
+    for _ in range(100):
+        st = ChainState(1, 1, 0, bytes(32))
+        w.walk(1, st, 3000)
+        del st
+    keep = [ChainState(1, 1, 0, bytes(32)) for _ in range(4)]
+    for st in keep:
+        w.walk(1, st, 3000)  # 2 keys each, 3 entries allowed: the oldest are evicted
+    live = sum(len(st.cache) for st in keep)
+    assert live <= 3 and w._entries == live
+    assert len(w._lru) <= 4

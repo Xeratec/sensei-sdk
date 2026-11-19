@@ -66,13 +66,31 @@ store.node_state(o.node_id)                   # gen, answered mix waiting, previ
   key store loses access to a node at the next mix.
 - `add_node` starts the node in generation 0 again and keeps the counters (what a node does when it is provisioned).
   A node that is ahead of the key store ("node ahead of key store: re-provision" in the log, `GenerationError`) needs
-  USB provisioning.
+  USB provisioning. The reset gets a higher provisioning counter (`prov`, in the file): in a merge and in a follower the
+  copy with the higher `prov` replaces the whole ratchet state, so another process that still holds generation 1 cannot
+  write it back. `add_node(..., reset=False)` leaves a known node with the same key alone. `add_node` returns a
+  `NodeBackup`; if the provisioning of the node then fails, `rollback_node(backup)` gives the old keys and ratchet state
+  back (counters only go up). Provision in the file that the collector uses: a follower that calls `add_node` resets its
+  own copy only.
+- A node that asks again with a new key (it lost its state) gets a new answer that replaces the open one in `next`; the
+  newer answer wins a merge with the file (`seq`).
 - Walking the chain for a far message costs one HMAC per epoch, and anyone can send a frame with a far counter. The
   limits (`chainwalk`): a message may be ahead by at most `min(SENSEI_E2E_MAX_SKIP, 4096 + 1 epoch per second since the
   last verified one)` epochs, else `GapError` at once; walked keys are cached at checkpoints every 1024 epochs (at most
-  32 kB per node, LRU over all); budgets of 2^16 steps per node and 2^19 for the store per minute (`WalkBudgetError`,
-  the walk goes on at the next frame); the walk runs outside the store lock. Logs about refused frames are limited to one
-  per node and minute; `store.stats` counts them.
+  32 kB per chain, and a node can have three chains: current, previous, answered; LRU over all); a walk of up to 1024
+  steps from a cached checkpoint (or the stored key) is free, longer walks are charged to budgets of 2^16 steps per node
+  and 2^19 for the store per minute (`WalkBudgetError`, the walk goes on at the next frame), so forged frames next to a
+  checkpoint cannot drain the budget of a real node; the budget is reserved before the walk, threads cannot spend it
+  twice; the walk runs outside the store lock. Logs about refused frames are limited to one per node and minute;
+  `store.stats` counts them.
+- The time bound assumes at most 1 epoch per second (64 messages per second). A node that sends more over another link
+  (BLE, USB) while the collector hears nothing for hours is refused with `GapError` at its next frame. For such a node
+  `store.set_epoch_rate(node_id, rate)` raises the rate (not saved: set it at start).
+- The chain key and `t_up` reach the file when the store saves (a promotion, an answer, a downlink, `flush`, or the autosave
+  every `autosave_s`). After a crash the file holds the last saved state: forward secrecy lags by the epochs since then,
+  and a frame of those epochs is accepted once more (replay window of the last save). A promotion that cannot be saved
+  (disk error) keeps the verified message and is saved again with the next message or `flush`.
+- A new sender id is checked against the senders in the file, so two hosts never share one.
 
 ## Tests and vectors
 

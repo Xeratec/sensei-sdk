@@ -127,6 +127,9 @@ def test_the_same_request_gets_the_same_answer_after_every_reboot(tmp_path):
     new = rig.store.rekey_answer(NODE_ID, other)
     assert new is not None and new != first and new.up_base == other.up_base
     assert rig.store.node_state(NODE_ID).next_gen == 1
+    assert rig.store._nodes[
+        NODE_ID].next.e_c_pub == new.pub  # the newer answer is the stored one (review of Phase 4, M1)
+    assert stored(rig)["next"]["e_c_pub"] == new.pub.hex()
     # the node of the old request cannot use it: its answer is gone, nothing from it opens
     assert not rig.node.rekey_answer(RekeyAnswer(1, new.pub, new.up_base))  # up_base does not match its request
 

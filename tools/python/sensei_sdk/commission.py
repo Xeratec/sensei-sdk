@@ -170,6 +170,8 @@ def format_code(code: str) -> str:
 
 def parse_code(text: str) -> str:
     """The 12 digits of a code typed or scanned, with dashes or spaces allowed. Checks the length and the check digit."""
+    if not isinstance(text, str):
+        raise CodeError("a setup code is text")
     code = re.sub(r"[-\s]", "", text)
     if not re.fullmatch(rf"[0-9]{{{CODE_SIZE}}}", code):
         raise CodeError(f"a setup code has {CODE_SIZE} digits")
@@ -199,7 +201,9 @@ _QR_RE = re.compile(rf"{QR_PREFIX}:([0-9A-F]{{16}}):([0-9]{{{CODE_SIZE}}}):([0-9
 def qr_payload(node_id: int, code: str, fp: bytes) -> str:
     """`SN1:<node id 16 hex>:<code 12 digits>:<fingerprint 32 hex>`, upper case, 66 characters (QR alphanumeric)."""
     parse_code(code)
-    if len(fp) != NODE_FP_SIZE:
+    if not isinstance(node_id, int) or not 0 < node_id < 2**64:
+        raise CodeError("the node id is 1 ... 2^64-1 (0 means any node in the protocol)")
+    if not isinstance(fp, bytes) or len(fp) != NODE_FP_SIZE:
         raise CodeError("the fingerprint is 16 bytes")
     return f"{QR_PREFIX}:{node_id:016X}:{code}:{fp.hex().upper()}"
 
@@ -207,16 +211,23 @@ def qr_payload(node_id: int, code: str, fp: bytes) -> str:
 def parse_qr(text: str) -> QrData:
     """Inverse of `qr_payload`. Strict: exactly this format, upper case hex, valid check digit (surrounding blanks
     are ignored)."""
+    if not isinstance(text, str):
+        raise CodeError("a QR payload is text")
     m = _QR_RE.fullmatch(text.strip())
     if not m:
         raise CodeError("not a SENSEI setup QR code")
-    code = parse_code(m.group(2))
-    return QrData(int(m.group(1), 16), code, bytes.fromhex(m.group(3)))
+    node_id = int(m.group(1), 16)
+    if node_id == 0:  # 0 means "any node" in commission_begin: a label never carries it
+        raise CodeError("node id 0 is not a node")
+    return QrData(node_id, parse_code(m.group(2)), bytes.fromhex(m.group(3)))
 
 
 def label_lines(node_id: int, code: str, fp: bytes) -> tuple[str, str, str]:
     """The text of the label: `SENSEI 00A1B2C3 D4E5F607`, `Setup code 1234-5678-9012`, `Key a1b2 c3d4 e5f6 0718`.
-    The first and the last line go on the outside (node id and fingerprint); the code stays on the card."""
+    The first and the last line go on the outside (node id and fingerprint); the code stays on the card.
+    These texts are not authenticated by anything but the label itself. A change of the format or of what the
+    fingerprint covers must change the version (QR prefix `SN1`, labels `-v1`); an old and a new commissioner must never
+    read the same string in two ways."""
     nid = f"{node_id:016X}"
     return f"SENSEI {nid[:8]} {nid[8:]}", f"Setup code {format_code(code)}", f"Key {fingerprint_text(fp)}"
 
@@ -263,7 +274,12 @@ def check_proof(proof: bytes,
                 commit: bool = True) -> None:
     """The commissioner's check, with the key store entry that `add_node` made. The key id must be the store's, the
     envelope must open with the store's keys and carry exactly this session's plaintext. `commit` marks the counter
-    as seen, as for any uplink (a replayed proof fails the second time). Raises ProofError."""
+    as seen, as for any uplink (a replayed proof fails the second time). Raises ProofError.
+
+    What it proves: whoever sent it holds the private key behind the node public key that `add_node` used, and saw
+    this session's nonces. The node id is not part of the key derivation (HKDF info = node_pub || backend_pub): that the
+    key belongs to this node id comes from the fingerprint, which the commissioner must have compared with the QR
+    (or had confirmed by the user) before `add_node`."""
     try:
         if not store.has_node(node_id):
             raise ProofError("the key store does not know this node")
@@ -273,8 +289,9 @@ def check_proof(proof: bytes,
         if commit:
             got_id, kind, plain = secure.open_sealed(proof, store)
         else:
-            kind, plain = secure.peek_sealed(proof, store)
-            got_id = node_id
+            opened = secure._open_up(proof, store,
+                                     False)  # the node id of the key that opened it (peek_sealed hides it)
+            got_id, kind, plain = opened.node_id, opened.kind, opened.plaintext
     except ProofError:
         raise
     except SecureError as exc:
@@ -519,6 +536,9 @@ class Prover:
                  rng: Callable[[int], bytes] = secrets.token_bytes) -> None:
         """The general form, with w0, w1, context and identities given (the RFC vectors use it). `x`: the ephemeral
         scalar, big endian bytes of any length reduced mod n; None draws 40 random bytes."""
+        for w in (w0, w1):
+            if not isinstance(w, int) or not 0 < w < p256.N:
+                raise CommissionError("w0 and w1 must be scalars in 1 ... n-1")
         self._w0, self._w1, self._ctx = w0, w1, ctx
         self._ids = (id_prover, id_verifier_)
         self._node_id, self._ng, self._nn = node_id, nonce_g, nonce_n
@@ -526,7 +546,6 @@ class Prover:
         self._share: bytes | None = None
         self._state = "new"
         self._keys: ChannelKeys | None = None
-        self.k_shared: bytes | None = None  # K_shared of the RFC, after `finish`
 
     @classmethod
     def from_code(cls,
@@ -569,8 +588,7 @@ class Prover:
             if len(confirm_v) != 32 or not hmac.compare_digest(confirm_v, sch.confirm_v):
                 raise WrongCodeError("wrong setup code (key confirmation failed)")
             self._keys = channel_keys(sch.k_shared, self._node_id, self._ng, self._nn)
-            self.k_shared = sch.k_shared
-            self._state = "done"
+            self._state = "done"  # K_shared is not kept: the channel keys are all that follows from it
             return sch.confirm_p
         finally:
             self._x = self._w0 = self._w1 = 0
@@ -598,6 +616,12 @@ class VerifierSession:
                  nonce_n: bytes,
                  y: bytes | None = None,
                  rng: Callable[[int], bytes] = secrets.token_bytes) -> None:
+        if not isinstance(w0, bytes) or len(w0) != 32 or not 0 < int.from_bytes(w0, "big") < p256.N:
+            raise CommissionError("w0 must be a 32 byte scalar in 1 ... n-1")
+        try:
+            p256.decode(l)
+        except p256.PointError as exc:
+            raise CommissionError(f"L is not a valid point: {exc}") from exc
         self._w0, self._l, self._ctx = w0, l, ctx
         self._ids = (id_prover, id_verifier_)
         self._node_id, self._ng, self._nn = node_id, nonce_g, nonce_n
@@ -605,7 +629,6 @@ class VerifierSession:
         self._state = "new"
         self._sch: Schedule | None = None
         self._keys: ChannelKeys | None = None
-        self.k_shared: bytes | None = None
 
     def pake1(self, share_p: bytes) -> tuple[bytes, bytes]:
         """Check shareP (a valid point, not w0*M), compute shareV = y*G + w0*N and confirmV."""
@@ -632,7 +655,6 @@ class VerifierSession:
         if len(confirm_p) != 32 or not hmac.compare_digest(confirm_p, sch.confirm_p):
             raise WrongCodeError("wrong setup code (key confirmation failed)")
         self._keys = channel_keys(sch.k_shared, self._node_id, self._ng, self._nn)
-        self.k_shared = sch.k_shared
         self._state = "done"
 
     @property

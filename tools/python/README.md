@@ -146,7 +146,19 @@ com.check_proof(proof, store, node_id, nonce_g, nonce_n)   # the node holds the 
   check the check digit; the QR format is strict (upper case hex).
 - `p256` and `commission` are not constant time. Use them on a PC at the bench or the office, never on a node.
 - `open_sealed` reads the key store file again when it meets an unknown key id (at most once a second), so a node that
-  another process added is found without a restart.
+  another process added is found without a restart. This helps only when the nodes are added to the file that the reader
+  uses. A GUI with its own key store file (or a `follow=` copy) writes new nodes to its own file: the collector does not
+  see them.
+- A QR payload never carries node id 0 (it means "any node" in `commission_begin`); `parse_qr` and `qr_payload` refuse it.
+
+For the GUI (step E):
+
+- Compare `node_fingerprint(node_id, node_pub)` with the fingerprint of the QR before `add_node`. `check_proof` proves the
+  node holds the key it sent, not that the key belongs to this node id: the fingerprint carries that.
+- On the typed-code path there is no QR to compare: show `fingerprint_text` and ask the user to confirm it explicitly.
+- Decide "ours or foreign" only from the `collector_fp` inside the sealed identity (after the PAKE). `has_collector_key`
+  and `attempts_left` in the plain params are not authenticated: show them as hints at most.
+- The label texts and the QR format are bound to version 1 (`SN1`, `-v1` labels); a version 2 must change them.
 
 ## Tests and vectors
 

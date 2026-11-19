@@ -13,6 +13,8 @@ lib/sensei_secure/tests/generated/vectors_commission.h, next to the other vector
     V12  kind 5 envelopes of the channel, in order, with the replay and format negatives
     V13  fingerprints and the proof of possession
     V14  Verhoeff check digit, QR payload, label text, strings that must not parse
+    V15  negatives of the node: kind 5 under the static keys at the normal receivers, a share that is w0*M (not an
+         attempt), bad verifier records, a session with a wrong code
 
 The codes are fake (all the same digit or an ascending run: the bench never makes them). Nothing here is a secret.
 """
@@ -325,6 +327,99 @@ def channel_cases() -> list[tuple[int, bytes, bytes, int, str]]:
     return out
 
 
+# ---- V15: negatives of the node ----
+
+
+def static_kind5_cases() -> list[tuple[int, bytes, int, str]]:
+    """(receiver, envelope, expected result, what): a kind 5 envelope under the static keys of the fixed test keys, with
+    their real key id, fed to the normal receivers (receiver 0: the backend, uplinks; 1: the node, downlinks). The
+    receiver must refuse it by the kind alone (-1), never as a message of the kind its key and direction suggest."""
+    keys = fixed_keys()
+    return [
+        (0, secure.seal_raw(keys.k_up, keys.key_id, 1, secure.KIND_COMMISSION,
+                            b"static key, node to backend"), ERR_FORMAT, "kind 5 under k_up"),
+        (1,
+         secure.seal_raw(keys.k_down,
+                         keys.key_id,
+                         1,
+                         secure.KIND_COMMISSION,
+                         b"static key, backend to node",
+                         sender = 1), ERR_FORMAT, "kind 5 under k_down, sender 1"),
+    ]
+
+
+def w0m_cases() -> list[tuple[int, bytes, int, int]]:
+    """(session of V11, shareP, expected result, counts an attempt): shareP = w0*M. X - w0*M is the identity, the node
+    refuses the share and does not count an attempt (the attempt counter must not move)."""
+    out = []
+    for i, r in enumerate(reg_cases()[:2]):
+        out.append((i, p256.encode(p256.mul(r.w0, p256.decode(com.M))), ERR_FORMAT, 0))
+    return out
+
+
+def bad_records() -> list[tuple[str, bytes]]:
+    """Verifier records that the node must refuse (the 121 B record of registration 0 with one thing changed)."""
+    rec = reg_cases()[0].verifier.encode()
+    n = p256.N
+
+    def at(pos: int, data: bytes) -> bytes:
+        return rec[:pos] + data + rec[pos + len(data):]
+
+    return [
+        ("w0 is 0", at(24, bytes(32))),
+        ("w0 is n", at(24, n.to_bytes(32, "big"))),
+        ("w0 is n + 1", at(24, (n + 1).to_bytes(32, "big"))),
+        ("w0 is 2^256 - 1", at(24, b"\xff" * 32)),
+        ("L off the curve", at(120, bytes([rec[120] ^ 1]))),
+        ("L prefix 5", at(56, b"\x05")),
+        ("L prefix 0", at(56, b"\x00")),
+        ("L is all zero", at(56, b"\x04" + bytes(64))),
+        ("version 2", at(0, b"\x02")),
+        ("version 0", at(0, b"\x00")),
+        ("suite 2", at(1, b"\x02")),
+        ("kdf 2", at(2, b"\x02")),
+        ("log2n 13", at(3, bytes([13]))),
+        ("log2n 18", at(3, bytes([18]))),
+        ("r is 4", at(4, bytes([4]))),
+        ("p is 2", at(5, bytes([2]))),
+        ("reserved byte 6", at(6, b"\x01")),
+        ("reserved byte 7", at(7, b"\x01")),
+        ("120 bytes", rec[:-1]),
+        ("122 bytes", rec + b"\x00"),
+    ]
+
+
+WRONG_CODE = "222222222227"  # fake; the check digit is right, the code is not the one of registration 0
+
+
+def wrong_code_case() -> dict:
+    """The first session of V11 with a commissioner that has another code (and the same x), the node with the same y.
+    The node's answer is that of V11 for its own w0 and this shareP; the commissioner cannot confirm it, and the confirmP
+    that it computes from its own wrong values is refused by the node (-3, the attempt counts: shareP was accepted)."""
+    assert com.verhoeff_valid(WRONG_CODE)
+    ses, reg = ses_cases()[0], reg_cases()[0]
+    w0, w1 = com.derive_w(WRONG_CODE, reg.node_id, reg.params)
+    m, n = p256.decode(com.M), p256.decode(com.N)
+    xs = int.from_bytes(ses.x, "big") % p256.N
+    share_p = p256.encode(p256.add(p256.mul(xs, p256.G), p256.mul(w0, m)))
+    # the node: its w0 and L, the commissioner's shareP
+    node = reg.verifier.session(reg.node_id, ses.nonce_g, ses.nonce_n, ses.y)
+    share_v, confirm_v = node.pake1(share_p)
+    # the commissioner: its own w0 and w1, the node's shareV
+    rest = p256.add(p256.decode(share_v), p256.neg(p256.mul(w0, n)))
+    tt = com.transcript(ses.context, com.ID_PROVER, com.id_verifier(reg.node_id), share_p, share_v,
+                        p256.encode(p256.mul(xs, rest)), p256.encode(p256.mul(w1, rest)), w0.to_bytes(32, "big"))
+    confirm_p = com.key_schedule(tt, share_p, share_v).confirm_p
+    return {
+        "ses": 0,
+        "code": WRONG_CODE,
+        "share_p": share_p,
+        "share_v": share_v,
+        "confirm_v": confirm_v,
+        "confirm_p": confirm_p
+    }
+
+
 # ---- V13: fingerprints and proof ----
 
 
@@ -592,5 +687,49 @@ def render() -> str:
             raise AssertionError(f"bad QR '{what}' parses")
         rows.append(f"{{{_c(what)}, {_c(text)}}}")
     parts += _table("vec_com_badqr", "vec_com_badqr_t", rows)
+    # V15
+    parts.append(
+        "/* V15a: kind 5 envelopes under the static keys of vectors.h (key id VEC_SEC_KEY_ID), at the normal\n"
+        " * receivers. receiver 0: the backend (uplinks), 1: the node (downlinks). The kind alone must refuse them. */\n"
+        "typedef struct {\n    uint8_t receiver;\n    const uint8_t *env;\n    size_t env_len;\n    int expect;\n"
+        "    const char *what;\n} vec_com_x5_t;\n")
+    rows = []
+    for i, (receiver, env, expect, what) in enumerate(static_kind5_cases()):
+        parts.append(array(f"vec_com_x5_{i}", env))
+        rows.append(f"{{{receiver}, vec_com_x5_{i}, {len(env)}, {expect}, {_c(what)}}}")
+    parts += _table("vec_com_x5", "vec_com_x5_t", rows)
+    parts.append(
+        "/* V15b: shareP = w0*M for the session of V11 (reg is the index of V10 as well). The node refuses it and\n"
+        " * the attempt counter must not move (counts_attempt 0) */\n"
+        "typedef struct {\n    int ses;\n    const uint8_t *share_p;\n    int expect;\n    int counts_attempt;\n"
+        "} vec_com_w0m_t;\n")
+    rows = []
+    for i, (ses, share_p, expect, counts) in enumerate(w0m_cases()):
+        parts.append(array(f"vec_com_w0m_{i}", share_p))
+        rows.append(f"{{{ses}, vec_com_w0m_{i}, {expect}, {counts}}}")
+    parts += _table("vec_com_w0m", "vec_com_w0m_t", rows)
+    parts.append(
+        "/* V15c: verifier records that the node must refuse (121 B of V10 registration 0, one thing changed) */\n"
+        "typedef struct {\n    const char *what;\n    const uint8_t *data;\n    size_t len;\n} vec_com_badrec_t;\n")
+    rows = []
+    for i, (what, data) in enumerate(bad_records()):
+        try:
+            com.Verifier.decode(data)
+        except com.CommissionError:
+            pass
+        else:
+            raise AssertionError(f"bad record '{what}' decodes")
+        parts.append(array(f"vec_com_badrec_{i}", data))
+        rows.append(f"{{{_c(what)}, vec_com_badrec_{i}, {len(data)}}}")
+    parts += _table("vec_com_badrec", "vec_com_badrec_t", rows)
+    wc = wrong_code_case()
+    parts.append(
+        "/* V15d: session 0 of V11 with a commissioner that has another code (same x, nonces, y). The node accepts\n"
+        " * share_p and answers share_v and confirm_v (the attempt counts); confirm_p is what the commissioner computes\n"
+        " * from its own values: the node refuses it with VEC_COM_WRONG_EXPECT */\n")
+    parts.append(f"#define VEC_COM_WRONG_SES {wc['ses']}\n#define VEC_COM_WRONG_EXPECT {ERR_AUTH}\n"
+                 f"static const char vec_com_wrong_code[] = {_c(wc['code'])};\n")
+    for name in ("share_p", "share_v", "confirm_v", "confirm_p"):
+        parts.append(array(f"vec_com_wrong_{name}", wc[name]))
     parts.append("#endif\n")
     return "\n".join(parts)

@@ -95,7 +95,7 @@ KIND_SETTINGS = 4  # encoded Settings patch for the BLE settings characteristic,
 KIND_COMMISSION = 5  # commissioning channel (`commission.Channel`): both directions, generation 0 format, no node id
 COMMISSION_SENDER = 1  # sender field of the commissioning envelopes that go to the node (the node sends 0)
 
-# Kind byte (byte 1). Generation 0 (the keys of the commissioning): the kind alone, 1 ... 4. Generation 1 and later
+# Kind byte (byte 1). Generation 0 (the keys of the commissioning): the kind alone, 1 ... 5. Generation 1 and later
 # (the ratchet): 0x80 | (generation mod 4) << 4 | kind. Bit 6 is reserved: an envelope with it set is refused.
 KIND_MASK = 0x0F
 KIND_RATCHET = 0x80
@@ -1373,10 +1373,17 @@ class KeyStore:
                 continue
             same = mine is not None and (mine.node_pub, mine.key_id) == (theirs.node_pub, theirs.key_id)
             if mine is None or (not same and node_id not in self._added):
-                if mine is not None:
-                    del self._by_key_id[mine.key_id]
                 owner = self._by_key_id.get(theirs.key_id)
+                if mine is not None and (owner is None or owner == node_id):
+                    # the file has another key for this node: keep what this process saw of the old one (its window,
+                    # a provisioning that is rolled back brings it back with the window of the file)
+                    self._retire(mine, self._down.get(node_id, 0))
+                    del self._by_key_id[mine.key_id]
                 if owner is None or owner == node_id:
+                    back = self._retired.get(theirs.key_id)
+                    if back is not None and back.node_pub == theirs.node_pub:  # a key that returns goes on from its counters
+                        theirs.up = _merge_window(theirs.up, back.up)
+                        theirs.prov = max(theirs.prov, back.prov)
                     _prune_prev(theirs)
                     self._nodes[node_id] = theirs
                     self._by_key_id[theirs.key_id] = node_id
@@ -1667,10 +1674,15 @@ class KeyStore:
                 self.walker.forget_node(node_id)
                 self._touch(now = True)
 
-    def _retire(self, node: _Node) -> None:
+    def _retire(self, node: _Node, down_ctr: int = 0) -> None:
         """Keep the counters of a key that is dropped: if the key comes back it must not restart them. The keys and the
-        ratchet state are not kept."""
-        self._retired[node.key_id] = _Retired(node.node_pub, node.key_id, node.up, prov = node.prov)
+        ratchet state are not kept. An entry that exists for the same key is merged (window, prov, down_ctr: the higher)."""
+        old = self._retired.get(node.key_id)
+        if old is not None and old.node_pub == node.node_pub:  # a new object: callers keep copies of the dict
+            self._retired[node.key_id] = _Retired(node.node_pub, node.key_id, _merge_window(old.up, node.up),
+                                                  max(old.down_ctr, down_ctr), max(old.prov, node.prov))
+        else:
+            self._retired[node.key_id] = _Retired(node.node_pub, node.key_id, node.up, down_ctr, node.prov)
 
     def node_ids(self) -> list[int]:
         return sorted(self._nodes)

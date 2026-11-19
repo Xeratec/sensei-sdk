@@ -97,8 +97,7 @@ def test_rfc_prover_and_verifier_sessions():
     assert (share_v, confirm_v) == (RFC["share_v"], RFC["confirm_v"])
     assert p.finish(share_v, confirm_v) == RFC["confirm_p"]
     s.pake3(RFC["confirm_p"])
-    assert p.k_shared == s.k_shared == RFC["k_shared"]
-    assert p.keys == s.keys
+    assert p.keys == s.keys == com.channel_keys(RFC["k_shared"], 0, NG, NN)  # K_shared itself is not kept
 
 
 def test_rfc_vectors_with_a_wrong_confirmation():
@@ -257,7 +256,7 @@ def test_session_vectors_match_the_sessions():
         assert (share_v, confirm_v) == (ses.values["share_v"], sch.confirm_v)
         assert p.finish(share_v, confirm_v) == sch.confirm_p
         s.pake3(sch.confirm_p)
-        assert p.keys == s.keys == ses.keys and p.k_shared == sch.k_shared
+        assert p.keys == s.keys == ses.keys == com.channel_keys(sch.k_shared, r.node_id, ses.nonce_g, ses.nonce_n)
         assert com.context(r.params, ses.nonce_g, ses.nonce_n) == ses.context
 
 
@@ -305,11 +304,12 @@ def run_split(verifier, ng = NG, nn = NN, node_id = NODE_ID, params = None):
 
 def test_full_run(verifier):
     p, s, (share_p, share_v, confirm_v, confirm_p) = run(verifier)
-    assert p.keys == s.keys and p.k_shared == s.k_shared
+    assert p.keys == s.keys
+    assert not hasattr(p, "k_shared") and not hasattr(s, "k_shared")
     assert (len(share_p), len(share_v), len(confirm_v), len(confirm_p)) == (65, 65, 32, 32)
     # a second session of the same code has other keys (ephemeral scalars)
     p2, _, _ = run(verifier)
-    assert p2.keys != p.keys and p2.k_shared != p.k_shared
+    assert p2.keys != p.keys
 
 
 def test_full_run_with_random_code_at_the_default_cost():
@@ -885,9 +885,14 @@ def test_qr_round_trip_and_format():
     for node_id, code, fp in vc.qr_cases():
         assert com.parse_qr(com.qr_payload(node_id, code, fp)) == com.QrData(node_id, code, fp)
     for _ in range(20):
-        nid, c, f = secrets.randbits(64), com.generate_code(), secrets.token_bytes(16)
+        nid, c, f = secrets.randbits(64) or 1, com.generate_code(), secrets.token_bytes(16)
         assert com.parse_qr(com.qr_payload(nid, c, f)) == com.QrData(nid, c, f)
-    assert com.parse_qr(com.qr_payload(0, code, bytes(16))).node_id == 0
+    assert com.parse_qr(com.qr_payload(2**64 - 1, code, bytes(16))).node_id == 2**64 - 1
+    for bad in (0, -1, 2**64, True * 0, "1", 1.5, None):
+        with pytest.raises(CodeError):
+            com.qr_payload(bad, code, bytes(16))
+    with pytest.raises(CodeError):
+        com.qr_payload(1, code, bytearray(16))
     with pytest.raises(CodeError):
         com.qr_payload(1, code, bytes(15))
     with pytest.raises(CodeError):
@@ -1066,3 +1071,170 @@ def test_the_merge_keeps_what_the_collector_holds(tmp_path, clock):
         secure.open_sealed(old.seal(secure.KIND_UPLINK, b"c", counter = 1), rig.collector)
     assert secure.open_sealed(old.seal(secure.KIND_UPLINK, b"d"), rig.collector)[2] == b"d"
     assert secure.seal_downlink(NODE_ID, secure.KIND_DOWNLINK, b"cmd2", rig.collector) != sealed
+
+
+# ---- review of step A ----
+
+
+def test_qr_node_id_zero_and_wrong_types():
+    node_id, code, fp = vc.qr_cases()[0]
+    text = com.qr_payload(node_id, code, fp)
+    with pytest.raises(CodeError, match = "node id 0"):
+        com.parse_qr(text.replace(f"{node_id:016X}", "0" * 16))
+    for bad in (text.encode(), None, 5, [text], bytearray(text.encode())):
+        with pytest.raises(CodeError):
+            com.parse_qr(bad)
+        with pytest.raises(CodeError):
+            com.parse_code(bad)
+
+
+def test_public_constructors_check_w0_and_w1(verifier):
+    ctx = com.context(verifier.params, NG, NN)
+    ids = (com.ID_PROVER, com.id_verifier(NODE_ID))
+    for w0, w1 in [(0, 5), (5, 0), (p256.N, 5), (5, p256.N), (2**256, 5), (5, 2**300), (-1, 5), (1.5, 5)]:
+        with pytest.raises(CommissionError):
+            Prover(w0, w1, ctx, *ids, NODE_ID, NG, NN)
+    good = verifier.w0
+    for w0 in (bytes(32), p256.N.to_bytes(32, "big"), b"\xff" * 32, good[:31], good + b"\0", 5):
+        with pytest.raises(CommissionError):
+            com.VerifierSession(w0, verifier.l, ctx, *ids, NODE_ID, NG, NN)
+    for l in (verifier.l[:64], b"\x04" + bytes(64), verifier.l[:64] + bytes([verifier.l[64] ^ 1])):
+        with pytest.raises(CommissionError):
+            com.VerifierSession(good, l, ctx, *ids, NODE_ID, NG, NN)
+    com.VerifierSession(good, verifier.l, ctx, *ids, NODE_ID, NG, NN)
+
+
+def test_the_peek_path_checks_the_node(provisioned):
+    store, node, _ = provisioned
+    other_priv, other_pub = secure.generate_keypair()
+    store.add_node(NODE_ID + 1, other_pub)
+    other = NodeSession(other_priv, store.backend_public_key())
+    proof = com.make_proof(other.keys, NODE_ID + 1, NG, NN, 1)
+    com.check_proof(proof, store, NODE_ID + 1, NG, NN, commit = False)
+    # a proof of the other node, offered for this node id: refused on the key id, on both paths
+    for commit in (True, False):
+        with pytest.raises(ProofError):
+            com.check_proof(proof, store, NODE_ID, NG, NN, commit = commit)
+    # the proof of the right node but the plaintext of another node id
+    wrong = com.make_proof(node.keys, NODE_ID + 7, NG, NN, 1)
+    for commit in (True, False):
+        with pytest.raises(ProofError, match = "does not match"):
+            com.check_proof(wrong, store, NODE_ID, NG, NN, commit = commit)
+
+
+# V15 and the replay of the negatives through the real classes
+
+
+def fixed_store(tmp_path) -> tuple[KeyStore, NodeSession]:
+    """A store and a node with the fixed keys of the envelope vectors (vec_sec_*)."""
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+
+    key = ec.derive_private_key(int.from_bytes(bytes(range(0x41, 0x61)), "big"), ec.SECP256R1())
+    pem = tmp_path / "fixed.pem"
+    pem.write_bytes(
+        key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
+    store = KeyStore.load(tmp_path / "fixed.json", private_pem = pem)
+    node_priv = bytes(range(1, 33))
+    store.add_node(NODE_ID, secure.public_from_private(node_priv))
+    return store, NodeSession(node_priv, store.backend_public_key())
+
+
+def test_v15a_kind_5_under_the_static_keys_is_refused(tmp_path):
+    store, node = fixed_store(tmp_path)
+    assert node.keys == vc.fixed_keys()
+    for receiver, env, expect, what in vc.static_kind5_cases():
+        assert secure.parse_header(env).key_id == node.keys.key_id, what
+        with pytest.raises(SecureError) as err:
+            if receiver == 0:
+                secure.open_sealed(env, store)
+            else:
+                node.open(env)
+        assert not isinstance(err.value,
+                              (ReplayError, UnknownKeyError)) and "authentication" not in str(err.value), what
+        assert expect == -1
+    # nothing was consumed: the real traffic still goes
+    assert secure.open_sealed(node.seal(secure.KIND_UPLINK, b"x"), store)[2] == b"x"
+    assert node.open(secure.seal_downlink(NODE_ID, secure.KIND_DOWNLINK, b"y", store)) == (secure.KIND_DOWNLINK, b"y")
+
+
+def test_v15b_a_share_of_w0_m_is_refused_without_an_attempt():
+    regs = vc.reg_cases()
+    for i, share_p, expect, counts in vc.w0m_cases():
+        s = regs[i].verifier.session(regs[i].node_id, NG, NN)
+        with pytest.raises(InvalidPointError, match = "identity"):
+            s.pake1(share_p)
+        assert (expect, counts) == (-1, 0)
+        assert len(share_p) == 65
+
+
+def test_v15c_bad_verifier_records_are_refused():
+    rows = vc.bad_records()
+    assert len(rows) >= 20
+    for what, data in rows:
+        with pytest.raises(CommissionError):
+            Verifier.decode(data)
+    assert Verifier.decode(vc.reg_cases()[0].verifier.encode()) == vc.reg_cases()[0].verifier
+
+
+def test_v15d_a_wrong_code_session():
+    wc = vc.wrong_code_case()
+    reg, ses = vc.reg_cases()[0], vc.ses_cases()[0]
+    p = Prover.from_code(wc["code"], reg.node_id, reg.params, ses.nonce_g, ses.nonce_n, ses.x)
+    s = reg.verifier.session(reg.node_id, ses.nonce_g, ses.nonce_n, ses.y)
+    assert p.share() == wc["share_p"] != ses.values["share_p"]
+    share_v, confirm_v = s.pake1(wc["share_p"])
+    assert (share_v, confirm_v) == (wc["share_v"], wc["confirm_v"])
+    with pytest.raises(WrongCodeError):  # the commissioner cannot confirm the node ...
+        p.finish(share_v, confirm_v)
+    with pytest.raises(WrongCodeError):  # ... and the node refuses the confirmation the commissioner computed
+        s.pake3(wc["confirm_p"])
+
+
+# L1: a node that the file holds with another key
+
+
+def test_a_replaced_key_keeps_its_window_through_a_rollback(tmp_path, clock):
+    rig = Rig(tmp_path)
+    rig.collector.autosave_s = 1e9  # the collector does not save by itself: the file stays behind its memory
+    rig.collector._last_save = secure._monotonic()
+    priv1, pub1 = secure.generate_keypair()
+    rig.gui.add_node(NODE_ID, pub1)
+    old = NodeSession(priv1, rig.gui.backend_public_key())
+    frames = [old.seal(secure.KIND_UPLINK, b"f%d" % i) for i in range(1, 6)]
+    # 1. the collector finds the node by re-reading, then receives 5 frames that no save has written
+    assert secure.open_sealed(frames[0], rig.collector)[2] == b"f1"
+    for f in frames[1:]:
+        secure.open_sealed(f, rig.collector)
+    assert rig.collector._nodes[NODE_ID].up.highest == 5
+    # 2. the GUI provisions the node again with another key (add_node), the node's first frame arrives
+    priv2, pub2 = secure.generate_keypair()
+    backup = rig.gui.add_node(NODE_ID, pub2)
+    new = NodeSession(priv2, rig.gui.backend_public_key())
+    clock[0] += 2
+    assert secure.open_sealed(new.seal(secure.KIND_UPLINK, b"new key"), rig.collector)[2] == b"new key"
+    assert rig.collector.stats["reread"] == 2
+    kept = rig.collector._retired[old.keys.key_id]
+    assert kept.up.highest == 5  # not lost
+    # 3. the provisioning fails: rollback_node writes the old key back, with the (stale) window the GUI had
+    rig.gui.rollback_node(backup)
+    assert rig.gui._nodes[NODE_ID].up.highest < 5
+    # 4. the old node is back in the collector at its next unknown id; the frames it already delivered stay refused
+    clock[0] += 2
+    with pytest.raises(ReplayError):
+        secure.open_sealed(frames[4], rig.collector)
+    for f in frames:
+        with pytest.raises(ReplayError):
+            secure.open_sealed(f, rig.collector)
+    assert secure.open_sealed(old.seal(secure.KIND_UPLINK, b"f6"), rig.collector)[2] == b"f6"
+
+
+def test_retire_merges_an_entry_of_the_same_key(tmp_path):
+    store = KeyStore()
+    _, pub = secure.generate_keypair()
+    node = secure._Node(pub, 7, bytes(16), bytes(16), secure.ReplayWindow(5, 0b11), None, None, None, 0.0, 2)
+    store._retired[7] = secure._Retired(pub, 7, secure.ReplayWindow(9, 0b1), 3, 4)
+    before = dict(store._retired)
+    store._retire(node, 11)
+    r = store._retired[7]
+    assert (r.up.highest, r.down_ctr, r.prov) == (9, 11, 4) and before[7].down_ctr == 3  # the old object is untouched

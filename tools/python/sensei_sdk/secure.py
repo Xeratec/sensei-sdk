@@ -21,12 +21,17 @@ Keys at rest. The node seals its secret settings records with a key from its har
 the mirror of lib/sensei_secure/include/sensei_e2e_seal.h). The key store file can be sealed as a whole with a 32 byte
 key file kept outside the key store folder and its backups (`SENSEI_KEYSTORE_KEY_FILE`, see `KeyStore`):
 `python -m sensei_sdk.secure seal-file | unseal-file | rotate-file-key`.
+
+Forward secrecy. The key store file (version 3) keeps per node the generation in use, an answered mix and the previous
+uplink chain; `open_sealed` walks the uplink chain under the limits of `chainwalk`, `KeyStore.rekey_answer` answers the
+mix request of a node (responder only). See `KeyStore` and the README of this package.
 """
 
 from __future__ import annotations
 
 import argparse
 import base64
+import collections
 import contextlib
 import functools
 import hashlib
@@ -45,6 +50,7 @@ import sys
 import tempfile
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -59,6 +65,9 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
+from . import ratchet
+from .chainwalk import ChainState, Walked, Walker
+from .errors import EpochError, GapError, GenerationError, ReplayError, SecureError, UnknownKeyError, WalkBudgetError
 from .framing import kind_of, looks_sealed
 
 log = logging.getLogger("sensei.secure")
@@ -98,31 +107,6 @@ DIR_DOWN = 1  # backend to node
 
 _KIND_DIR = {KIND_UPLINK: DIR_UP, KIND_NODE_TO_HOST: DIR_UP, KIND_DOWNLINK: DIR_DOWN, KIND_SETTINGS: DIR_DOWN}
 _CTR_MAX = 0xFFFFFFFF
-
-
-class SecureError(Exception):
-    """Authentication, replay, format or key error."""
-
-
-class UnknownKeyError(SecureError):
-    pass
-
-
-class ReplayError(SecureError):
-    pass
-
-
-class GenerationError(SecureError):
-    """No key for the generation of an envelope (a ratchet envelope where only generation 0 is known)."""
-
-
-class EpochError(SecureError):
-    """The epoch of a counter is before the start of its chain, or behind the part of the chain that is kept."""
-
-
-class GapError(SecureError):
-    """The chain would have to be walked further than SENSEI_E2E_MAX_SKIP epochs."""
-
 
 # ---- keys ----
 
@@ -326,7 +310,13 @@ class NodeSession:
     """The node's side of a session, for tests, simulators and the vectors (the node itself runs the C library).
 
     Like the node, it counts per sender and keeps `tx_counter` and `rx` when the keys change: pass them to the
-    next session of the same node."""
+    next session of the same node.
+
+    It also plays the ratchet of lib/sensei_secure/src/sensei_e2e.c: `rekey_request` makes (or repeats) the request that the
+    node appends to an uplink, `rekey_answer` takes the answer of the collector and switches to the new generation;
+    from then on `seal` uses the message key of the epoch and `open` the downlink key of the generation (the one before
+    stays valid until the next request). A new session of the same node (`NodeSession(...)` with the old `tx_counter`)
+    is what provisioning does: generation 0 again, counters kept."""
 
     def __init__(
         self,
@@ -339,10 +329,82 @@ class NodeSession:
         self.keys = derive_keys(node_priv, backend_pub, self.node_pub, backend_pub)
         self.tx_counter = tx_counter  # last counter used
         self.rx: dict[int, ReplayWindow] = rx if rx is not None else {}  # replay window by sender
+        self.tx_reserved = 0  # the end of the block the node stored (a request starts above it)
+        self.gen = 0
+        self.root = ratchet.root0(self.keys.k_up, self.keys.k_down, self.keys.key_id)
+        self.k_down = self.keys.k_down  # downlink key of the generation in use
+        self.chain: ratchet.Chain | None = None  # uplink chain of the generation (None in generation 0)
+        self.prev = False  # the downlink key of the generation before is still valid
+        self.prev_k_down: bytes | None = None  # None with prev: generation 0, the static key
+        self.pending: tuple[bytes, bytes, int] | None = None  # (private key, public key, up_base) of an open request
+        self.epoch_cur: int | None = None  # epoch of the last uplink of this generation (None: a new epoch starts)
+        self.rekeys = 0
+
+    # ---- uplinks ----
 
     def seal(self, kind: int, plaintext: bytes, node_id: int | None = None, counter: int | None = None) -> bytes:
-        self.tx_counter = counter if counter is not None else self.tx_counter + 1
-        return seal_raw(self.keys.k_up, self.keys.key_id, self.tx_counter, kind, plaintext, node_id)
+        """Seal an uplink. From generation 1 on the counter is moved to where the chain can serve it: a new epoch after a
+        switch or `reboot()`, never before the chain (`new_epoch()` skips to the next one: an epoch in use for a day)."""
+        if self.gen == 0:
+            self.tx_counter = counter if counter is not None else self.tx_counter + 1
+            return seal_raw(self.keys.k_up, self.keys.key_id, self.tx_counter, kind, plaintext, node_id)
+        assert self.chain is not None
+        c = counter if counter is not None else self.tx_counter + 1
+        if counter is None:
+            if self.epoch_cur is None:
+                c = (c + ratchet.EPOCH_SIZE - 1) & ~(ratchet.EPOCH_SIZE - 1)
+            c = max(c, (self.chain.up_base + self.chain.idx) << ratchet.EPOCH_BITS)
+        key = self.chain.key_for(c, commit = True)
+        self.tx_counter = c
+        self.epoch_cur = ratchet.epoch(c)
+        return seal_raw(key, self.keys.key_id, c, kind, plaintext, node_id, gen = self.gen)
+
+    def new_epoch(self) -> None:
+        """The epoch in use is old: the next uplink starts the next one."""
+        self.tx_counter = ((self.tx_counter >> ratchet.EPOCH_BITS) + 1 << ratchet.EPOCH_BITS) - 1
+
+    def reboot(self) -> None:
+        """A restart: the next uplink starts a new epoch."""
+        self.epoch_cur = None
+
+    # ---- the mix ----
+
+    def rekey_request(self) -> RekeyRequest:
+        """The request to send with the next uplink: made at the first call, the same one until it is answered (the
+        node repeats it every few hours). A new one drops the downlink key of the generation before."""
+        if self.pending is None:
+            used = max(self.tx_counter, self.tx_reserved)
+            up_base = ratchet.epoch(used) + 1
+            if self.chain is not None and up_base <= self.chain.up_base:
+                up_base = self.chain.up_base + 1
+            priv, pub = ratchet.x25519_keygen()
+            self.pending = (priv, pub, up_base)
+            self.prev, self.prev_k_down = False, None
+        _, pub, up_base = self.pending
+        return RekeyRequest(self.gen + 1, pub, up_base)
+
+    def rekey_answer(self, ans: RekeyAnswer) -> bool:
+        """Take the answer. Ignored (False, nothing changes) if no request is open, the generation is not the next one,
+        the up_base is not the one asked, or the key has the wrong size; an all-zero DH result raises DhError. True when the
+        node switched to generation g+1: the state is replaced at once and the counter jumps above everything sent."""
+        if self.pending is None or ans.gen <= self.gen:
+            return False
+        priv, pub, up_base = self.pending
+        if ans.gen != self.gen + 1 or ans.up_base != up_base or len(ans.pub) != ratchet.KEY_SIZE:
+            return False
+        mix = ratchet.mix_node(self.root, self.keys.key_id, ans.gen, up_base, priv, ans.pub)
+        nxt = max(self.tx_counter + 1, up_base << ratchet.EPOCH_BITS)
+        chain = ratchet.Chain(mix.ck, up_base)
+        chain.advance_to(ratchet.epoch(nxt) - up_base)
+        self.prev, self.prev_k_down = True, (self.k_down if self.gen != 0 else None)
+        self.gen, self.root, self.k_down, self.chain = ans.gen, mix.root, mix.k_down, chain
+        self.pending = None
+        self.epoch_cur = None
+        self.tx_counter = nxt - 1
+        self.rekeys += 1
+        return True
+
+    # ---- downlinks ----
 
     def open(self, payload: bytes) -> tuple[int, bytes]:
         h = parse_header(payload)
@@ -351,12 +413,24 @@ class NodeSession:
         if h.key_id != self.keys.key_id:
             raise UnknownKeyError("wrong key id")
         if h.ratchet:
-            raise GenerationError("ratchet envelope: this session knows generation 0 only")
+            if self.gen == 0:
+                raise GenerationError("ratchet envelope: this session is in generation 0")
+            if h.gen_bits == self.gen & 3:
+                key = self.k_down
+            elif self.gen >= 2 and self.prev and self.prev_k_down is not None and h.gen_bits == (self.gen - 1) & 3:
+                key = self.prev_k_down
+            else:
+                raise GenerationError(
+                    f"no downlink key for generation {h.gen_bits} (mod 4), this node is in {self.gen}")
+        elif self.gen == 0 or (self.gen == 1 and self.prev):
+            key = self.keys.k_down  # generation 0, still valid right after the first switch
+        else:
+            raise GenerationError("generation 0 envelope: dropped")
         window = self.rx.get(h.sender)
         if window is None and len(self.rx) >= MAX_SENDERS:
             raise SecureError("too many senders")
         (window or ReplayWindow()).check(h.counter)
-        plain = open_raw(self.keys.k_down, payload, h)
+        plain = open_raw(key, payload, h)
         if window is None:
             window = self.rx[h.sender] = ReplayWindow()
         window.update(h.counter)
@@ -417,6 +491,8 @@ _KEY_ID_LABEL = b"sensei-keystore-key-id"
 _SEALED_AAD = b"sensei-keystore-sealed-v1"
 _ENV_KEY_FILE = "SENSEI_KEYSTORE_KEY_FILE"
 _ENV_REQUIRE_SEALED = "SENSEI_KEYSTORE_REQUIRE_SEALED"
+_ENV_RESPONDER = "SENSEI_REKEY_RESPONDER"
+_ENV_MAX_SKIP = "SENSEI_E2E_MAX_SKIP"
 
 
 def check_key_file_mode(path: str | os.PathLike) -> None:
@@ -554,46 +630,216 @@ def _flock(path: Path):
 
 # ---- key store ----
 
+# Key store file version 3 (forward secrecy). Per node: the static keys of generation 0 (k_up, k_down, null once the
+# previous generation 0 is dropped), `cur` (generation, root key, downlink key, uplink chain), `next` (the answered but
+# not yet used mix) and `prev_up` (the uplink chain of the generation before, with the counter c1 where it ends). Up to
+# version 2 a node had the static keys only; they migrate to generation 0 with the root key R_0 (`ratchet.root0`).
+FILE_VERSION = 3
+_MAX_EPOCH_IDX = 1 << 26  # an epoch of a 32 bit counter is below this
+
+
+@dataclass
+class _Cur:
+    """The generation in use. Generation 0: `up` is None (the static k_up of the node). `root` is None in a follower."""
+
+    gen: int
+    root: bytes | None
+    k_down: bytes  # 16 B, downlink key of the generation
+    up: ChainState | None
+
+
+@dataclass
+class _Next:
+    """A mix that was answered and waits for the first uplink of the new generation. `up` is its chain at index 0."""
+
+    gen: int
+    e_n_pub: bytes
+    e_c_pub: bytes
+    root: bytes | None
+    k_down: bytes
+    up: ChainState
+
+    def same_request(self, gen: int, up_base: int, e_n_pub: bytes) -> bool:
+        return self.gen == gen and self.up.up_base == up_base and self.e_n_pub == e_n_pub
+
 
 @dataclass
 class _Node:
     node_pub: bytes
-    keys: SessionKeys
+    key_id: int
+    k_up: bytes | None  # static keys of generation 0, None once its chain is dropped
+    k_down: bytes | None
+    up: ReplayWindow  # counters of all generations (they only go up)
+    cur: _Cur
+    next: _Next | None = None
+    prev: ChainState | None = None  # previous generation; gen 0: only gen, c1 and t count (the key is k_up)
+    t_up: float = 0.0  # unix time of the last uplink that verified (any generation), 0 if unknown
+
+    @property
+    def keys(self) -> SessionKeys:
+        """The static keys of generation 0 (while the key store still has them)."""
+        if self.k_up is None or self.k_down is None:
+            raise SecureError("the static keys of generation 0 are dropped")
+        return SessionKeys(self.k_up, self.k_down, self.key_id)
+
+
+@dataclass
+class _Retired:
+    """The counters of a key that was removed (no secrets): if the same key comes back it goes on from them."""
+
+    node_pub: bytes
+    key_id: int
     up: ReplayWindow
-    down_ctr: int = 0  # files of version 1 only, in retired entries: folded into KeyStore._down when the key returns
+    down_ctr: int = 0  # files of version 1 only: folded into KeyStore._down when the key returns
 
 
 def _node_text(node_id: int) -> str:
     return f"{node_id:016x}"
 
 
+def _hex(b: bytes | None) -> str | None:
+    return None if b is None else b.hex()
+
+
+def _unhex(s: str | None, size: int | None = None) -> bytes | None:
+    if s is None:
+        return None
+    b = bytes.fromhex(s)
+    if size is not None and len(b) != size:
+        raise ValueError(f"a key of {size} bytes was expected, got {len(b)}")
+    return b
+
+
+def _fresh_node(node_pub: bytes, keys: SessionKeys, window: ReplayWindow) -> _Node:
+    """A node in generation 0 (the keys of the commissioning). R_0 comes from the static keys."""
+    root = ratchet.root0(keys.k_up, keys.k_down, keys.key_id)
+    return _Node(node_pub, keys.key_id, keys.k_up, keys.k_down, window, _Cur(0, root, keys.k_down, None))
+
+
+def _chain_to_json(st: ChainState | None) -> dict:
+    """up_base, up_idx, up_ck, up_t of a chain (null for generation 0, which has the static key)."""
+    if st is None or st.gen == 0:
+        return {"up_base": None, "up_idx": None, "up_ck": None, "up_t": None if st is None else round(st.t, 3)}
+    return {"up_base": st.up_base, "up_idx": st.idx, "up_ck": st.ck.hex(), "up_t": round(st.t, 3)}
+
+
+def _chain_from_json(gen: int, d: dict) -> ChainState | None:
+    if d.get("up_ck") is None:
+        return None
+    base, idx = int(d["up_base"]), int(d["up_idx"])
+    if not 0 < base < _MAX_EPOCH_IDX or not 0 <= idx < _MAX_EPOCH_IDX - base:
+        raise ValueError("chain position out of range")
+    return ChainState(gen, base, idx, _unhex(d["up_ck"], 32), float(d.get("up_t") or 0.0))
+
+
 def _node_to_json(n: _Node) -> dict:
-    return {
+    out = {
         "node_pub": n.node_pub.hex(),
-        "key_id": n.keys.key_id,
-        "k_up": n.keys.k_up.hex(),
-        "k_down": n.keys.k_down.hex(),
+        "key_id": n.key_id,
+        "k_up": _hex(n.k_up),
+        "k_down": _hex(n.k_down),
         "up_highest": n.up.highest,
         "up_window": f"{n.up.bitmap:016x}",
-        "down_ctr": n.down_ctr,  # 0 except in retired entries migrated from version 1
+        "t_up": round(n.t_up, 3),
+        "cur": {
+            "gen": n.cur.gen,
+            "root": _hex(n.cur.root),
+            "k_down": n.cur.k_down.hex(),
+            **_chain_to_json(n.cur.up),
+        },
+        "next": None,
+        "prev_up": None,
+    }
+    if n.next is not None:
+        out["next"] = {
+            "gen": n.next.gen,
+            "up_base": n.next.up.up_base,
+            "e_n_pub": n.next.e_n_pub.hex(),
+            "e_c_pub": n.next.e_c_pub.hex(),
+            "root": _hex(n.next.root),
+            "k_down": n.next.k_down.hex(),
+            "ck": n.next.up.ck.hex(),
+            "t": round(n.next.up.t, 3),
+        }
+    if n.prev is not None:
+        out["prev_up"] = {"gen": n.prev.gen, "c1": n.prev.c1, **_chain_to_json(n.prev)}
+    return out
+
+
+def _retired_to_json(r: _Retired) -> dict:
+    return {
+        "node_pub": r.node_pub.hex(),
+        "key_id": r.key_id,
+        "up_highest": r.up.highest,
+        "up_window": f"{r.up.bitmap:016x}",
+        "down_ctr": r.down_ctr,
     }
 
 
 def _node_from_json(n: dict) -> _Node:
-    keys = SessionKeys(bytes.fromhex(n["k_up"]), bytes.fromhex(n["k_down"]), int(n["key_id"]))
-    return _Node(
-        bytes.fromhex(n["node_pub"]),
-        keys,
-        ReplayWindow(int(n["up_highest"]), int(n["up_window"], 16)),
-        int(n.get("down_ctr", 0)),
-    )
+    """A node of a file of version 1, 2 (static keys only: generation 0) or 3."""
+    node_pub, key_id = bytes.fromhex(n["node_pub"]), int(n["key_id"])
+    k_up, k_down = _unhex(n.get("k_up"), 16), _unhex(n.get("k_down"), 16)
+    window = ReplayWindow(int(n["up_highest"]), int(n["up_window"], 16))
+    if "cur" not in n:  # version 1 or 2
+        if k_up is None or k_down is None:
+            raise ValueError("a node without keys")
+        node = _fresh_node(node_pub, SessionKeys(k_up, k_down, key_id), window)
+        node.cur.k_down = k_down
+        return node
+    c = n["cur"]
+    gen = int(c["gen"])
+    cur = _Cur(gen, _unhex(c.get("root"), 32), _unhex(c["k_down"], 16), None)
+    if gen == 0:
+        if k_up is None or k_down is None:
+            raise ValueError("generation 0 without its keys")
+    else:
+        cur.up = _chain_from_json(gen, c)
+        if cur.up is None:
+            raise ValueError("a generation without its chain")
+    node = _Node(node_pub, key_id, k_up, k_down, window, cur, t_up = float(n.get("t_up") or 0.0))
+    x = n.get("next")
+    if x is not None:
+        ck = _unhex(x["ck"], 32)
+        base = int(x["up_base"])
+        if not 0 < base < _MAX_EPOCH_IDX or int(x["gen"]) != gen + 1:
+            raise ValueError("bad next")
+        node.next = _Next(
+            gen + 1,
+            _unhex(x["e_n_pub"], 32),
+            _unhex(x["e_c_pub"], 32),
+            _unhex(x.get("root"), 32),
+            _unhex(x["k_down"], 16),
+            ChainState(gen + 1, base, 0, ck, float(x.get("t") or 0.0)),
+        )
+    p = n.get("prev_up")
+    if p is not None:
+        pgen = int(p["gen"])
+        if pgen != gen - 1:
+            raise ValueError("bad prev_up")
+        if pgen == 0:
+            if k_up is None:
+                raise ValueError("prev_up of generation 0 without the static key")
+            node.prev = ChainState(0, 0, 0, b"", float(p.get("up_t") or 0.0), int(p["c1"]))
+        else:
+            st = _chain_from_json(pgen, p)
+            if st is None:
+                raise ValueError("prev_up without its chain")
+            st.c1 = int(p["c1"])
+            node.prev = st
+    return node
+
+
+def _retired_from_json(n: dict) -> _Retired:
+    return _Retired(bytes.fromhex(n["node_pub"]), int(n["key_id"]),
+                    ReplayWindow(int(n["up_highest"]), int(n["up_window"], 16)), int(n.get("down_ctr", 0)))
 
 
 @dataclass
 class _File:
     pub: bytes
     nodes: dict[int, _Node]
-    retired: dict[int, _Node]
+    retired: dict[int, _Retired]
     senders: dict[str, int]  # sender id by host fingerprint
     down: dict[int, int]  # last downlink counter by node id
 
@@ -654,6 +900,156 @@ def _merge_window(a: ReplayWindow, b: ReplayWindow) -> ReplayWindow:
     return ReplayWindow(high, bits)
 
 
+# ---- the mix messages (Uplink.rekey = 14, Downlink.rekey = 14: the same three fields) ----
+
+
+def _put_varint(v: int) -> bytes:
+    out = bytearray()
+    while v >= 0x80:
+        out.append((v & 0x7F) | 0x80)
+        v >>= 7
+    out.append(v)
+    return bytes(out)
+
+
+def _get_varint(buf: bytes, pos: int) -> tuple[int, int]:
+    v = shift = 0
+    while True:
+        if pos >= len(buf) or shift > 28:
+            raise SecureError("bad varint in a rekey message")
+        b = buf[pos]
+        pos += 1
+        v |= (b & 0x7F) << shift
+        if not b & 0x80:
+            return v, pos
+        shift += 7
+
+
+@dataclass(frozen = True)
+class RekeyMessage:
+    """RekeyRequest (node to collector) and RekeyAnswer (back): generation g+1, a 32 B X25519 public key (the node's, or
+    the collector's) and the first uplink epoch of the new generation, which also names the request."""
+
+    gen: int
+    pub: bytes
+    up_base: int
+
+    def encode(self) -> bytes:
+        """The protobuf message: gen = 1, pub = 2, up_base = 3."""
+        return b"\x08" + _put_varint(self.gen) + b"\x12" + _put_varint(len(
+            self.pub)) + self.pub + b"\x18" + _put_varint(self.up_base)
+
+    def encode_field(self) -> bytes:
+        """Field 14 of an Uplink or a Downlink (tag 0x72), to append to the encoded message."""
+        body = self.encode()
+        return b"\x72" + _put_varint(len(body)) + body
+
+    @classmethod
+    def decode(cls, buf: bytes) -> RekeyMessage:
+        gen = up_base = 0
+        pub = b""
+        pos = 0
+        while pos < len(buf):
+            tag, pos = _get_varint(buf, pos)
+            if tag == 0x08 or tag == 0x18:
+                v, pos = _get_varint(buf, pos)
+                if tag == 0x08:
+                    gen = v
+                else:
+                    up_base = v
+            elif tag == 0x12:
+                n, pos = _get_varint(buf, pos)
+                if pos + n > len(buf):
+                    raise SecureError("rekey message too short")
+                pub, pos = buf[pos:pos + n], pos + n
+            else:
+                raise SecureError(f"unknown field in a rekey message (tag {tag:#x})")
+        return cls(gen, pub, up_base)
+
+
+class RekeyRequest(RekeyMessage):
+    pass
+
+
+class RekeyAnswer(RekeyMessage):
+    pass
+
+
+@dataclass(frozen = True)
+class NodeState:
+    """The ratchet state of a node, for a GUI and for metrics."""
+
+    gen: int
+    next_gen: int | None  # a mix that was answered and waits for its first uplink
+    next_since: float | None  # when it was answered (unix time)
+    prev_gen: int | None  # the previous generation is still accepted for late messages
+    prev_ends: int | None  # ... below this counter
+    up_idx: int | None  # chain index of the stored key (None in generation 0)
+    up_base: int | None
+    last_verified: float | None  # unix time of the last message that opened under the current chain
+    highest: int  # highest uplink counter seen
+    static_keys: bool  # the static keys of generation 0 are still held
+
+
+def _prune_prev(node: _Node) -> None:
+    """Drop what is no longer needed: the previous chain once the replay window is past its end (highest - 63 >= c1, all
+    its counters are refused anyway), one that does not belong to the generation before `cur`, and the static keys of
+    generation 0 once nothing needs them."""
+    prev = node.prev
+    if prev is not None and (prev.gen != node.cur.gen - 1 or node.up.highest - (WINDOW - 1) >= prev.c1):
+        node.prev = None
+    if node.next is not None and node.next.gen != node.cur.gen + 1:
+        node.next = None
+    if node.cur.gen != 0 and (node.prev is None or node.prev.gen != 0):
+        node.k_up = node.k_down = None
+
+
+def _cur_pos(c: _Cur) -> tuple[int, int]:
+    return c.gen, c.up.idx if c.up is not None else 0
+
+
+def _merge_ratchet(mine: _Node, theirs: _Node) -> None:
+    """Merge the ratchet state of the same node from another copy of the file (design 1.5): the higher generation wins, in
+    one generation the chain that is further; `next` only if it is the generation after `cur` (the file wins);
+    `prev_up` of the generation before `cur`, the further chain and the later end; the static keys only while a
+    generation 0 chain is in use."""
+    a, b = mine.cur, theirs.cur
+    if _cur_pos(b) > _cur_pos(a):
+        mine.cur = a = b
+    else:
+        if a.root is None and b.root is not None and a.gen == b.gen:
+            a.root = b.root
+        if a.up is not None and b.up is not None and a.gen == b.gen:
+            a.up.t = max(a.up.t, b.up.t)
+    nxt = None
+    for cand in (theirs.next, mine.next):
+        if cand is not None and cand.gen == a.gen + 1:
+            nxt = cand
+            break
+    if nxt is not None and mine.next is not None and nxt.same_request(mine.next.gen, mine.next.up.up_base,
+                                                                      mine.next.e_n_pub):
+        nxt = mine.next  # the same mix: keep the object (its cache) and the later time
+        if theirs.next is not None:
+            nxt.up.t = max(nxt.up.t, theirs.next.up.t)
+    mine.next = nxt
+    best = None
+    for cand in (mine.prev, theirs.prev):
+        if cand is not None and cand.gen == a.gen - 1 and (best is None or cand.idx > best.idx):
+            best = cand
+    if best is not None:
+        for cand in (mine.prev, theirs.prev):
+            if cand is not None and cand.gen == best.gen:
+                best.c1 = max(best.c1, cand.c1)
+                best.t = max(best.t, cand.t)
+    mine.prev = best
+    mine.t_up = max(mine.t_up, theirs.t_up)
+    if mine.k_up is None:
+        mine.k_up, mine.k_down = theirs.k_up, theirs.k_down  # only used if still needed, see _prune_prev
+    elif theirs.k_up is None and a.gen != 0 and (best is None or best.gen != 0):
+        mine.k_up = mine.k_down = None
+    _prune_prev(mine)
+
+
 class KeyStore:
     """Backend key store: node public keys, derived keys and counters in one JSON file (mode 0600).
 
@@ -676,6 +1072,15 @@ class KeyStore:
     sealed at the next save), with a new nonce each time; a sealed file needs the key file, and a wrong key is named as
     such. `require_sealed` (SENSEI_KEYSTORE_REQUIRE_SEALED=1) also refuses a plain file and a missing key file. The lock
     file stays plain. A key file that is configured but missing is an error, never a silent fall back to a plain file.
+
+    Forward secrecy (file version 3, `ratchet`). A node mixes its keys every few days: it asks (`RekeyRequest` in an
+    uplink), a key store opened with `responder=True` (SENSEI_REKEY_RESPONDER=1) answers with `rekey_answer`, and the
+    first uplink of the new generation that verifies against the answer makes it the current one. The keys of the
+    generation before are kept as long as late messages can arrive (`prev_up`), then dropped. Uplinks are opened with
+    `open_sealed`, which walks the uplink chain (with the limits of `chainwalk`); downlinks are sealed with the downlink
+    key of the current generation. A GUI that keeps its own file and does not answer follows the file of the collector
+    (`follow=`): it takes over the current generation, the answered mix and the previous chain (not the root key, the
+    sender ids and the counters). A key store without it loses access at the next mix of a node.
     """
 
     def __init__(
@@ -685,6 +1090,11 @@ class KeyStore:
         autosave_s: float = 5.0,
         key_file: str | os.PathLike | None = None,
         require_sealed: bool | None = None,
+        responder: bool | None = None,
+        follow: str | os.PathLike | None = None,
+        follow_key_file: str | os.PathLike | None = None,
+        walker: Walker | None = None,
+        clock: Callable[[], float] = time.time,
     ) -> None:
         self.path = Path(path) if path else None
         key_file = key_file or os.environ.get(_ENV_KEY_FILE) or None
@@ -694,6 +1104,22 @@ class KeyStore:
         self._require_sealed = require_sealed
         if require_sealed and self._key is None:
             raise SecureError(f"{_ENV_REQUIRE_SEALED}=1 needs a key file ({_ENV_KEY_FILE})")
+        if responder is None:
+            responder = os.environ.get(_ENV_RESPONDER, "").strip() == "1"
+        if responder and follow:
+            raise SecureError("a key store that answers mixes cannot follow another file")
+        self.responder = bool(responder)  # answers the rekey requests of the nodes (`rekey_answer`)
+        self._clock = clock
+        if walker is None:
+            skip = os.environ.get(_ENV_MAX_SKIP, "").strip()
+            walker = Walker(max_skip = int(skip) if skip else ratchet.MAX_SKIP, clock = clock)
+        self.walker = walker
+        self.stats: collections.Counter[str] = collections.Counter()  # forged, refused and mix counts (metrics)
+        self._log_at: dict[str, float] = {}
+        self._follow = Path(follow) if follow else None
+        self._follow_key = load_key_file(follow_key_file) if follow_key_file else self._key
+        self._follow_sig: tuple | None = None
+        self._resync_at = -1e9
         self.file_was_plain = False  # the file read last was not sealed (a key store without a key file: warn)
         self._warned_plain = False
         self.autosave_s = autosave_s
@@ -708,7 +1134,7 @@ class KeyStore:
         self._host = host_fingerprint(path) if path else ""
         # counters of removed nodes by key id: the same key added again must go on from them (a counter must
         # never be used twice with one key)
-        self._retired: dict[int, _Node] = {}
+        self._retired: dict[int, _Retired] = {}
         self._added: set[int] = set()  # nodes added or changed here since the last save: they win a merge
         self._removed: set[int] = set()  # nodes removed here since the last save: a merge does not bring them back
         self._lock_depth = 0
@@ -741,8 +1167,9 @@ class KeyStore:
             raise SecureError("the private key does not belong to this key store")
         store._pub = f.pub
         for node_id, node in f.nodes.items():
+            _prune_prev(node)
             store._nodes[node_id] = node
-            store._by_key_id[node.keys.key_id] = node_id
+            store._by_key_id[node.key_id] = node_id
         store._retired = f.retired
         store._down = f.down
         store._senders = f.senders
@@ -750,6 +1177,7 @@ class KeyStore:
             store._sender = f.senders[store._host]
         elif f.senders:  # a copy, or another process: the sender must not be shared
             store.sender_changed = True
+        store._follow_refresh()
         return store
 
     def _read_file(self) -> _File:
@@ -762,21 +1190,24 @@ class KeyStore:
                 self._warned_plain = True
                 log.warning("key store %s is not sealed: its keys are readable by anyone who gets the file (%s)",
                             self.path, _ENV_KEY_FILE)
-            version = data.get("version")
-            if version not in (1, 2):
-                raise SecureError(f"unsupported key store version {version}")
-            nodes = {int(text, 16): _node_from_json(n) for text, n in data["nodes"].items()}
-            retired = {int(text, 16): _node_from_json(n) for text, n in data.get("retired", {}).items()}
-            down = {int(text, 16): int(n) for text, n in data.get("down_ctr", {}).items()}
-            for node_id, node in nodes.items():  # version 1: the counter was in the node
-                down[node_id] = max(down.get(node_id, 0), node.down_ctr)
-                node.down_ctr = 0
-            senders = {str(h): int(text, 16) for h, text in data.get("senders", {}).items()}
-            if "sender" in data and not senders:  # one sender: the fingerprint of its host, if the file has one
-                senders[data.get("host", self._host)] = int(data["sender"], 16)
-            return _File(bytes.fromhex(data["backend_public_key"]), nodes, retired, senders, down)
+            return self._parse_file(data)
         except (KeyError, ValueError, TypeError, OSError) as exc:
             raise SecureError(f"key store {self.path} is damaged: {exc}") from exc
+
+    def _parse_file(self, data: dict) -> _File:
+        """The content of a key store file (version 1, 2 or 3). Versions before 3 migrate: a node is in generation 0."""
+        version = data.get("version")
+        if version not in (1, 2, FILE_VERSION):
+            raise SecureError(f"unsupported key store version {version}")
+        nodes = {int(text, 16): _node_from_json(n) for text, n in data["nodes"].items()}
+        retired = {int(text, 16): _retired_from_json(n) for text, n in data.get("retired", {}).items()}
+        down = {int(text, 16): int(n) for text, n in data.get("down_ctr", {}).items()}
+        for text, n in data["nodes"].items():  # version 1: the counter was in the node
+            down[int(text, 16)] = max(down.get(int(text, 16), 0), int(n.get("down_ctr", 0)))
+        senders = {str(h): int(text, 16) for h, text in data.get("senders", {}).items()}
+        if "sender" in data and not senders:  # one sender: the fingerprint of its host, if the file has one
+            senders[data.get("host", self._host)] = int(data["sender"], 16)
+        return _File(bytes.fromhex(data["backend_public_key"]), nodes, retired, senders, down)
 
     @contextlib.contextmanager
     def _file_lock(self):
@@ -815,15 +1246,21 @@ class KeyStore:
             mine = self._nodes.get(node_id)
             if node_id in self._removed and mine is None:
                 continue
-            if mine is None or (mine.keys != theirs.keys and node_id not in self._added):
+            same = mine is not None and (mine.node_pub, mine.key_id) == (theirs.node_pub, theirs.key_id)
+            if mine is None or (not same and node_id not in self._added):
                 if mine is not None:
-                    del self._by_key_id[mine.keys.key_id]
-                owner = self._by_key_id.get(theirs.keys.key_id)
+                    del self._by_key_id[mine.key_id]
+                owner = self._by_key_id.get(theirs.key_id)
                 if owner is None or owner == node_id:
+                    _prune_prev(theirs)
                     self._nodes[node_id] = theirs
-                    self._by_key_id[theirs.keys.key_id] = node_id
-            elif mine.keys == theirs.keys:
+                    self._by_key_id[theirs.key_id] = node_id
+            elif same:
                 mine.up = _merge_window(mine.up, theirs.up)
+                if node_id not in self._added:  # a node added here again starts in generation 0, whatever the file has
+                    _merge_ratchet(mine, theirs)
+                else:
+                    _prune_prev(mine)
         for key_id, theirs in f.retired.items():
             mine = self._retired.get(key_id)
             if mine is None:
@@ -841,7 +1278,7 @@ class KeyStore:
             self._merge_from_disk()
             _ = self.sender  # makes it if this store has none yet
             data = {
-                "version": 2,
+                "version": FILE_VERSION,
                 "senders": {
                     h: f"{s:08x}" for h, s in sorted(self._senders.items())
                 },
@@ -850,7 +1287,7 @@ class KeyStore:
                     _node_text(i): _node_to_json(n) for i, n in sorted(self._nodes.items())
                 },
                 "retired": {
-                    f"{k:08x}": _node_to_json(n) for k, n in sorted(self._retired.items())
+                    f"{k:08x}": _retired_to_json(n) for k, n in sorted(self._retired.items())
                 },
                 "down_ctr": {
                     _node_text(i): n for i, n in sorted(self._down.items())
@@ -922,8 +1359,10 @@ class KeyStore:
         return self._pub
 
     def add_node(self, node_id: int, node_pub: bytes) -> None:
-        """Derive the keys of a node from its public key. A node that is added again with the same key
-        keeps its counters; a new key starts new counters."""
+        """Derive the keys of a node from its public key and start it in generation 0 (the node does the same when it is
+        provisioned: it drops its ratchet state). A node that is added again with the same key keeps its counters (also
+        what the key store has seen of it), but loses the ratchet state: `cur`, `next` and the previous chain are gone. A
+        new key starts new counters. The key of a node counts as the same if the node public key and the key id are."""
         if self._priv is None or self._pub is None:
             raise SecureError("the backend private key is not loaded")
         if not 0 <= node_id < 2**64:
@@ -935,18 +1374,23 @@ class KeyStore:
             owner = self._by_key_id.get(keys.key_id)
             if owner is not None and owner != node_id:
                 raise SecureError(f"key id {keys.key_id:08x} is used by node {_node_text(owner)}")
-            if old is not None and old.keys == keys:
-                return
-            if old is not None:
-                self._retire(old)
-                del self._by_key_id[old.keys.key_id]
-            # the same key as before (removed and added again) goes on from its counters
-            back = self._retired.pop(keys.key_id, None)
-            node = _Node(node_pub, keys, ReplayWindow())
-            if back is not None and back.keys == keys:
-                node.up = back.up
-                self._down[node_id] = max(self._down.get(node_id, 0), back.down_ctr)
-            self._nodes[node_id] = node
+            window = ReplayWindow()
+            if old is not None and (old.node_pub, old.key_id) == (node_pub, keys.key_id):
+                if old.cur.gen == 0 and old.next is None and old.prev is None and old.k_up is not None:
+                    return  # nothing to reset
+                window = old.up
+                del self._by_key_id[old.key_id]
+            else:
+                if old is not None:
+                    self._retire(old)
+                    del self._by_key_id[old.key_id]
+                # the same key as before (removed and added again) goes on from its counters
+                back = self._retired.pop(keys.key_id, None)
+                if back is not None and back.node_pub == node_pub:
+                    window = back.up
+                    self._down[node_id] = max(self._down.get(node_id, 0), back.down_ctr)
+            self.walker.forget_node(node_id)
+            self._nodes[node_id] = _fresh_node(node_pub, keys, window)
             self._by_key_id[keys.key_id] = node_id
             self._added.add(node_id)
             self._removed.discard(node_id)
@@ -958,14 +1402,16 @@ class KeyStore:
             node = self._nodes.pop(node_id, None)
             if node is not None:
                 self._retire(node)
-                del self._by_key_id[node.keys.key_id]
+                del self._by_key_id[node.key_id]
                 self._added.discard(node_id)
                 self._removed.add(node_id)
+                self.walker.forget_node(node_id)
                 self._touch(now = True)
 
     def _retire(self, node: _Node) -> None:
-        """Keep the counters of a key that is dropped: if the key comes back it must not restart them."""
-        self._retired[node.keys.key_id] = node
+        """Keep the counters of a key that is dropped: if the key comes back it must not restart them. The keys and the
+        ratchet state are not kept."""
+        self._retired[node.key_id] = _Retired(node.node_pub, node.key_id, node.up)
 
     def node_ids(self) -> list[int]:
         return sorted(self._nodes)
@@ -974,7 +1420,181 @@ class KeyStore:
         return node_id in self._nodes
 
     def key_id(self, node_id: int) -> int:
-        return self._nodes[node_id].keys.key_id
+        return self._nodes[node_id].key_id
+
+    def generation(self, node_id: int) -> int:
+        """Generation in use for the node: 0 until its first mix is used."""
+        self._follow_refresh()
+        return self._nodes[node_id].cur.gen
+
+    def node_state(self, node_id: int) -> NodeState:
+        """What a GUI or the metrics show of a node: generation, an answered mix that waits, the previous chain."""
+        self._follow_refresh()
+        n = self._nodes[node_id]
+        up = n.cur.up
+        return NodeState(
+            gen = n.cur.gen,
+            next_gen = None if n.next is None else n.next.gen,
+            next_since = None if n.next is None else n.next.up.t,
+            prev_gen = None if n.prev is None else n.prev.gen,
+            prev_ends = None if n.prev is None else n.prev.c1,
+            up_idx = None if up is None else up.idx,
+            up_base = None if up is None else up.up_base,
+            last_verified = None if up is None or not up.t else up.t,
+            highest = n.up.highest,
+            static_keys = n.k_up is not None,
+        )
+
+    # ---- the mix: the collector answers a request of a node ----
+
+    def _warn(self, key: str, msg: str, *args) -> None:
+        """A log line at most once a minute per key (a flood of forged frames must not flood the log)."""
+        now = self._clock()
+        last = self._log_at.get(key)
+        if last is not None and 0 <= now - last < 60.0:
+            return
+        self._log_at[key] = now
+        log.warning(msg, *args)
+
+    def rekey_answer(self, node_id: int, req: RekeyRequest) -> RekeyAnswer | None:
+        """Answer the RekeyRequest of a node (design 1.3). Call it for a request in an uplink that was opened with `cur`
+        (a request of the generation after `cur`); only on a store opened with responder=True.
+
+        Under the file lock: if the answer to this request exists (same generation, up_base and node key) it is returned
+        again, else a new ephemeral key is made, the mix is computed, the private ephemeral key is dropped (Python has
+        no way to wipe it from memory), `next` is stored and the file synced. Only then the answer is returned, so a
+        crash cannot lose the key of an answer that was sent. Processes on one file give one answer: the second finds
+        the first one's `next`. Returns None for a request that is ignored (generation not the one after `cur`, a node
+        that is unknown, a bad key or up_base; logged)."""
+        if not self.responder:
+            raise SecureError("this key store does not answer mixes (responder=False, SENSEI_REKEY_RESPONDER)")
+        with self._lock, self._file_lock():
+            self._merge_from_disk()
+            node = self._nodes.get(node_id)
+            if node is None:
+                self._warn(f"rk-unknown-{node_id}", "rekey request from unknown node %s", _node_text(node_id))
+                return None
+            cur = node.cur
+            if req.gen != cur.gen + 1:  # an old request, or a node that is ahead
+                self.stats["rekey_ignored"] += 1
+                self._warn(f"rk-gen-{node_id}", "rekey request of node %s for generation %d ignored (current %d)",
+                           _node_text(node_id), req.gen, cur.gen)
+                return None
+            if len(req.pub) != ratchet.KEY_SIZE or not 0 < req.up_base < _MAX_EPOCH_IDX:
+                self.stats["rekey_ignored"] += 1
+                self._warn(f"rk-bad-{node_id}", "rekey request of node %s is malformed", _node_text(node_id))
+                return None
+            if cur.root is None:
+                raise SecureError("this key store has no root key for the node (a follower cannot answer)")
+            nxt = node.next
+            if nxt is not None and nxt.same_request(req.gen, req.up_base, req.pub):
+                self.stats["rekey_resent"] += 1
+                return RekeyAnswer(nxt.gen, nxt.e_c_pub, nxt.up.up_base)
+            e_c_priv, e_c_pub = ratchet.x25519_keygen()
+            try:
+                mix = ratchet.mix_collector(cur.root, node.key_id, req.gen, req.up_base, e_c_priv, req.pub)
+            except ratchet.DhError:
+                self.stats["rekey_ignored"] += 1
+                self._warn(f"rk-dh-{node_id}", "rekey request of node %s has a low-order public key",
+                           _node_text(node_id))
+                return None
+            finally:
+                del e_c_priv  # not kept anywhere
+            node.next = _Next(req.gen, req.pub, e_c_pub, mix.root, mix.k_down,
+                              ChainState(req.gen, req.up_base, 0, mix.ck, self._clock()))
+            try:
+                self._touch(now = True)  # fsync before the answer leaves
+            except BaseException:
+                node.next = nxt  # nothing was sent: the old state stays
+                raise
+            self.stats["rekey_answered"] += 1
+            log.info("node %s: answered the mix to generation %d (up_base %d)", _node_text(node_id), req.gen,
+                     req.up_base)
+            return RekeyAnswer(req.gen, e_c_pub, req.up_base)
+
+    def _commit(self, node_id: int, node: _Node, sel: _Selection, h: Header, walked: Walked | None) -> bool:
+        """A message verified (the lock is held): the replay window, the stored chain key, the promotion of an answered
+        mix, the previous chain dropped when its end is behind the window. True if the node was promoted."""
+        now = self._clock()
+        promoted = sel.which == "next"
+        node.t_up = now
+        if promoted:
+            _promote(self, node_id, node, sel, h, walked, now)
+        else:
+            node.up.update(h.counter)
+            if sel.st is not None and sel.st.gen != 0:
+                idx = ratchet.epoch(h.counter) - sel.st.up_base
+                if sel.which == "cur":
+                    want = max(0, ratchet.epoch(node.up.highest) - 1 - sel.st.up_base)
+                else:  # the previous chain: the counters of the window may still be this epoch or the one before
+                    want = max(0, idx - 1)
+                _advance(self, sel.st, idx, walked, want, now)
+        _prune_prev(node)
+        self._touch(now = promoted)  # a promotion is synced to disk at once
+        return promoted
+
+    # ---- followers ----
+
+    def _follow_refresh(self) -> None:
+        """A follower (`follow=`): read the followed file again if it changed (a stat per call, no lock; the file is
+        replaced atomically) and take over the ratchet state of the nodes it knows."""
+        if self._follow is None:
+            return
+        try:
+            st = self._follow.stat()
+        except OSError:
+            return
+        sig = (st.st_mtime_ns, st.st_size, st.st_ino)
+        if sig == self._follow_sig:
+            return
+        self._follow_sig = sig
+        try:
+            data, _ = _open_text(self._follow.read_text(), self._follow_key, self._follow)
+            f = self._parse_file(data)
+        except (KeyError, ValueError, TypeError, OSError, SecureError) as exc:
+            self._warn("follow", "cannot follow key store %s: %s", self._follow, exc)
+            return
+        for node_id, theirs in f.nodes.items():
+            mine = self._nodes.get(node_id)
+            if mine is not None and (mine.node_pub, mine.key_id) == (theirs.node_pub, theirs.key_id):
+                self._import(mine, theirs)
+                self._dirty = True
+
+    def _import(self, mine: _Node, theirs: _Node) -> None:
+        """Take over cur, next (without root) and prev_up of the followed copy: never the root key, the replay window or
+        the counters. The chain of the followed file is used when it is a later generation, or further in the same one."""
+        a, b = mine.cur, theirs.cur
+        mine.t_up = max(mine.t_up, theirs.t_up)
+        if _cur_pos(b) > _cur_pos(a):
+            up = None if b.up is None else b.up.copy()
+            mine.cur = _Cur(b.gen, None, b.k_down, up)
+            if b.gen > a.gen:
+                mine.prev = None if theirs.prev is None else theirs.prev.copy()
+        elif a.up is not None and b.up is not None and a.gen == b.gen:
+            a.up.t = max(a.up.t, b.up.t)
+        cur = mine.cur
+        if theirs.next is not None and theirs.next.gen == cur.gen + 1:
+            if mine.next is None or not mine.next.same_request(theirs.next.gen, theirs.next.up.up_base,
+                                                               theirs.next.e_n_pub):
+                t = theirs.next
+                mine.next = _Next(t.gen, t.e_n_pub, t.e_c_pub, None, t.k_down, t.up.copy())
+        elif mine.next is not None and (mine.next.gen != cur.gen + 1 or a.gen == b.gen):
+            mine.next = None  # the followed file has dropped or replaced it
+        if mine.prev is None and theirs.prev is not None and theirs.prev.gen == cur.gen - 1:
+            mine.prev = theirs.prev.copy()
+        _prune_prev(mine)
+
+    def _resync(self) -> bool:
+        """Another process on the same file may have promoted a node, or a follower's file has changed: look again, at most
+        once a second. True if something was read."""
+        self._follow_refresh()
+        now = time.monotonic()
+        if self.path is None or 0 <= now - self._resync_at < 1.0:
+            return False
+        self._resync_at = now
+        with self._lock, self._file_lock():
+            self._merge_from_disk()
+        return True
 
 
 def backend_keygen(private_pem_path: str | os.PathLike) -> bytes:
@@ -1040,52 +1660,216 @@ def rotate_file_key(
         _write_atomic(p, _seal_text(json.dumps(inner, indent = 1).encode(), new_bytes))
 
 
-def open_sealed(payload: bytes, store: KeyStore) -> tuple[int, int, bytes]:
-    """Open a sealed payload from a node: (node_id, kind, plaintext). Raises SecureError (UnknownKeyError,
-    ReplayError are subclasses) if the key is unknown, the tag does not verify or the counter was seen."""
+@dataclass(frozen = True)
+class Opened:
+    """A verified uplink: who, what kind, the plaintext, the generation it was sealed in, and whether it made the answered
+    mix the current generation of the node (the first uplink of a new generation)."""
+
+    node_id: int
+    kind: int
+    plaintext: bytes
+    gen: int
+    promoted: bool = False
+
+
+@dataclass(frozen = True)
+class _Selection:
+    which: str  # "static" (generation 0 key), "cur", "next" or "prev"
+    gen: int
+    st: ChainState | None  # None: the static key
+    key: bytes | None  # the static key, copied under the lock
+    snapshot: tuple[int, bytes] | None  # (idx, ck) of the chain as read under the lock
+    ref_idx: int | None = None  # where the time bound counts from (see Walker.precheck)
+    t_ref: float | None = None
+
+
+def _select(node: _Node, h: Header, walker: Walker, now: float) -> _Selection:
+    """The key material for an envelope, by its generation bits (cur, next and prev differ mod 4). Cheap: no walk, no
+    crypto. Raises GenerationError (no such generation: a node that is ahead, or a generation that was dropped), EpochError
+    or GapError."""
+    cur = node.cur
+    if not h.ratchet:
+        if cur.gen == 0:
+            return _Selection("static", 0, None, node.k_up, None)
+        prev = node.prev
+        if prev is not None and prev.gen == 0:
+            if h.counter >= prev.c1:
+                raise SecureError("generation 0 envelope beyond the end of generation 0")
+            return _Selection("prev", 0, prev, node.k_up, None)
+        raise GenerationError(f"generation 0 envelope from a node that is in generation {cur.gen}: dropped")
+    bits = h.gen_bits
+    if cur.gen >= 1 and cur.gen & 3 == bits:
+        which, gen, st = "cur", cur.gen, cur.up
+    elif node.next is not None and node.next.gen & 3 == bits:
+        which, gen, st = "next", node.next.gen, node.next.up
+    elif node.prev is not None and node.prev.gen >= 1 and node.prev.gen & 3 == bits:
+        if h.counter >= node.prev.c1:
+            raise SecureError(f"generation {node.prev.gen} envelope beyond the end of its generation")
+        which, gen, st = "prev", node.prev.gen, node.prev
+    else:
+        raise GenerationError(f"no key for generation {bits} (mod 4) of this node (current {cur.gen}): "
+                              "the node may be ahead of the key store, provision it again")
+    idx = ratchet.epoch(h.counter) - st.up_base
+    if idx < 0:
+        raise EpochError(f"epoch {ratchet.epoch(h.counter)} is before the start of the chain ({st.up_base})")
+    ref_idx = t_ref = None
+    if which == "next":
+        # The first uplink of the new generation is the next epoch boundary after the switch: far above up_base if the
+        # request waited long. Count from the epoch of the last verified uplink of the node, not from the head.
+        ref_idx = max(0, ratchet.epoch(node.up.highest) - st.up_base)
+        t_ref = node.t_up or st.t
+    walker.precheck(st, idx, now, None, ref_idx, t_ref)
+    return _Selection(which, gen, st, None, (st.idx, st.ck), ref_idx, t_ref)
+
+
+def _open_up(payload: bytes, store: KeyStore, commit: bool) -> Opened:
     h = parse_header(payload)
     if h.direction != DIR_UP:
         raise SecureError("not a node to backend envelope")
-    if h.ratchet:
-        raise GenerationError("ratchet envelope: this key store knows generation 0 only")
-    with store._lock:
-        node_id = store._by_key_id.get(h.key_id)
-        if node_id is None:
-            raise UnknownKeyError(f"unknown key id {h.key_id:08x}")
-        if h.node_id is not None and h.node_id != node_id:
-            raise SecureError("node id does not match the key")
-        node = store._nodes[node_id]
-        node.up.check(h.counter)
-        plain = open_raw(node.keys.k_up, payload, h)
-        node.up.update(h.counter)
-        store._touch()
-    return node_id, h.kind, plain
+    resynced = False
+    for _attempt in range(4):
+        # 1. under the lock: look up the node, replay check, pick the key, refuse what is cheap to refuse
+        with store._lock:
+            store._follow_refresh()
+            node_id = store._by_key_id.get(h.key_id)
+            if node_id is None:
+                raise UnknownKeyError(f"unknown key id {h.key_id:08x}")
+            if h.node_id is not None and h.node_id != node_id:
+                raise SecureError("node id does not match the key")
+            node = store._nodes[node_id]
+            if commit:
+                node.up.check(h.counter)
+            now = store._clock()
+            try:
+                sel = _select(node, h, store.walker, now)
+            except GenerationError:
+                if not resynced and store._resync():
+                    resynced = True
+                    continue
+                store.stats["node_ahead"] += 1
+                store._warn(
+                    f"ahead-{node_id}", "node %s sent generation %d, the key store is at %d: node ahead of key "
+                    "store, re-provision it", _node_text(node_id), h.gen_bits, node.cur.gen)
+                raise
+            except EpochError:
+                store.stats["epoch_refused"] += 1
+                raise
+            except GapError as exc:
+                store.stats["gap_refused"] += 1
+                store._warn(f"gap-{node_id}", "node %s: %s (a forged frame, or the node was silent for long)",
+                            _node_text(node_id), exc)
+                raise
+        # 2. outside the lock: the walk (limited, cached) and the tag
+        walked = None
+        if sel.st is None:
+            key = sel.key
+        elif sel.st.gen == 0:
+            key = sel.key
+        else:
+            idx = ratchet.epoch(h.counter) - sel.st.up_base
+            try:
+                walked = store.walker.walk(node_id, sel.st, idx, sel.snapshot, now, sel.ref_idx, sel.t_ref)
+            except WalkBudgetError as exc:
+                store.stats["budget_refused"] += 1
+                store._warn(f"budget-{node_id}", "node %s: %s", _node_text(node_id), exc)
+                raise
+            key = ratchet.message_key(walked.ck)
+        try:
+            plain = open_raw(key, payload, h)
+        except SecureError:
+            store.stats["auth_failed"] += 1
+            raise
+        if not commit:
+            return Opened(node_id, h.kind, plain, sel.gen)
+        # 3. under the lock again: the state may have moved meanwhile; commit only if the same key is still the right one
+        with store._lock:
+            node2 = store._nodes.get(node_id)
+            if node2 is not node:
+                continue
+            node.up.check(h.counter)  # a duplicate that was processed meanwhile
+            try:
+                again = _select(node, h, store.walker, store._clock())
+            except (GenerationError, GapError, EpochError):
+                continue
+            if (again.which, again.gen) != (sel.which, sel.gen) or again.st is not sel.st:
+                continue
+            promoted = store._commit(node_id, node, sel, h, walked)
+            return Opened(node_id, h.kind, plain, sel.gen, promoted)
+    raise SecureError("key store changed while the envelope was opened, try again")
+
+
+def _advance(store: KeyStore, st: ChainState, idx: int, walked: Walked | None, want: int, now: float) -> None:
+    """After a verified message at chain index idx: keep the chain key at max(idx_lo, min(idx, want)); want is
+    idx(highest) - 1 for the current chain (the 64 counters of the window span two epochs), idx - 1 for the previous one.
+    The key comes from the walk (the key at idx or idx - 1); nothing is derived under the lock."""
+    st.t = now
+    lo = max(st.idx, min(idx, want))
+    if lo <= st.idx or walked is None:
+        return
+    if lo == idx:
+        ck = walked.ck
+    elif lo == idx - 1 and walked.ck_before is not None:
+        ck = walked.ck_before
+    else:
+        return  # the chain moved on its own meanwhile: the next message advances it
+    st.ck, st.idx = ck, lo
+    store.walker.drop_below(st, lo)
+
+
+def _promote(store: KeyStore, node_id: int, node: _Node, sel: _Selection, h: Header, walked: Walked | None,
+             now: float) -> None:
+    """The first uplink of generation g+1 verified against `next`: it becomes `cur`, the chain of g becomes `prev_up`
+    (ending before counter c1 = this one), the downlink key and the root key of g are dropped."""
+    nxt = node.next
+    assert nxt is not None and walked is not None
+    old = node.cur
+    prev = old.up if old.up is not None else ChainState(0, 0, 0, b"", now)
+    prev.c1 = h.counter
+    prev.t = now
+    chain = nxt.up
+    node.up.update(h.counter)  # the window first: _advance wants the highest counter
+    _advance(store, chain,
+             ratchet.epoch(h.counter) - chain.up_base, walked, max(0,
+                                                                   ratchet.epoch(node.up.highest) - 1 - chain.up_base),
+             now)
+    node.prev = prev
+    node.cur = _Cur(nxt.gen, nxt.root, nxt.k_down, chain)
+    node.next = None
+    store.stats["promoted"] += 1
+    log.info("node %s: generation %d is in use", _node_text(node_id), nxt.gen)
+
+
+def open_sealed(payload: bytes, store: KeyStore) -> tuple[int, int, bytes]:
+    """Open a sealed payload from a node: (node_id, kind, plaintext). Raises SecureError (UnknownKeyError,
+    ReplayError, GenerationError, EpochError, GapError are subclasses) if the key is unknown, the tag does not verify,
+    the counter was seen or no key can be derived at a reasonable cost. A verified uplink of a generation that the store
+    has not used yet (the answered mix) makes it the current one. `open_sealed_ex` also tells the generation."""
+    o = open_sealed_ex(payload, store)
+    return o.node_id, o.kind, o.plaintext
+
+
+def open_sealed_ex(payload: bytes, store: KeyStore) -> Opened:
+    """Like open_sealed, with the generation the message was sealed in and whether it promoted the mix."""
+    return _open_up(payload, store, commit = True)
 
 
 def peek_sealed(payload: bytes, store: KeyStore) -> tuple[int, bytes]:
-    """Like open_sealed, but the replay window is not touched: a second reader of the same frames (the GUI
-    recorder) may look inside without making the real reader see a replay. Returns (kind, plaintext)."""
-    h = parse_header(payload)
-    if h.direction != DIR_UP:
-        raise SecureError("not a node to backend envelope")
-    if h.ratchet:
-        raise GenerationError("ratchet envelope: this key store knows generation 0 only")
-    with store._lock:
-        node_id = store._by_key_id.get(h.key_id)
-        if node_id is None:
-            raise UnknownKeyError(f"unknown key id {h.key_id:08x}")
-        if h.node_id is not None and h.node_id != node_id:
-            raise SecureError("node id does not match the key")
-        key = store._nodes[node_id].keys.k_up
-    return h.kind, open_raw(key, payload, h)
+    """Like open_sealed, but the replay window and the chains are not touched (and a mix is not promoted): a second
+    reader of the same frames (the GUI recorder) may look inside without making the real reader see a replay. The walk
+    obeys the same limits. Returns (kind, plaintext)."""
+    o = _open_up(payload, store, commit = False)
+    return o.kind, o.plaintext
 
 
 def seal_downlink(node_id: int, kind: int, plaintext: bytes, store: KeyStore) -> bytes:
-    """Seal a Downlink (KIND_DOWNLINK) or a settings write (KIND_SETTINGS) for a node."""
+    """Seal a Downlink (KIND_DOWNLINK) or a settings write (KIND_SETTINGS) for a node, with the downlink key of the
+    generation in use (generation 0: the static key and the format of version 3 as it always was). Before the node
+    has used an answered mix, that is still the old generation: the node keeps its key until its next request."""
     if kind not in (KIND_DOWNLINK, KIND_SETTINGS):
         raise SecureError(f"kind {kind} is not a downlink kind")
     with store._lock, store._file_lock():
-        store._merge_from_disk()  # another process may have used counters
+        store._follow_refresh()
+        store._merge_from_disk()  # another process may have used counters, or promoted the node
         node = store._nodes.get(node_id)
         if node is None:
             raise UnknownKeyError(f"unknown node {_node_text(node_id)}")
@@ -1096,7 +1880,13 @@ def seal_downlink(node_id: int, kind: int, plaintext: bytes, store: KeyStore) ->
                 "reuses a counter, so it cannot seal more downlinks for this node id")
         counter += 1
         store._down[node_id] = counter
-        out = seal_raw(node.keys.k_down, node.keys.key_id, counter, kind, plaintext, sender = store.sender)
+        out = seal_raw(node.cur.k_down,
+                       node.key_id,
+                       counter,
+                       kind,
+                       plaintext,
+                       sender = store.sender,
+                       gen = node.cur.gen)
         store._touch(now = True)  # the counter must never be reused
     return out
 

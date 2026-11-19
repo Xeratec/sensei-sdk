@@ -208,7 +208,7 @@ def test_downlink_counter_saved_immediately(backend):
     make_node(store)
     secure.seal_downlink(NODE_ID, KIND_DOWNLINK, b"x", store)
     on_disk = json.loads(store.path.read_text())
-    assert on_disk["version"] == 2 and on_disk["down_ctr"][f"{NODE_ID:016x}"] == 1
+    assert on_disk["version"] == 3 and on_disk["down_ctr"][f"{NODE_ID:016x}"] == 1
     assert list(on_disk["senders"].values()) == [f"{store.sender:08x}"]
 
 
@@ -544,7 +544,7 @@ def test_a_node_session_keeps_counters_over_a_key_change(backend):
 
 
 def test_a_version_1_key_store_is_migrated(backend, tmp_path):
-    """The counters of a version 1 file (down_ctr inside the nodes, no sender) are kept; the next save writes version 2."""
+    """The counters of a version 1 file (down_ctr inside the nodes, no sender) are kept; the next save writes version 3."""
     store, pem = backend
     make_node(store)
     data = json.loads(store.path.read_text())
@@ -558,7 +558,7 @@ def test_a_version_1_key_store_is_migrated(backend, tmp_path):
     env = secure.seal_downlink(NODE_ID, KIND_DOWNLINK, b"x", old)
     assert secure.parse_header(env).counter == 42
     saved = json.loads(path.read_text())
-    assert saved["version"] == 2 and saved["down_ctr"][f"{NODE_ID:016x}"] == 42 and saved["senders"]
+    assert saved["version"] == 3 and saved["down_ctr"][f"{NODE_ID:016x}"] == 42 and saved["senders"]
     assert KeyStore.load(path).sender == old.sender
 
 

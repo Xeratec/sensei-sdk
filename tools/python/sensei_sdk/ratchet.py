@@ -25,7 +25,7 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
-from .secure import EpochError, GapError, SecureError
+from .errors import EpochError, GapError, SecureError
 
 ROOT_LABEL = b"SENSEI-E2E-root-v1"
 MIX_LABEL = b"SENSEI-RK-v1"
@@ -124,18 +124,22 @@ def epoch(counter: int) -> int:
     return counter >> EPOCH_BITS
 
 
-def _hmac(ck: bytes, label: int) -> bytes:
-    return hmac.new(ck, bytes([label]), hashlib.sha256).digest()
+_LABEL_MK = b"\x01"
+_LABEL_CK = b"\x02"
+
+
+def _hmac(ck: bytes, label: bytes) -> bytes:
+    return hmac.digest(ck, label, hashlib.sha256)
 
 
 def message_key(ck: bytes) -> bytes:
     """MK_i = HMAC(CK_i, 0x01)[0:16], the AES-128-GCM key of epoch i."""
-    return _hmac(ck, 1)[:MK_SIZE]
+    return _hmac(ck, _LABEL_MK)[:MK_SIZE]
 
 
 def next_chain_key(ck: bytes) -> bytes:
     """CK_{i+1} = HMAC(CK_i, 0x02)."""
-    return _hmac(ck, 2)
+    return _hmac(ck, _LABEL_CK)
 
 
 class Chain:

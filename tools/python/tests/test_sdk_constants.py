@@ -111,3 +111,34 @@ def test_secure_constants():
         ("KIND_SETTINGS", "SENSEI_SECURE_KIND_SETTINGS"),
     ):
         assert getattr(sec, py) == enum_value(text, c)
+
+
+def test_secure_generation_bits_and_ratchet_constants():
+    from sensei_sdk import ratchet
+    from sensei_sdk import secure as sec
+    from sensei_sdk import vectors
+
+    text = (SDK_ROOT / "lib/sensei_secure/include/sensei_secure.h").read_text()
+    assert sec.KIND_MASK == define(text, "SENSEI_SECURE_KIND_MASK")
+    assert sec.KIND_RATCHET == define(text, "SENSEI_SECURE_KIND_RATCHET")
+    assert sec.KIND_RESERVED == define(text, "SENSEI_SECURE_KIND_RESERVED")
+    assert sec.GEN_SHIFT == define(text, "SENSEI_SECURE_GEN_SHIFT")
+    assert sec.GEN_MASK == define(text, "SENSEI_SECURE_GEN_MASK")
+    # the error codes that the vectors expect are those of the header
+    for py, c in (
+        ("ERR_FORMAT", "SENSEI_SECURE_ERR_FORMAT"),
+        ("ERR_AUTH", "SENSEI_SECURE_ERR_AUTH"),
+        ("ERR_REPLAY", "SENSEI_SECURE_ERR_REPLAY"),
+        ("ERR_GEN", "SENSEI_SECURE_ERR_GEN"),
+        ("ERR_EPOCH", "SENSEI_SECURE_ERR_EPOCH"),
+    ):
+        m = re.search(rf"^\s*{c}\s*=\s*(-\d+)\b", text, re.M)
+        assert m, c
+        assert getattr(vectors, py) == int(m.group(1))
+    rat = (SDK_ROOT / "lib/sensei_secure/include/sensei_ratchet.h").read_text()
+    assert ratchet.KEY_SIZE == define(rat, "SENSEI_RATCHET_KEY_SIZE")
+    assert ratchet.MK_SIZE == define(rat, "SENSEI_RATCHET_MK_SIZE")
+    assert ratchet.EPOCH_BITS == define(rat, "SENSEI_RATCHET_EPOCH_BITS")
+    assert ratchet.EPOCH_SIZE == define(rat, "SENSEI_RATCHET_EPOCH_SIZE")
+    assert ratchet.MAX_SKIP == 1 << int(re.search(r"SENSEI_RATCHET_MAX_SKIP \(1u << (\d+)\)", rat).group(1))
+    assert len(ratchet.transcript(1, 1, 1, bytes(32), bytes(32))) == define(rat, "SENSEI_RATCHET_TH_SIZE")

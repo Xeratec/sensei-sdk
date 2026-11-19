@@ -37,3 +37,9 @@ target_include_directories(test_seal PRIVATE ${CMAKE_CURRENT_LIST_DIR}/generated
 target_link_libraries(test_seal PRIVATE sensei_secure)
 target_compile_options(test_seal PRIVATE -Wall -Wextra -Werror)
 add_test(NAME test_seal COMMAND test_seal)
+
+add_executable(test_ratchet test_ratchet.c)
+target_include_directories(test_ratchet PRIVATE ${CMAKE_CURRENT_LIST_DIR}/generated)
+target_link_libraries(test_ratchet PRIVATE sensei_secure)
+target_compile_options(test_ratchet PRIVATE -Wall -Wextra -Werror)
+add_test(NAME test_ratchet COMMAND test_ratchet)

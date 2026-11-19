@@ -15,6 +15,7 @@
 #include <openssl/core_names.h>
 #include <openssl/ec.h>
 #include <openssl/evp.h>
+#include <openssl/hmac.h>
 #include <openssl/kdf.h>
 #include <openssl/param_build.h>
 #include <openssl/params.h>
@@ -239,6 +240,51 @@ out:
   return rc;
 }
 
+static int c_hmac_sha256(void *ctx, const uint8_t *key, size_t key_len, const uint8_t *msg, size_t msg_len,
+                         uint8_t out[32]) {
+  unsigned int n = 0;
+
+  (void)ctx;
+  if (key_len == 0 || key_len > INT32_MAX) {
+    return -1;
+  }
+  return HMAC(EVP_sha256(), key, (int)key_len, msg ? msg : (const uint8_t *)"", msg_len, out, &n) && n == 32 ? 0 : -1;
+}
+
+/* X25519(priv, peer). OpenSSL clamps the scalar, ignores the top bit of the peer and fails if the result is all zero.
+ */
+static int c_x25519(void *ctx, const uint8_t priv[32], const uint8_t peer[32], uint8_t out[32]) {
+  EVP_PKEY *a = EVP_PKEY_new_raw_private_key(EVP_PKEY_X25519, NULL, priv, 32);
+  EVP_PKEY *b = EVP_PKEY_new_raw_public_key(EVP_PKEY_X25519, NULL, peer, 32);
+  EVP_PKEY_CTX *dc = a ? EVP_PKEY_CTX_new(a, NULL) : NULL;
+  size_t n = 32;
+  int rc = -1;
+
+  (void)ctx;
+  if (dc && b && EVP_PKEY_derive_init(dc) == 1 && EVP_PKEY_derive_set_peer(dc, b) == 1 &&
+      EVP_PKEY_derive(dc, out, &n) == 1 && n == 32) {
+    rc = 0;
+  }
+  EVP_PKEY_CTX_free(dc);
+  EVP_PKEY_free(a);
+  EVP_PKEY_free(b);
+  return rc;
+}
+
+static int c_x25519_keygen(void *ctx, uint8_t priv[32], uint8_t pub[32]) {
+  static const uint8_t base[32] = {9};
+  int rc;
+
+  if (c_random(ctx, priv, 32) != 0) {
+    return -1;
+  }
+  rc = c_x25519(ctx, priv, base, pub);
+  if (rc != 0) {
+    OPENSSL_cleanse(priv, 32);
+  }
+  return rc;
+}
+
 const struct sensei_secure_crypto *sensei_secure_crypto_openssl(void) {
   static const struct sensei_secure_crypto c = {
       .ctx = NULL,
@@ -251,6 +297,9 @@ const struct sensei_secure_crypto *sensei_secure_crypto_openssl(void) {
       .key_destroy = c_key_destroy,
       .aead_encrypt = c_aead_encrypt,
       .aead_decrypt = c_aead_decrypt,
+      .hmac_sha256 = c_hmac_sha256,
+      .x25519_keygen = c_x25519_keygen,
+      .x25519 = c_x25519,
   };
 
   return &c;

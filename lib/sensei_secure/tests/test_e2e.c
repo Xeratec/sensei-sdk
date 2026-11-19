@@ -18,7 +18,7 @@ static const struct sensei_secure_crypto *C;
 
 /* fake flash */
 static struct sensei_e2e_nv flash;
-static int erased, fail_tx, fail_rx, fail_floor, fail_priv;
+static int erased, fail_tx, fail_rx, fail_floor, fail_priv, fail_erase;
 
 #define SENDER_A 0x0A0A0A0Au
 #define SENDER_B 0x0B0B0B0Bu
@@ -55,10 +55,14 @@ static int f_rx(void *u, const struct sensei_secure_rx_state *tab, size_t n) {
   flash.n_rx = n;
   return 0;
 }
-static void f_erase(void *u) {
+static int f_erase(void *u) {
   (void)u;
+  if (fail_erase) {
+    return -EIO;
+  }
   memset(&flash, 0, sizeof(flash));
   erased++;
+  return 0;
 }
 static int f_floor(void *u, uint32_t f) {
   (void)u;
@@ -486,6 +490,58 @@ static void test_reset(void) {
   CHECK(flash.have_priv && memcmp(pub_before, e.node_pub, 65) != 0);
 }
 
+/* A reset whose erase fails is refused: the error comes back, the session and the key stay, the counters go on. */
+static void test_reset_refused_when_erase_fails(void) {
+  struct sensei_e2e e;
+  struct sensei_e2e_nv empty;
+  struct backend b;
+  uint8_t pub_before[65], pt[4] = {1, 2, 3, 4}, env[64];
+  int m;
+
+  memset(&empty, 0, sizeof(empty));
+  memset(&flash, 0, sizeof(flash));
+  CHECK(sensei_e2e_init(&e, C, &ops, NULL, &empty, 4) == 0);
+  backend_new(&b);
+  CHECK(sensei_e2e_provision(&e, b.pub, 65) == 0);
+  memcpy(pub_before, e.node_pub, 65);
+  m = sensei_e2e_seal(&e, SENSEI_SECURE_KIND_UPLINK, pt, sizeof(pt), env, sizeof(env));
+  CHECK(m > 0);
+  erased = 0;
+  fail_erase = 1;
+  CHECK(sensei_e2e_reset(&e) == -EIO && erased == 0);
+  fail_erase = 0;
+  CHECK(sensei_e2e_ready(&e) && e.nv.have_priv && e.nv.have_backend && memcmp(pub_before, e.node_pub, 65) == 0);
+  CHECK(flash.have_priv && flash.have_backend);                                                 /* nothing was erased */
+  CHECK(sensei_e2e_seal(&e, SENSEI_SECURE_KIND_UPLINK, pt, sizeof(pt), env, sizeof(env)) == m); /* still talks */
+  CHECK(sensei_e2e_reset(&e) == 0 && erased == 1 && !sensei_e2e_ready(&e)); /* and the next try works */
+}
+
+/* sensei_secure_priv_valid(): 0 and the order and above are not scalars. */
+static void test_priv_valid(void) {
+  uint8_t k[32] = {0};
+  static const uint8_t order[32] = {0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF,
+                                    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xBC, 0xE6, 0xFA, 0xAD, 0xA7, 0x17,
+                                    0x9E, 0x84, 0xF3, 0xB9, 0xCA, 0xC2, 0xFC, 0x63, 0x25, 0x51};
+  sensei_secure_key_t h = 0;
+
+  CHECK(!sensei_secure_priv_valid(k)); /* 0 */
+  k[31] = 1;
+  CHECK(sensei_secure_priv_valid(k) && C->ecdh_import(C->ctx, k, 32, &h) == 0);
+  C->key_destroy(C->ctx, h);
+  memcpy(k, order, 32);
+  CHECK(!sensei_secure_priv_valid(k) && C->ecdh_import(C->ctx, k, 32, &h) != 0); /* n */
+  k[31] -= 1;
+  CHECK(sensei_secure_priv_valid(k) && C->ecdh_import(C->ctx, k, 32, &h) == 0); /* n - 1 */
+  C->key_destroy(C->ctx, h);
+  k[31] += 2;
+  CHECK(!sensei_secure_priv_valid(k)); /* n + 1 */
+  memset(k, 0xFF, 32);
+  CHECK(!sensei_secure_priv_valid(k));
+  k[0] = 0xFE;
+  CHECK(sensei_secure_priv_valid(k) == (memcmp(k, order, 32) < 0)); /* below n in the first byte */
+  CHECK(sensei_secure_priv_valid(k));
+}
+
 /* A damaged private key is replaced; the collector must provision again. */
 static void test_damaged_key(void) {
   struct sensei_e2e e;
@@ -575,6 +631,8 @@ int main(void) {
   test_clear_senders();
   test_replay_after_clear();
   test_reset();
+  test_reset_refused_when_erase_fails();
+  test_priv_valid();
   test_damaged_key();
   test_sealed_key_crypto_error();
   test_key_unreadable();

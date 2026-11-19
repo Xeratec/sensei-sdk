@@ -87,6 +87,23 @@ int sensei_secure_keygen(const struct sensei_secure_crypto *c, uint8_t priv[SENS
   return SENSEI_SECURE_ERR_CRYPTO;
 }
 
+bool sensei_secure_priv_valid(const uint8_t priv[SENSEI_SECURE_PRIV_SIZE]) {
+  /* order of P-256, big endian */
+  static const uint8_t order[SENSEI_SECURE_PRIV_SIZE] = {
+      0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+      0xBC, 0xE6, 0xFA, 0xAD, 0xA7, 0x17, 0x9E, 0x84, 0xF3, 0xB9, 0xCA, 0xC2, 0xFC, 0x63, 0x25, 0x51};
+  uint8_t any = 0;
+  int cmp = 0; /* sign of priv - order, decided by the first byte that differs */
+
+  for (size_t i = 0; i < SENSEI_SECURE_PRIV_SIZE; i++) {
+    any |= priv[i];
+    if (cmp == 0 && priv[i] != order[i]) {
+      cmp = priv[i] < order[i] ? -1 : 1;
+    }
+  }
+  return any != 0 && cmp < 0;
+}
+
 int sensei_secure_derive(const struct sensei_secure_crypto *c, sensei_secure_key_t own, enum sensei_secure_role role,
                          const uint8_t node_pub[SENSEI_SECURE_PUB_SIZE],
                          const uint8_t backend_pub[SENSEI_SECURE_PUB_SIZE], struct sensei_secure_keys *out) {
@@ -221,6 +238,8 @@ uint32_t sensei_secure_rx_highest(const struct sensei_secure *s, uint32_t sender
 
 struct hdr {
   unsigned dir, kind;
+  bool ratchet;
+  unsigned gen_bits;
   bool has_node;
   uint64_t node_id;
   uint32_t key_id, sender, counter;
@@ -235,7 +254,15 @@ static int parse(const uint8_t *in, size_t len, struct hdr *h) {
   }
   h->dir = in[0] & 1u;
   h->has_node = (in[0] & 2u) != 0;
-  h->kind = in[1];
+  if (in[1] & SENSEI_SECURE_KIND_RESERVED) {
+    return SENSEI_SECURE_ERR_FORMAT;
+  }
+  h->ratchet = (in[1] & SENSEI_SECURE_KIND_RATCHET) != 0;
+  if (!h->ratchet && (in[1] & SENSEI_SECURE_GEN_MASK)) { /* generation bits without the ratchet bit */
+    return SENSEI_SECURE_ERR_FORMAT;
+  }
+  h->gen_bits = h->ratchet ? (unsigned)((in[1] & SENSEI_SECURE_GEN_MASK) >> SENSEI_SECURE_GEN_SHIFT) : 0u;
+  h->kind = in[1] & SENSEI_SECURE_KIND_MASK;
   n = (h->has_node ? SENSEI_SECURE_HEADER_NODE : SENSEI_SECURE_HEADER) +
       (h->dir == DIR_DOWN ? SENSEI_SECURE_SENDER_SIZE : 0u);
   h->size = n;
@@ -255,6 +282,43 @@ uint32_t sensei_secure_peek_key_id(const uint8_t *buf, size_t len) {
   return parse(buf, len, &h) == 0 ? h.key_id : 0;
 }
 
+int sensei_secure_peek(const uint8_t *buf, size_t len, struct sensei_secure_info *info) {
+  struct hdr h;
+  int err = parse(buf, len, &h);
+
+  if (err) {
+    return err;
+  }
+  info->kind = h.kind;
+  info->to_node = h.dir == DIR_DOWN;
+  info->ratchet = h.ratchet;
+  info->gen_bits = h.gen_bits;
+  info->has_node_id = h.has_node;
+  info->node_id = h.node_id;
+  info->key_id = h.key_id;
+  info->sender = h.sender;
+  info->counter = h.counter;
+  return 0;
+}
+
+void sensei_secure_set_keyring(struct sensei_secure *s, const struct sensei_secure_keyring *ring) {
+  if (ring) {
+    s->ring = *ring;
+  } else {
+    memset(&s->ring, 0, sizeof(s->ring));
+  }
+}
+
+int sensei_secure_tx_jump(struct sensei_secure *s, uint32_t next) {
+  if (!s->open || next == 0) {
+    return SENSEI_SECURE_ERR_STATE;
+  }
+  if (next - 1 > s->tx_last) {
+    s->tx_last = next - 1;
+  }
+  return 0;
+}
+
 int sensei_secure_seal(struct sensei_secure *s, enum sensei_secure_kind kind, const uint64_t *node_id,
                        const uint8_t *pt, size_t pt_len, uint8_t *out, size_t out_cap) {
   uint8_t nonce[NONCE_SIZE];
@@ -262,7 +326,9 @@ int sensei_secure_seal(struct sensei_secure *s, enum sensei_secure_kind kind, co
   size_t hs =
       (node_id ? SENSEI_SECURE_HEADER_NODE : SENSEI_SECURE_HEADER) + (dir == DIR_DOWN ? SENSEI_SECURE_SENDER_SIZE : 0u);
   size_t n = 0;
-  uint32_t ctr;
+  uint32_t ctr, gen = 0;
+  sensei_secure_key_t key = s->k_tx, tmp = 0;
+  int err = 0;
 
   if (!s->open || s->tx_last == CTR_MAX) {
     return SENSEI_SECURE_ERR_STATE;
@@ -282,8 +348,26 @@ int sensei_secure_seal(struct sensei_secure *s, enum sensei_secure_kind kind, co
     }
     s->tx_reserved = res;
   }
+  if (s->ring.tx_key) {
+    uint8_t gkey[SENSEI_SECURE_KEY_SIZE];
+
+    if (s->ring.tx_key(s->ring.user, ctr, &gen, gkey) != 0) {
+      wipe(gkey, sizeof(gkey));
+      return SENSEI_SECURE_ERR_GEN;
+    }
+    if (gen != 0) {
+      if (s->c->aead_import(s->c->ctx, gkey, &tmp) != 0) {
+        wipe(gkey, sizeof(gkey));
+        return SENSEI_SECURE_ERR_CRYPTO;
+      }
+      key = tmp;
+    }
+    wipe(gkey, sizeof(gkey));
+  }
   out[0] = (uint8_t)(SENSEI_SECURE_MARKER | (SENSEI_SECURE_VERSION << 2) | (node_id ? 2u : 0u) | dir);
-  out[1] = (uint8_t)kind;
+  out[1] =
+      (uint8_t)(gen == 0 ? (unsigned)kind
+                         : (SENSEI_SECURE_KIND_RATCHET | ((gen & 3u) << SENSEI_SECURE_GEN_SHIFT) | (unsigned)kind));
   if (node_id) {
     put64(out + 2, *node_id);
   }
@@ -293,7 +377,11 @@ int sensei_secure_seal(struct sensei_secure *s, enum sensei_secure_kind kind, co
   }
   put32(out + hs - 4, ctr);
   make_nonce(nonce, dir, s->tx_sender, ctr);
-  if (s->c->aead_encrypt(s->c->ctx, s->k_tx, nonce, out, hs, pt, pt_len, out + hs, out_cap - hs, &n) != 0) {
+  err = s->c->aead_encrypt(s->c->ctx, key, nonce, out, hs, pt, pt_len, out + hs, out_cap - hs, &n);
+  if (tmp) {
+    (void)s->c->key_destroy(s->c->ctx, tmp);
+  }
+  if (err != 0) {
     return SENSEI_SECURE_ERR_CRYPTO;
   }
   s->tx_last = ctr;
@@ -307,6 +395,7 @@ int sensei_secure_open(struct sensei_secure *s, enum sensei_secure_kind want, co
   unsigned dir = s->role == SENSEI_SECURE_ROLE_NODE ? DIR_DOWN : DIR_UP;
   struct sensei_secure_peer *peer;
   struct hdr h;
+  sensei_secure_key_t key = s->k_rx, tmp = 0;
   size_t n = 0;
   int err;
 
@@ -340,8 +429,34 @@ int sensei_secure_open(struct sensei_secure *s, enum sensei_secure_kind want, co
   if (out_cap < in_len - h.size - SENSEI_SECURE_TAG_SIZE) {
     return SENSEI_SECURE_ERR_SPACE;
   }
+  if (h.ratchet || s->ring.rx_key) {
+    uint8_t gkey[SENSEI_SECURE_KEY_SIZE];
+
+    err = h.ratchet && !s->ring.rx_key ? SENSEI_SECURE_ERR_GEN
+                                       : s->ring.rx_key(s->ring.user, h.ratchet, h.gen_bits, h.counter, gkey);
+    if (err < 0) {
+      wipe(gkey, sizeof(gkey));
+      return err < SENSEI_SECURE_ERR_DH ? SENSEI_SECURE_ERR_GEN : err; /* an unknown code is a missing key */
+    }
+    if (err > 0 && h.ratchet) { /* "use the session key" is for generation 0 only */
+      wipe(gkey, sizeof(gkey));
+      return SENSEI_SECURE_ERR_GEN;
+    }
+    if (err == 0) {
+      if (s->c->aead_import(s->c->ctx, gkey, &tmp) != 0) {
+        wipe(gkey, sizeof(gkey));
+        return SENSEI_SECURE_ERR_CRYPTO;
+      }
+      key = tmp;
+    }
+    wipe(gkey, sizeof(gkey));
+  }
   make_nonce(nonce, dir, h.sender, h.counter);
-  if (s->c->aead_decrypt(s->c->ctx, s->k_rx, nonce, in, h.size, in + h.size, in_len - h.size, out, out_cap, &n) != 0) {
+  err = s->c->aead_decrypt(s->c->ctx, key, nonce, in, h.size, in + h.size, in_len - h.size, out, out_cap, &n);
+  if (tmp) {
+    (void)s->c->key_destroy(s->c->ctx, tmp);
+  }
+  if (err != 0) {
     return SENSEI_SECURE_ERR_AUTH;
   }
   if (h.counter > (peer ? peer->rx.highest : 0u) && s->store.rx &&

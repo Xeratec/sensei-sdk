@@ -31,6 +31,9 @@ static void wipe(void *p, size_t n) {
   }
 }
 
+/* A plain e2e_priv is still stored next to the sealed key and may be deleted (sensei_e2e_settings_confirm()). */
+static bool plain_pending;
+
 #ifdef CONFIG_SENSEI_SECURE_SETTINGS_SEAL
 
 /* The sealing key is held as a volatile PSA key; one thread uses it (the one of the key store). */
@@ -130,9 +133,16 @@ static int save_priv(void *u, const uint8_t *priv) {
   if (n < 0) {
     return n;
   }
+  /* A new key: an older plain key is not its twin and must not stay (a later start would take it for the newer one).
+   * It goes first: if the delete fails nothing was written and the caller keeps no key. */
+  err = settings_delete(PFX "/" NAME_PRIV);
+  if (err) {
+    LOG_ERR("plain key record not deleted: %d", err);
+    return err;
+  }
   err = settings_save_one(PFX "/" NAME_PRIVX, rec, (size_t)n);
   if (err == 0) {
-    (void)settings_delete(PFX "/" NAME_PRIV); /* no plain copy next to the sealed one */
+    plain_pending = false;
   }
   return err;
 #else
@@ -160,16 +170,25 @@ static int save_floor(void *u, uint32_t f) {
   return settings_save_one(PFX "/e2e_rxf", &f, sizeof(f));
 }
 
-static void erase(void *u) {
+/* The collector key first, then the key records, the counters last: a counter must not come back with a key that
+ * survived a failed delete. The first error stops it and is returned (sensei_e2e_reset() then refuses). */
+static int erase(void *u) {
+  static const char *const names[] = {
+      PFX "/e2e_bpub", PFX "/" NAME_PRIV, PFX "/" NAME_PRIVX, PFX "/" NAME_RAT,
+      PFX "/e2e_tx",   PFX "/e2e_rxs",    PFX "/e2e_rxf",     PFX "/e2e_rx" /* first version of the node firmware */
+  };
+
   ARG_UNUSED(u);
-  (void)settings_delete(PFX "/" NAME_PRIV);
-  (void)settings_delete(PFX "/" NAME_PRIVX);
-  (void)settings_delete(PFX "/" NAME_RAT);
-  (void)settings_delete(PFX "/e2e_bpub");
-  (void)settings_delete(PFX "/e2e_tx");
-  (void)settings_delete(PFX "/e2e_rxs");
-  (void)settings_delete(PFX "/e2e_rxf");
-  (void)settings_delete(PFX "/e2e_rx"); /* first version of the node firmware */
+  for (size_t i = 0; i < ARRAY_SIZE(names); i++) {
+    int err = settings_delete(names[i]);
+
+    if (err) {
+      LOG_ERR("erase: %s not deleted: %d", names[i], err);
+      return err;
+    }
+  }
+  plain_pending = false;
+  return 0;
 }
 
 const struct sensei_e2e_ops sensei_e2e_settings_ops = {
@@ -239,8 +258,9 @@ static int readback_cb(const char *key, size_t len, settings_read_cb read_cb, vo
   return 0;
 }
 
-/* The plain key of an earlier version is in nv->priv: seal it, store it, read it back, compare, delete the plain one.
- */
+/* The plain key of an earlier version is in nv->priv: seal it, store it, read it back, compare. The plain record stays:
+ * the old image may still be started again (MCUboot reverts a trial image that is not confirmed). It is deleted by
+ * sensei_e2e_settings_confirm(). */
 static int migrate(struct load *l) {
   const struct sensei_e2e_nv *nv = l->nv;
   uint8_t rec[SEALED_PRIV_SIZE], back[SENSEI_SECURE_PRIV_SIZE] = {0};
@@ -263,15 +283,17 @@ static int migrate(struct load *l) {
   }
   wipe(back, sizeof(back));
   if (err != 0 && written) {
-    (void)settings_delete(PFX "/" NAME_PRIVX); /* a record that did not check out must not shadow the plain key */
-  }
-  if (err == 0) {
-    err = settings_delete(PFX "/" NAME_PRIV); /* if this fails the sealed record stays: the next start finishes */
+    int derr = settings_delete(PFX "/" NAME_PRIVX); /* a record that did not check out must not shadow the plain key */
+
+    if (derr) {
+      LOG_ERR("bad sealed record not deleted: %d", derr);
+    }
   }
   if (err) {
     LOG_ERR("key migration failed: %d (the plain key stays)", err);
   } else {
-    LOG_INF("private key sealed (e2e_privx), plain record deleted");
+    plain_pending = true;
+    LOG_INF("private key sealed (e2e_privx); the plain record stays until the image is confirmed");
   }
   return err;
 }
@@ -281,26 +303,32 @@ static int resolve_priv(struct load *l) {
   struct sensei_e2e_nv *nv = l->nv;
   int n;
 
+  plain_pending = false;
   if (l->have_privx || l->bad_privx) {
     uint8_t key[SENSEI_SECURE_PRIV_SIZE];
 
     n = l->have_privx ? sensei_e2e_settings_unseal(NAME_PRIVX, l->privx, sizeof(l->privx), key, sizeof(key)) : -EBADMSG;
     if (n == (int)sizeof(key)) {
       if (l->have_plain && memcmp(key, nv->priv, sizeof(key)) != 0) {
-        /* Both records, different keys: an older firmware made a new plain key after the key was sealed (downgrade,
-         * then upgrade). The plain one is the newer: the collector was provisioned for it. Seal it again. */
-        LOG_WRN("plain key next to a different sealed key: the plain key is newer, sealing it again");
-        wipe(key, sizeof(key));
-        n = migrate(l);
-        if (n != 0) {
-          wipe(nv->priv, sizeof(nv->priv));
-          nv->key_unreadable = true;
-          return n;
+        if (sensei_secure_priv_valid(nv->priv)) {
+          /* Both records, different keys: an older firmware made a new plain key after the key was sealed (downgrade,
+           * then upgrade). The plain one is the newer: the collector was provisioned for it. Seal it again. */
+          LOG_WRN("plain key next to a different sealed key: the plain key is newer, sealing it again");
+          wipe(key, sizeof(key));
+          n = migrate(l);
+          if (n != 0) {
+            wipe(nv->priv, sizeof(nv->priv));
+            nv->key_unreadable = true;
+            return n;
+          }
+        } else { /* the plain record is damaged, not a key: the sealed one stands */
+          LOG_WRN("plain key record is not a valid key, the sealed key stands");
+          memcpy(nv->priv, key, sizeof(key));
+          wipe(key, sizeof(key));
+          plain_pending = true;
         }
       } else {
-        if (l->have_plain) { /* the migration stopped between the two writes: the same key twice */
-          (void)settings_delete(PFX "/" NAME_PRIV);
-        }
+        plain_pending = l->have_plain; /* the same key twice: the migration of an image that is not confirmed yet */
         memcpy(nv->priv, key, sizeof(key));
         wipe(key, sizeof(key));
       }
@@ -315,6 +343,13 @@ static int resolve_priv(struct load *l) {
     return n < 0 ? n : -EIO;
   }
   if (l->have_plain) {
+    if (!sensei_secure_priv_valid(nv->priv)) {
+      /* Damaged, not a key: do not seal it. sensei_e2e_init() replaces it (priv_sealed stays false) and the new key
+       * is sealed and stored; the plain record goes with that. */
+      LOG_WRN("plain key record is not a valid key: it is replaced");
+      nv->have_priv = true;
+      return 0;
+    }
     n = migrate(l);
     if (n == 0) {
       nv->have_priv = true;
@@ -328,12 +363,35 @@ static int resolve_priv(struct load *l) {
   return 0; /* no key stored: the key store makes one and saves it sealed */
 }
 
+int sensei_e2e_settings_confirm(void) {
+  int err;
+
+  if (!plain_pending) {
+    return 0;
+  }
+  err = settings_delete(PFX "/" NAME_PRIV);
+  if (err) {
+    LOG_ERR("plain key record not deleted: %d (it stays until the next try)", err);
+    return err;
+  }
+  plain_pending = false;
+  LOG_INF("plain key record deleted");
+  return 0;
+}
+
+bool sensei_e2e_settings_plain_pending(void) { return plain_pending; }
+
 #else
 
 static int resolve_priv(struct load *l) {
+  plain_pending = false;
   l->nv->have_priv = l->have_plain; /* a sealed record is ignored without sealing */
   return 0;
 }
+
+int sensei_e2e_settings_confirm(void) { return 0; }
+
+bool sensei_e2e_settings_plain_pending(void) { return false; }
 
 #endif /* CONFIG_SENSEI_SECURE_SETTINGS_SEAL */
 

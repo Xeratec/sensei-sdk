@@ -59,7 +59,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
-from .framing import looks_sealed
+from .framing import kind_of, looks_sealed
 
 log = logging.getLogger("sensei.secure")
 
@@ -84,6 +84,14 @@ KIND_DOWNLINK = 2  # encoded Downlink, backend to node
 KIND_NODE_TO_HOST = 3  # encoded NodeToHost data message, node to host
 KIND_SETTINGS = 4  # encoded Settings patch for the BLE settings characteristic, backend to node
 
+# Kind byte (byte 1). Generation 0 (the keys of the commissioning): the kind alone, 1 ... 4. Generation 1 and later
+# (the ratchet): 0x80 | (generation mod 4) << 4 | kind. Bit 6 is reserved: an envelope with it set is refused.
+KIND_MASK = 0x0F
+KIND_RATCHET = 0x80
+KIND_RESERVED = 0x40
+GEN_SHIFT = 4
+GEN_MASK = 0x30
+
 # direction bit of the first byte
 DIR_UP = 0  # node to backend
 DIR_DOWN = 1  # backend to node
@@ -102,6 +110,18 @@ class UnknownKeyError(SecureError):
 
 class ReplayError(SecureError):
     pass
+
+
+class GenerationError(SecureError):
+    """No key for the generation of an envelope (a ratchet envelope where only generation 0 is known)."""
+
+
+class EpochError(SecureError):
+    """The epoch of a counter is before the start of its chain, or behind the part of the chain that is kept."""
+
+
+class GapError(SecureError):
+    """The chain would have to be walked further than SENSEI_E2E_MAX_SKIP epochs."""
 
 
 # ---- keys ----
@@ -165,6 +185,25 @@ def is_sealed(payload: bytes) -> bool:
     return looks_sealed(payload)
 
 
+def gen_bits_of(payload: bytes) -> int:
+    """Generation mod 4 of a sealed payload (0 for generation 0 and for a payload without the ratchet bit)."""
+    return (payload[1] >> GEN_SHIFT) & 3 if payload[1] & KIND_RATCHET else 0
+
+
+def is_ratchet(payload: bytes) -> bool:
+    """True if the kind byte says generation 1 or later (the ratchet format)."""
+    return bool(payload[1] & KIND_RATCHET)
+
+
+def kind_byte(kind: int, gen: int = 0) -> int:
+    """Byte 1 of an envelope: the kind for generation 0, with the ratchet bit and gen mod 4 for generation 1 and later."""
+    if kind not in _KIND_DIR:
+        raise SecureError(f"unknown kind {kind}")
+    if gen < 0:
+        raise SecureError("negative generation")
+    return kind if gen == 0 else KIND_RATCHET | ((gen & 3) << GEN_SHIFT) | kind
+
+
 def _nonce(direction: int, sender: int, counter: int) -> bytes:
     return bytes([direction, 0, 0, 0]) + struct.pack("<II", sender, counter)
 
@@ -177,9 +216,12 @@ def seal_raw(
     plaintext: bytes,
     node_id: int | None = None,
     sender: int = 0,
+    gen: int = 0,
 ) -> bytes:
     """Build one envelope. The caller owns the counter. A backend to node kind needs a sender id (not 0), a node
-    to backend kind has none."""
+    to backend kind has none. gen: generation of the key (0: the commissioning keys, the format of version 3 as it
+    always was; 1 and later: the ratchet bits in the kind byte, key = the message key or downlink key of that
+    generation, see ratchet.py)."""
     if kind not in _KIND_DIR:
         raise SecureError(f"unknown kind {kind}")
     if not 0 < counter <= _CTR_MAX:
@@ -191,7 +233,7 @@ def seal_raw(
     elif sender:
         raise SecureError("an uplink has no sender id")
     first = MARKER | (VERSION << 2) | ((node_id is not None) << 1) | direction
-    header = bytes([first, kind])
+    header = bytes([first, kind_byte(kind, gen)])
     if node_id is not None:
         header += struct.pack("<Q", node_id)
     header += struct.pack("<I", key_id)
@@ -210,6 +252,8 @@ class Header:
     sender: int  # 0 for node to backend
     counter: int
     size: int  # header bytes, the ciphertext follows
+    ratchet: bool = False  # generation 1 or later
+    gen_bits: int = 0  # generation mod 4 (0 if not ratchet)
 
 
 def parse_header(payload: bytes) -> Header:
@@ -223,7 +267,14 @@ def parse_header(payload: bytes) -> Header:
     size = FIXED_HEADER + 8 * has_node + (SENDER_SIZE if direction == DIR_DOWN else 0)
     if len(payload) < size + TAG_SIZE:
         raise SecureError("sealed payload too short")
-    kind = payload[1]
+    raw = payload[1]
+    if raw & KIND_RESERVED:
+        raise SecureError("reserved bit of the kind byte is set")
+    ratchet = bool(raw & KIND_RATCHET)
+    if not ratchet and raw & GEN_MASK:
+        raise SecureError("generation bits without the ratchet bit")
+    gen_bits = (raw & GEN_MASK) >> GEN_SHIFT if ratchet else 0
+    kind = kind_of(payload)
     node_id = struct.unpack_from("<Q", payload, 2)[0] if has_node else None
     key_id = struct.unpack_from("<I", payload, 10 if has_node else 2)[0]
     sender = struct.unpack_from("<I", payload, size - 8)[0] if direction == DIR_DOWN else 0
@@ -232,7 +283,7 @@ def parse_header(payload: bytes) -> Header:
         raise SecureError("kind does not match direction")
     if direction == DIR_DOWN and sender == 0:
         raise SecureError("downlink without a sender id")
-    return Header(direction, kind, node_id, key_id, sender, counter, size)
+    return Header(direction, kind, node_id, key_id, sender, counter, size, ratchet, gen_bits)
 
 
 def open_raw(key: bytes, payload: bytes, header: Header | None = None) -> bytes:
@@ -299,6 +350,8 @@ class NodeSession:
             raise SecureError("wrong direction")
         if h.key_id != self.keys.key_id:
             raise UnknownKeyError("wrong key id")
+        if h.ratchet:
+            raise GenerationError("ratchet envelope: this session knows generation 0 only")
         window = self.rx.get(h.sender)
         if window is None and len(self.rx) >= MAX_SENDERS:
             raise SecureError("too many senders")
@@ -989,6 +1042,8 @@ def open_sealed(payload: bytes, store: KeyStore) -> tuple[int, int, bytes]:
     h = parse_header(payload)
     if h.direction != DIR_UP:
         raise SecureError("not a node to backend envelope")
+    if h.ratchet:
+        raise GenerationError("ratchet envelope: this key store knows generation 0 only")
     with store._lock:
         node_id = store._by_key_id.get(h.key_id)
         if node_id is None:
@@ -1009,6 +1064,8 @@ def peek_sealed(payload: bytes, store: KeyStore) -> tuple[int, bytes]:
     h = parse_header(payload)
     if h.direction != DIR_UP:
         raise SecureError("not a node to backend envelope")
+    if h.ratchet:
+        raise GenerationError("ratchet envelope: this key store knows generation 0 only")
     with store._lock:
         node_id = store._by_key_id.get(h.key_id)
         if node_id is None:

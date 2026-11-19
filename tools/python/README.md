@@ -13,12 +13,13 @@ two in line.
 
 | Module | Mirrors | Content |
 |---|---|---|
-| `framing` | `lib/sensei_link` | CRC-16/32, COBS, stream frames (`StreamDecoder`), SPI frames, fragments and `Reassembler`, the channel ids and limits of `sensei_link.h` |
+| `framing` | `lib/sensei_link` | CRC-16/32, COBS, stream frames (`StreamDecoder`), SPI frames, fragments and `Reassembler`, the channel ids and limits of `sensei_link.h`; `looks_sealed` and `kind_of` (the kind of a sealed payload without the generation bits) |
 | `secure` | `lib/sensei_secure` | key store (sender id, counters), P-256 key derivation, envelope version 3 (`seal_raw`, `open_sealed`), replay window; sealed settings records of the node (`seal_record`, `open_record`); key store file sealed with a 32 byte key file (`KeyStore(key_file=...)`, `SENSEI_KEYSTORE_KEY_FILE`; a key file that the group or others can access is refused, `new_key_file` syncs the file and its folder); `python -m sensei_sdk.secure new-sender | new-key-file | seal-file | unseal-file | rotate-file-key` |
+| `ratchet` | `lib/sensei_secure` | forward secrecy primitives: root key R_0, X25519, the mix, the uplink chain (`Chain`), epoch math. The envelope bits of generation 1 and later are in `secure` (`kind_of`, `seal_raw(gen=...)`, `Header.ratchet`, `gen_bits`) |
 | `diag` | `lib/sensei_diag` | reset cause and reason names, the 52 B fault record (`pack_fault`, `unpack_fault`), `addr2line` and the ELF lookup by image id. The job names of `last_job` belong to the app: pass `job_names` |
 | `smp`, `smp_sim` | `NRF/system/ota` | MCUboot SMP client (serial and BLE links; upload, test, confirm, reset) and a simulated server. The board id of an image is a parameter: `load_image(source, kind=...)`; `python -m sensei_sdk.smp` is a small command line for it |
 | `transport`, `transport_serial`, `transport_ble` | | byte transports (loopback, USB serial, BLE). The GATT UUIDs and the advertising name are a `BleProfile` that the app supplies |
-| `vectors` | | the C test vectors of the three libraries above (below) |
+| `vectors` | | the C test vectors of the three libraries above (below), including the ratchet vectors of `sensei_secure` |
 
 Needs Python 3.11 and `cryptography`. The serial and BLE transports need the extras `serial` (pyserial) and `ble` (bleak).
 

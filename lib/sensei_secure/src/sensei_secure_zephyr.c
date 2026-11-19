@@ -85,6 +85,24 @@ static int c_aead_decrypt(void *ctx, sensei_secure_key_t key, const uint8_t *non
                                     out_len) != SENSEI_CRYPTO_OK;
 }
 
+static int c_hmac_sha256(void *ctx, const uint8_t *key, size_t key_len, const uint8_t *msg, size_t msg_len,
+                         uint8_t out[32]) {
+  (void)ctx;
+  return sensei_crypto_hmac_sha256(key, key_len, msg, msg_len, out) != SENSEI_CRYPTO_OK;
+}
+
+#ifdef CONFIG_SENSEI_SECURE_RATCHET
+static int c_x25519_keygen(void *ctx, uint8_t priv[32], uint8_t pub[32]) {
+  (void)ctx;
+  return sensei_crypto_x25519_keygen(priv, pub) != SENSEI_CRYPTO_OK;
+}
+
+static int c_x25519(void *ctx, const uint8_t priv[32], const uint8_t peer[32], uint8_t out[32]) {
+  (void)ctx;
+  return sensei_crypto_x25519(priv, peer, out) != SENSEI_CRYPTO_OK;
+}
+#endif
+
 const struct sensei_secure_crypto *sensei_secure_crypto_zephyr(void) {
   static const struct sensei_secure_crypto c = {
       .ctx = NULL,
@@ -97,6 +115,11 @@ const struct sensei_secure_crypto *sensei_secure_crypto_zephyr(void) {
       .key_destroy = c_key_destroy,
       .aead_encrypt = c_aead_encrypt,
       .aead_decrypt = c_aead_decrypt,
+      .hmac_sha256 = c_hmac_sha256,
+#ifdef CONFIG_SENSEI_SECURE_RATCHET
+      .x25519_keygen = c_x25519_keygen,
+      .x25519 = c_x25519,
+#endif
   };
   static int inited;
 

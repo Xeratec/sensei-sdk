@@ -14,6 +14,17 @@ config SENSEI_SECURE
 	help
 	  Envelope library on the SENSEI SDK crypto library (lib/sensei_secure/README.md).
 
+config SENSEI_SECURE_RATCHET
+	bool "Forward secrecy: root key, mix and uplink chain (X25519, HMAC-SHA256)"
+	default y
+	depends on SENSEI_SECURE
+	select SENSEI_CRYPTO_HMAC
+	select SENSEI_CRYPTO_X25519
+	help
+	  lib/sensei_secure/src/sensei_ratchet.c and the X25519, HMAC functions of the cipher backend. The envelope itself
+	  reads generation 1 and later (the ratchet bits of the kind byte) with or without this option, but needs a keyring
+	  for it (struct sensei_secure_keyring). Without it about 1 kB of flash less, and the node cannot mix.
+
 config SENSEI_SECURE_SETTINGS
 	bool "Keep the end-to-end keys and counters in the settings subsystem"
 	depends on SENSEI_SECURE
@@ -36,7 +47,9 @@ config SENSEI_SECURE_SETTINGS_SEAL
 	help
 	  The private key is stored as e2e_privx, a sealed record (sensei_e2e_seal.h: version, nonce, AES-128-GCM
 	  ciphertext, tag), not as plain e2e_priv. A plain e2e_priv of an earlier version is migrated at the first
-	  start: sealed, read back and checked, then deleted. The key comes from the function
+	  start: sealed, read back and checked. The plain record stays until the application calls
+	  sensei_e2e_settings_confirm() after it has confirmed the image (a trial image that MCUboot reverts finds its
+	  key); a plain record that is not a valid key is not sealed, the key store replaces it. The key comes from the function
 	  sensei_e2e_settings_seal_key() (sensei_e2e_settings.h): one of the providers below, or the application's
 	  own. If the key is not available, or a sealed record does not open, the key store does not start
 	  (sensei_e2e_init() fails) and no new key pair is made over the old one. The name e2e_rat is reserved for

@@ -43,9 +43,11 @@ struct sensei_e2e_nv {
    * by the storage backend. sensei_e2e_init() then fails with -EACCES and leaves the stored key alone: a new key pair
    * would replace it. Only sensei_e2e_reset() starts over. */
   bool key_unreadable;
-  /* The private key comes from a sealed record (it opened, or the plain key was just sealed). If the public key cannot
-   * be derived from it, that is a crypto error (for example no free key slot), not a damaged key: sensei_e2e_init()
-   * fails with -EIO and keeps the stored record. Set by the storage backend. */
+  /* The private key is a valid scalar that is stored sealed: it opened from the sealed record, or it was a plain key
+   * that passed sensei_secure_priv_valid() and was sealed. If the public key cannot be derived from it, that is a
+   * crypto error (for example no free key slot), not a damaged key: sensei_e2e_init() fails with -EIO and keeps the
+   * stored record. A plain key that is not a valid scalar is damaged: it is not sealed and this flag stays false, so
+   * sensei_e2e_init() replaces it. Set by the storage backend. */
   bool priv_sealed;
 };
 
@@ -56,8 +58,9 @@ struct sensei_e2e_ops {
   /** Store the whole table of senders (n entries). Return 0 on success; a message is refused if
    * this fails. */
   int (*save_rx)(void *user, const struct sensei_secure_rx_state *table, size_t n);
-  /** Delete everything stored. */
-  void (*erase)(void *user);
+  /** Delete everything stored: the collector key and the key first, the counters last (a counter must not come back
+   * with a key that survived). Stop at the first error and return it; 0 on success. */
+  int (*erase)(void *user);
   /** Store the floor of downlink counters. */
   int (*save_floor)(void *user, uint32_t floor);
 };
@@ -77,8 +80,9 @@ struct sensei_e2e {
  * Load the state (nv: what was read from flash, may be all empty), make the key pair if there is
  * none and open the session if a collector key is stored. Returns 0 or a negative errno: -EACCES if
  * nv->key_unreadable is set, -EIO if the public key cannot be derived from a key that came from a sealed record
- * (nv->priv_sealed; nothing is replaced), or the error of the storage when the new key pair cannot be stored (no
- * key is kept then). A failed session leaves the module without a session (sensei_e2e_ready() false).
+ * (nv->priv_sealed; nothing is replaced; a damaged plain key is replaced), or the error of the storage when the new key
+ * pair cannot be stored (no key is kept then). A failed session leaves the module without a session (sensei_e2e_ready()
+ * false).
  */
 int sensei_e2e_init(struct sensei_e2e *e, const struct sensei_secure_crypto *c, const struct sensei_e2e_ops *ops,
                     void *user, const struct sensei_e2e_nv *nv, uint32_t ctr_step);
@@ -88,7 +92,9 @@ int sensei_e2e_init(struct sensei_e2e *e, const struct sensei_secure_crypto *c, 
 int sensei_e2e_provision(struct sensei_e2e *e, const uint8_t *backend_pub, size_t len);
 
 /** Forget the collector key and counters, delete the key pair and make a new one. Also the way out of a
- * key that could not be read (sensei_e2e_init() returned -EACCES; the struct is usable for this call). */
+ * key that could not be read (sensei_e2e_init() returned -EACCES; the struct is usable for this call). If the stored
+ * records cannot be erased the reset is refused: the error of ops->erase is returned and the session and the state in
+ * RAM stay as they were (some records may be gone from flash; call it again). */
 int sensei_e2e_reset(struct sensei_e2e *e);
 
 /** Senders of downlinks in the table, and its size. */

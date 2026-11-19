@@ -61,6 +61,13 @@ def looks_sealed(payload: bytes) -> bool:
     return len(payload) >= 26 and (payload[0] & 0xFC) == 0xAC
 
 
+def kind_of(payload: bytes) -> int:
+    """Message kind (1 uplink, 2 downlink, 3 node to host, 4 settings) of a sealed payload: the kind byte without the
+    generation bits (bit 7 ratchet format, bits 5..4 generation mod 4). Compare this, never `payload[1]`: the byte of
+    a generation 1 or later envelope has the bits set. `looks_sealed(payload)` must be true."""
+    return payload[1] & 0x0F
+
+
 # ---- CRC ----
 
 

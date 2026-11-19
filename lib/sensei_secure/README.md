@@ -15,7 +15,7 @@ allocation, no Zephyr in the core (`src/sensei_secure.c`). The cipher comes in t
 - `src/sensei_secure_zephyr.c`: the SDK crypto library (`NRF/system/crypto`, PSA Crypto), for nRF.
 - `src/sensei_secure_openssl.c`: OpenSSL 3, for host tests and tools.
 
-On top of the envelope, `src/sensei_e2e.c` is the key store of a device (key pair, collector key, counters in flash), and
+`src/sensei_ratchet.c` is the forward secrecy core (root key, mix, uplink chain; see "Forward secrecy"). On top of the envelope, `src/sensei_e2e.c` is the key store of a device (key pair, collector key, counters in flash), and
 `zephyr/sensei_e2e_settings.c` keeps it in the Zephyr settings subsystem (see Key store below). `src/sensei_e2e_seal.c` is
 the sealed record format for secret settings (keys at rest, see "Keys at rest").
 
@@ -41,7 +41,7 @@ One layout on every link. All integers are little endian.
 offset  size  field
 0       1     flags     bits 7..4 = 0xA (marker), bits 3..2 = version (3),
                         bit 1 = node id present, bit 0 = direction (0 node to backend, 1 backend to node)
-1       1     kind      1 uplink, 2 downlink, 3 node to host data, 4 settings write
+1       1     kind      1 uplink, 2 downlink, 3 node to host data, 4 settings write (generation 1 and later: see below)
 2       8     node_id   only if flags bit 1 is set
 n       4     key_id
 n+4     4     sender    only backend to node (direction 1), never 0
@@ -55,6 +55,10 @@ n+4/8   4     counter   per sender, starts at 1
 - Nonce (12 B): `direction (1) || 0x00 x 3 || sender (4) || counter (4)`. A node to backend envelope has sender 0. Two
   sealing hosts have different senders, so they never share a nonce.
 - Associated data: all header bytes as sent.
+- Generation 0 is the envelope as described here. From generation 1 on (forward secrecy) byte 1 is
+  `0x80 | (generation mod 4) << 4 | kind`; bit 6 must be 0 (an envelope with it set is refused). The size, the nonce and the
+  associated data (the header bytes as sent, so the generation bits are authenticated) do not change. Read the kind with
+  `sensei_secure_kind(buf)` (Python: `kind_of()`), never as `buf[1]`.
 - The kinds say what an envelope is for; what each link seals is up to the app. `sensei_secure_open()` takes the kind
   that is allowed there.
 - `sensei_secure_is_sealed()` checks the marker and the version bits. Versions are odd (1, 3), so an envelope starts
@@ -131,23 +135,33 @@ these defines (a choice of Kconfig options, or the application):
 The settings code imports the key once as a volatile PSA key and wipes the copy in RAM. Behaviour:
 
 - `sensei_e2e_settings_load()` opens the record. A plain `e2e_priv` of an earlier version is migrated at the first start: sealed
-  to `e2e_privx`, read back and compared, then `e2e_priv` is deleted. The key and the key id do not change. If the migration
-  stops between the two writes, both records hold the same key: the next start deletes the plain one. If they hold different
-  keys, an older firmware made a new plain key after the key was sealed (downgrade, then upgrade; that firmware does not know
+  to `e2e_privx`, read back and compared. The key and the key id do not change. The plain record is not deleted yet: the new
+  image may be only on trial, and if MCUboot goes back to the old image, that image needs its key. The application calls
+  `sensei_e2e_settings_confirm()` once the image is confirmed (after `boot_write_img_confirmed()`; calling it at every start is
+  fine), and that deletes the plain record (`sensei_e2e_settings_plain_pending()` says if one is waiting). Two records with the
+  same key are the normal state before the confirmation. If they hold different keys, an older firmware made a new plain key
+  after the key was sealed (downgrade, then upgrade; that firmware does not know
   `e2e_privx`, and the collector was provisioned for its key): the plain key is the newer one and is sealed over the old one
-  (log line "the plain key is newer"). The old plain value stays in the flash page until the garbage collection of the
+  (log line "the plain key is newer"). A plain record that is not a valid P-256 scalar (`sensei_secure_priv_valid()`: 0 or at
+  or above the group order) is damaged: it is never sealed. Without a sealed record the key store replaces it with a new key
+  pair (sealed, the plain record deleted); next to a sealed key it is junk and the sealed key stands. The old plain value stays in the flash page until the garbage collection of the
   settings: a device whose flash others could read must be reset.
 - If the key is not available, or the record does not open (changed, sealed for another name, wrong size, another chip),
   `nv->key_unreadable` is set, `nv->have_priv` is false, and `sensei_e2e_init()` returns `-EACCES` without making a new key pair
   and without touching the stored record. The device then has no end-to-end security (visible to the caller). Only
   `sensei_e2e_reset()` starts over. A provider that fails when there is no key yet makes `sensei_e2e_init()` fail with its error
   and stores nothing.
-- A key that came from a sealed record (`nv->priv_sealed`) and cannot be turned into a public key (a crypto error such as no
-  free PSA key slot) is not "damaged": `sensei_e2e_init()` returns `-EIO`, keeps the record and does not make a new key pair
-  (a damaged plain key is still replaced).
+- A key that is stored sealed (`nv->priv_sealed`: it opened from `e2e_privx`, or it was a valid plain key that was just sealed)
+  and cannot be turned into a public key (a crypto error such as no free PSA key slot) is not "damaged": `sensei_e2e_init()`
+  returns `-EIO`, keeps the record and does not make a new key pair. A plain key that is not a valid scalar is damaged, is not
+  sealed and has `priv_sealed` false, so it is replaced.
 - `sensei_e2e_reset()` erases the stored key before it makes a new one. Call `sensei_e2e_settings_reset_check()` first: it asks
   the provider again (also after a failure that was cached at the start) and returns 0 only if a new key can be sealed. Without
-  it a reset with no sealing key would end with no key at all.
+  it a reset with no sealing key would end with no key at all. The erase stops at the first record that cannot be deleted
+  (`struct sensei_e2e_ops.erase` returns an error; order: collector key, key records, counters last, so a counter never comes
+  back with a key that survived). Then `sensei_e2e_reset()` is refused: it returns that error and the session and the state in
+  RAM stay as they were; some records may be gone, so call it again. A new key pair (first start, damaged key) deletes the plain
+  `e2e_priv` before it writes the sealed record, and fails if the delete fails.
 - `sensei_e2e_settings_seal_prepare()`: call it early in `main()`, before other threads write flash. The HUK provider writes
   the hardware unique key there if there is none (`hw_unique_key_write_random()` writes the UICR through the NVMC inside the
   CryptoCell library, without the flash driver lock). Without the call the first key request does it. A HUK that was only
@@ -161,10 +175,54 @@ What it adds: a flash image copied to another chip, and stale settings pages, do
 that runs on the chip (open debug port, glitch, a malicious signed image) can use the provider and read the key while it is in use.
 APPROTECT stays the main barrier. A record for a later version of the format has another version byte and is refused.
 
+## Forward secrecy (`include/sensei_ratchet.h`, `src/sensei_ratchet.c`)
+
+The keys of generation 0 (above) stay as they are. Generation 1 and later come from a ratchet, so a stolen key does not open
+older messages. This is the core: the primitives, the envelope bits and the hook for the keys. The device key store that keeps
+the state in flash, and the collector side, are built on it. All integers are u32 little endian, labels ASCII.
+
+```
+R_0     = HKDF(ikm = k_up || k_down, salt = "SENSEI-E2E-root-v1", info = key_id, L = 32)
+mix to generation g+1, with an ephemeral X25519 key of the node (e_N) and of the collector (e_C):
+  dh    = X25519(e_N_priv, e_C_pub) = X25519(e_C_priv, e_N_pub)            all zero: refused
+  th    = "SENSEI-RK-v1" || key_id || gen(g+1) || up_base || e_N_pub || e_C_pub          88 B
+  okm   = HKDF(ikm = dh, salt = R_g, info = th, L = 80)
+  R_{g+1} = okm[0:32]   CKu_{g+1,0} = okm[32:64]   k_down_{g+1} = okm[64:80]
+uplink chain: epoch(c) = c >> 6, i = epoch(c) - up_base (below 0: refused)
+  MK_i = HMAC(CK_i, 0x01)[0:16]   (AES-128-GCM key of the 64 counters of epoch i)      CK_{i+1} = HMAC(CK_i, 0x02)
+```
+
+- An epoch is 64 counters, the size of the replay window. The nonce and the counters do not change (counters stay global per
+  node and never repeat under any key); an uplink in epoch i uses MK_i. A downlink uses `k_down` of its generation, no chain.
+- `sensei_ratchet_root0`, `_transcript`, `_mix_dh`, `_mix` (both roles), `_public`, `_dh` (all-zero result gives
+  `SENSEI_SECURE_ERR_DH`; a backend may also refuse a low-order point itself), `_mk`, `_next`, `struct sensei_ratchet_chain`
+  with `_chain_init`, `_chain_advance`, `_chain_key` (without `commit` the walk is done on a copy, for use before the tag is
+  checked), `_chain_wipe`. A walk of more than `SENSEI_RATCHET_MAX_SKIP` (2^20) epochs gives `SENSEI_SECURE_ERR_GAP`; an epoch
+  before the chain start or behind the chain gives `_ERR_EPOCH`. Python: `sensei_sdk.ratchet` (same names, `Chain`).
+- The cipher backend has three more functions: `hmac_sha256`, `x25519_keygen`, `x25519` (OpenSSL; PSA with
+  `PSA_WANT_ECC_MONTGOMERY_255`, `CONFIG_SENSEI_CRYPTO_X25519` in the crypto library; Python `cryptography`). `x25519` clamps
+  the scalar and ignores the top bit of u (RFC 7748). A backend without them leaves them NULL (`sensei_ratchet_available()`).
+  Zephyr: `CONFIG_SENSEI_SECURE_RATCHET` (default y) selects them and builds `sensei_ratchet.c`.
+- Envelope: generation 0 is unchanged byte for byte. From generation 1 on the kind byte has the ratchet bit and the generation
+  mod 4 (see Envelope). `sensei_secure_kind()`, `_is_ratchet()`, `_gen_bits()` read it; `sensei_secure_peek()` reads the whole
+  header without opening it (kind, generation bits, key id, sender, counter).
+- Keys of the generations: `struct sensei_secure_keyring` (`sensei_secure_set_keyring()` after init). `tx_key(counter)` is
+  called by seal after it took the counter and returns the generation and the 16 B key (the message key of the epoch, or the
+  downlink key); `rx_key(ratchet, gen_bits, counter)` is called by open after the checks of the header and the replay window
+  and before the tag, and returns the key, or "use the session key" (generation 0 only), or an error. Without a keyring a
+  ratchet envelope is refused with `SENSEI_SECURE_ERR_GEN`. The hook is called before the tag is checked, so it must not
+  change its state for an unauthenticated envelope: use `_chain_key` without `commit`, and commit after `sensei_secure_open()`
+  returned 0.
+- `sensei_secure_tx_jump(s, next)` raises the sending counter (never lowers it): an epoch jump after a reboot or an old epoch,
+  or the first epoch of a new generation (`next = 64 * up_base`).
+- Not in this version: the device state machine (request, answer, switch, flash records), the Python key store v3, the node and
+  the collector. The test `tests/test_ratchet.c` has a small model of both sides for the scripted transcript.
+
 ## API (`include/sensei_secure.h`)
 
-`sensei_secure_keygen`, `_derive`, `_init` (clears the struct, takes the sender, counters, table of senders and the
-storage callbacks), `_close`, `_seal`, `_open`, `_peek_key_id`, `_rx_highest`, `_replay_check`, `_replay_update`. The key
+`sensei_secure_keygen`, `_derive`, `_priv_valid`, `_init` (clears the struct, takes the sender, counters, table of senders and the
+storage callbacks), `_close`, `_set_keyring`, `_tx_jump`, `_seal`, `_open`, `_peek`, `_peek_key_id`, `_kind`, `_rx_highest`,
+`_replay_check`, `_replay_update`. The key
 store has its own header, `sensei_e2e.h`. Backends:
 `sensei_secure_crypto_zephyr()` (`SENSEI_SECURE_BACKEND_ZEPHYR`) and `sensei_secure_crypto_openssl()`
 (`SENSEI_SECURE_BACKEND_OPENSSL`).
@@ -190,10 +248,18 @@ without the library).
 - `test_e2e` checks the key store (`sensei_e2e`) with a fake flash: first start, provisioning, key A then B then A,
   two senders, failing writes, full table of senders, clearing and the floor, reset, a damaged key, a sealed key with a crypto error, an unreadable key and a key
   that cannot be stored.
+- `test_ratchet` checks the ratchet against the Python vectors (vectors 1 to 6 of the forward secrecy design): R_0, X25519 of
+  RFC 7748 (sections 5.2 and 6.1) and low-order public keys, the mix on both sides, the chain (CK_0..CK_3, MK_0..MK_3, CK_1000),
+  envelopes of generation 1 and 4 (the generation bits wrap) with refusals (reserved bit, generation bits without the ratchet
+  bit, epoch before the chain, wrong generation, tag), the keyring hook, `tx_jump`, a scripted transcript (generation 0, request,
+  answer, late generation 0 uplink, generation 1 across epoch jumps, previous generation downlink, previous generation dropped),
+  and a property test: no (key, nonce) pair twice over 100 000 uplinks, 20 mixes and 40 000 downlinks of 8 senders, and no
+  message key for more than 64 counters.
 - `test_seal` checks the sealed settings records against the Python vectors (vector 7, `tests/generated/vectors.h`): the same bytes
   both ways, every byte covered by the tag, wrong name and key, short and long records, new nonce at every seal.
 
-The same test files run with the Zephyr backend (PSA, Mbed TLS) on `native_sim`: `NRF/tests/secure` (`test_secure`) and
+`test_ratchet.c` and `test_secure.c` also check the generation 0 bytes and the refusals of the kind byte. The same test files run with the Zephyr backend (PSA, Mbed TLS) on `native_sim`: `NRF/tests/secure` (`test_secure`) and
 `NRF/tests/secure_settings` (the settings storage: names, sizes, restart, erase; a second build with sealing and the fixed-key
-provider: sealed names, a record that is changed or does not belong, another key, a failing provider, the migration of the plain key)
+provider: sealed names, a record that is changed or does not belong, another key, a failing provider, the migration of the plain key
+and its deletion at the confirmation, a damaged plain key)
 (`make twister`).

@@ -31,7 +31,7 @@
  * @brief Simplified crypto library of the SENSEI SDK (thin layer over the PSA Crypto API).
  *
  * Features are enabled with CONFIG_SENSEI_CRYPTO and the sub-options
- * CONFIG_SENSEI_CRYPTO_{AEAD,ECDH,ECDSA,HKDF,HMAC}. Declarations of a feature are only
+ * CONFIG_SENSEI_CRYPTO_{AEAD,ECDH,X25519,ECDSA,HKDF,HMAC}. Declarations of a feature are only
  * visible if the corresponding option is enabled.
  *
  * Keys are never stored in the library. Functions that create a key return a PSA key id
@@ -59,6 +59,8 @@ extern "C" {
 #define SENSEI_CRYPTO_P256_PRIVATE_KEY_SIZE 32
 /** P-256 public key size in bytes (uncompressed point 0x04 || X || Y). */
 #define SENSEI_CRYPTO_P256_PUBLIC_KEY_SIZE 65
+/** X25519 private key, public key and shared secret size in bytes. */
+#define SENSEI_CRYPTO_X25519_SIZE 32
 /** ECDH P-256 shared secret size in bytes. */
 #define SENSEI_CRYPTO_ECDH_SECRET_SIZE 32
 /** ECDSA P-256 signature size in bytes (raw r || s). */
@@ -241,6 +243,27 @@ sensei_crypto_status_t sensei_crypto_ecdh_export_public_key(sensei_crypto_key_id
 sensei_crypto_status_t sensei_crypto_ecdh_shared_secret(sensei_crypto_key_id_t key_id, const uint8_t *peer_pub,
                                                         size_t peer_len, uint8_t *secret, size_t secret_size,
                                                         size_t *secret_len);
+#endif
+
+#if defined(CONFIG_SENSEI_CRYPTO_X25519) || defined(__DOXYGEN__)
+/**
+ * @brief X25519 (RFC 7748): scalar multiplication of a u coordinate.
+ *
+ * The scalar is clamped as the RFC says and the top bit of the u coordinate is ignored, so any 32 bytes are valid. With
+ * the base point u = 9 the result is the public key. If the peer has low order the result is all zero (or the call
+ * fails): check it before you use it, and feed it through sensei_crypto_hkdf_sha256().
+ *
+ * @param[in]  priv  Private scalar, SENSEI_CRYPTO_X25519_SIZE bytes (the input is not changed).
+ * @param[in]  peer  Peer u coordinate, SENSEI_CRYPTO_X25519_SIZE bytes, little endian.
+ * @param[out] out   Result, SENSEI_CRYPTO_X25519_SIZE bytes.
+ */
+sensei_crypto_status_t sensei_crypto_x25519(const uint8_t priv[SENSEI_CRYPTO_X25519_SIZE],
+                                            const uint8_t peer[SENSEI_CRYPTO_X25519_SIZE],
+                                            uint8_t out[SENSEI_CRYPTO_X25519_SIZE]);
+
+/** @brief New X25519 key: 32 random bytes as private key and the public key X25519(priv, 9). */
+sensei_crypto_status_t sensei_crypto_x25519_keygen(uint8_t priv[SENSEI_CRYPTO_X25519_SIZE],
+                                                   uint8_t pub[SENSEI_CRYPTO_X25519_SIZE]);
 #endif
 
 #if defined(CONFIG_SENSEI_CRYPTO_ECDSA) || defined(__DOXYGEN__)

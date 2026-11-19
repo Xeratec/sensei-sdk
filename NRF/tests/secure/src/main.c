@@ -40,5 +40,6 @@ ZTEST(sensei_secure, test_sender_table) { test_sender_table(); }
 ZTEST(sensei_secure, test_init) { test_init(); }
 ZTEST(sensei_secure, test_is_sealed_markers) { test_is_sealed_markers(); }
 ZTEST(sensei_secure, test_fresh_keys) { test_fresh_keys(); }
+ZTEST(sensei_secure, test_generation_bits) { test_generation_bits(); }
 
 ZTEST_SUITE(sensei_secure, NULL, setup, NULL, NULL, NULL);

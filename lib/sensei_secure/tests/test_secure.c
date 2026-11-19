@@ -477,6 +477,42 @@ static void test_fresh_keys(void) {
   C->key_destroy(C->ctx, b);
 }
 
+/* Generation 0 is the envelope as it was; the kind byte keeps its meaning and the generation bits are refused where
+ * there is no key for them. */
+static void test_generation_bits(void) {
+  for (int i = 0; i < VEC_SEC_COUNT; i++) {
+    const vec_sec_t *v = &vec_sec[i];
+    struct sensei_secure rx;
+    struct sensei_secure_info info;
+    uint8_t bad[2200], pt[2200];
+    size_t n;
+    int m;
+
+    /* generation 0: byte 1 is the kind, byte for byte as before */
+    CHECK(v->sealed[1] == v->kind && sensei_secure_kind(v->sealed) == v->kind);
+    CHECK(!sensei_secure_is_ratchet(v->sealed) && sensei_secure_gen_bits(v->sealed) == 0);
+    CHECK(sensei_secure_peek(v->sealed, v->sealed_len, &info) == 0 && info.kind == v->kind && !info.ratchet &&
+          info.gen_bits == 0 && info.counter == v->counter && info.sender == v->sender &&
+          info.key_id == VEC_SEC_KEY_ID && info.to_node == !is_up(v->kind) && info.has_node_id == (bool)v->has_node_id);
+    CHECK(!v->has_node_id || info.node_id == v->node_id);
+
+    open_session(&rx, is_up(v->kind) ? SENSEI_SECURE_ROLE_BACKEND : SENSEI_SECURE_ROLE_NODE, 0, 0, 1);
+    memcpy(bad, v->sealed, v->sealed_len);
+    bad[1] = (uint8_t)(v->kind | SENSEI_SECURE_KIND_RESERVED); /* the reserved bit */
+    CHECK(sensei_secure_open(&rx, 0, NULL, bad, v->sealed_len, pt, sizeof(pt), &n, NULL) == SENSEI_SECURE_ERR_FORMAT);
+    CHECK(sensei_secure_peek_key_id(bad, v->sealed_len) == 0);
+    bad[1] = (uint8_t)(v->kind | 0x10u); /* generation bits without the ratchet bit */
+    CHECK(sensei_secure_open(&rx, 0, NULL, bad, v->sealed_len, pt, sizeof(pt), &n, NULL) == SENSEI_SECURE_ERR_FORMAT);
+    bad[1] = (uint8_t)(v->kind | SENSEI_SECURE_KIND_RATCHET | 0x10u); /* a ratchet envelope: no keyring, no key */
+    CHECK(sensei_secure_open(&rx, 0, NULL, bad, v->sealed_len, pt, sizeof(pt), &n, NULL) == SENSEI_SECURE_ERR_GEN);
+    CHECK(sensei_secure_peek_key_id(bad, v->sealed_len) == VEC_SEC_KEY_ID); /* still readable for the lookup */
+    CHECK(rx.n_peers == 0);
+    m = sensei_secure_open(&rx, 0, NULL, v->sealed, v->sealed_len, pt, sizeof(pt), &n, NULL);
+    CHECK(m == 0 && n == v->plain_len);
+    sensei_secure_close(&rx);
+  }
+}
+
 int main(void) {
   C = sensei_secure_crypto_openssl();
   test_keys();
@@ -490,5 +526,6 @@ int main(void) {
   test_init();
   test_is_sealed_markers();
   test_fresh_keys();
+  test_generation_bits();
   return CHECK_DONE();
 }

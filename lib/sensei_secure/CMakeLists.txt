@@ -30,6 +30,7 @@ set(SENSEI_SECURE_FOUND ON PARENT_SCOPE)
 
 add_library(sensei_secure STATIC
   ${CMAKE_CURRENT_LIST_DIR}/src/sensei_secure.c
+  ${CMAKE_CURRENT_LIST_DIR}/src/sensei_ratchet.c
   ${CMAKE_CURRENT_LIST_DIR}/src/sensei_e2e.c
   ${CMAKE_CURRENT_LIST_DIR}/src/sensei_e2e_seal.c
   ${CMAKE_CURRENT_LIST_DIR}/src/sensei_secure_openssl.c)

@@ -187,13 +187,17 @@ int sensei_e2e_provision(struct sensei_e2e *e, const uint8_t *backend_pub, size_
 int sensei_e2e_reset(struct sensei_e2e *e) {
   struct sensei_e2e_nv empty;
 
+  if (e->ops->erase) {
+    int err = e->ops->erase(e->user);
+
+    if (err) { /* refused: keep the session and the state */
+      return err;
+    }
+  }
   memset(&empty, 0, sizeof(empty));
   if (e->ready) {
     sensei_secure_close(&e->s);
     e->ready = false;
-  }
-  if (e->ops->erase) {
-    e->ops->erase(e->user);
   }
   e->nv = empty;
   return make_pair(e);

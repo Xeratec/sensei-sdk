@@ -19,6 +19,7 @@ A small, consistent C API for common cryptographic operations on the nRF5340. It
 | HMAC-SHA256 | `_hmac_sha256` | `CONFIG_SENSEI_CRYPTO_HMAC` |
 | HKDF-SHA256 (RFC 5869) | `_hkdf_sha256` | `CONFIG_SENSEI_CRYPTO_HKDF` (selects HMAC) |
 | ECDH P-256 | `_ecdh_generate_keypair`, `_ecdh_import_private_key`, `_ecdh_export_public_key`, `_ecdh_shared_secret` | `CONFIG_SENSEI_CRYPTO_ECDH` |
+| X25519 (RFC 7748) | `_x25519`, `_x25519_keygen` | `CONFIG_SENSEI_CRYPTO_X25519` (off by default; `CONFIG_SENSEI_SECURE_RATCHET` selects it) |
 | ECDSA P-256 / SHA-256 | `_ecdsa_generate_keypair`, `_ecdsa_import_private_key`, `_ecdsa_import_public_key`, `_ecdsa_export_public_key`, `_ecdsa_sign_hash`, `_ecdsa_verify_hash`, `_ecdsa_sign`, `_ecdsa_verify` | `CONFIG_SENSEI_CRYPTO_ECDSA` |
 
 All functions return one `sensei_crypto_status_t`. Keys live inside PSA, the library keeps no key material. Functions that create keys return a key id that the caller releases with `sensei_crypto_destroy_key()`. Private keys cannot be exported. See [`sensei_crypto.h`](sensei_crypto.h) for the documented API.

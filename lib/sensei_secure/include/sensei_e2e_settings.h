@@ -16,7 +16,9 @@
  *
  * With CONFIG_SENSEI_SECURE_SETTINGS_SEAL the private key is stored as the sealed record e2e_privx (format in
  * sensei_e2e_seal.h) under a key from sensei_e2e_settings_seal_key(); the HUK provider derives it from the
- * hardware unique key of the nRF5340. The name e2e_rat is reserved for the ratchet state of a later version.
+ * hardware unique key of the nRF5340. A plain e2e_priv of an earlier version is sealed at the first start but stays
+ * until the application confirms the new image (sensei_e2e_settings_confirm()), so a revert to the old image finds its
+ * key. The name e2e_rat is reserved for the ratchet state of a later version.
  * Without sealing the private key is plain in flash: protect the chip (APPROTECT) in the field. With sealing
  * a flash image copied to another chip, and stale settings pages, do not give up the key; code that runs on the
  * chip still can use it (APPROTECT stays the main barrier).
@@ -44,11 +46,15 @@ extern const struct sensei_e2e_ops sensei_e2e_settings_ops;
  * of settings_load_subtree().
  *
  * With sealing the key record is opened here, and a plain e2e_priv of an earlier version is migrated:
- * sealed to e2e_privx, read back and compared, then e2e_priv is deleted (the key and its key id stay
- * the same; the old flash page stays readable until the settings garbage collection). If both records are there:
- * the same key (the migration stopped between the two writes): the plain one is deleted; different keys (an older
- * firmware made a new key after the downgrade): the plain one is the newer, it is sealed over the old one. If the
- * sealing key is not available or the record does not open, nv->key_unreadable is set, nv->have_priv is false and the
+ * sealed to e2e_privx, read back and compared (the key and its key id stay the same). The plain record is kept: if the
+ * new image is only on trial and MCUboot goes back to the old one, the old image still has its key. The application
+ * calls sensei_e2e_settings_confirm() once the image is confirmed, and that deletes it (the old flash page stays
+ * readable until the settings garbage collection). If both records are there: the same key (a trial image that is not
+ * confirmed yet, or the migration stopped): both stay; different keys (an older firmware made a new key after the
+ * downgrade): the plain one is the newer, it is sealed over the old one; a plain record that is not a valid scalar is
+ * junk: the sealed key stands. A plain record that is not a valid scalar and no sealed record: the key is damaged, it
+ * is not sealed, sensei_e2e_init() replaces it. If the sealing key is not available or the record does not open,
+ * nv->key_unreadable is set, nv->have_priv is false and the
  * function returns the error (-EACCES for a record that does not open, the error of the provider
  * otherwise). sensei_e2e_init() then refuses to start. The stored record is not touched.
  */
@@ -87,6 +93,19 @@ int sensei_e2e_settings_seal_prepare(void);
  * missing would leave no key at all. Without sealing it returns 0.
  */
 int sensei_e2e_settings_reset_check(void);
+
+/**
+ * Call once the running image is confirmed (for MCUboot: after boot_write_img_confirmed() returned 0; calling it at
+ * every start after the confirmation is fine, it does nothing when there is no plain record). Deletes the plain
+ * e2e_priv that the migration kept. Not called before the confirmation: an image that MCUboot reverts must find its
+ * key. Returns 0 (also when there is nothing to delete) or the error of the delete: the record stays and the next
+ * call tries again. Call it after sensei_e2e_settings_load() and from the thread that uses the key store. Without
+ * sealing it returns 0.
+ */
+int sensei_e2e_settings_confirm(void);
+
+/** True if sensei_e2e_settings_load() found a plain e2e_priv that sensei_e2e_settings_confirm() will delete. */
+bool sensei_e2e_settings_plain_pending(void);
 
 /** Destroy the key handle and forget a failure: the next use asks the provider again (a "reboot" in tests). */
 void sensei_e2e_settings_seal_close(void);

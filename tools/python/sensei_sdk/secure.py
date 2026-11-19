@@ -92,6 +92,8 @@ KIND_UPLINK = 1  # encoded Uplink, node to backend
 KIND_DOWNLINK = 2  # encoded Downlink, backend to node
 KIND_NODE_TO_HOST = 3  # encoded NodeToHost data message, node to host
 KIND_SETTINGS = 4  # encoded Settings patch for the BLE settings characteristic, backend to node
+KIND_COMMISSION = 5  # commissioning channel (`commission.Channel`): both directions, generation 0 format, no node id
+COMMISSION_SENDER = 1  # sender field of the commissioning envelopes that go to the node (the node sends 0)
 
 # Kind byte (byte 1). Generation 0 (the keys of the commissioning): the kind alone, 1 ... 4. Generation 1 and later
 # (the ratchet): 0x80 | (generation mod 4) << 4 | kind. Bit 6 is reserved: an envelope with it set is refused.
@@ -106,6 +108,7 @@ DIR_UP = 0  # node to backend
 DIR_DOWN = 1  # backend to node
 
 _KIND_DIR = {KIND_UPLINK: DIR_UP, KIND_NODE_TO_HOST: DIR_UP, KIND_DOWNLINK: DIR_DOWN, KIND_SETTINGS: DIR_DOWN}
+_KINDS = frozenset(_KIND_DIR) | {KIND_COMMISSION}  # kind 5 has no fixed direction: the sender field tells it
 _CTR_MAX = 0xFFFFFFFF
 
 # ---- keys ----
@@ -181,7 +184,7 @@ def is_ratchet(payload: bytes) -> bool:
 
 def kind_byte(kind: int, gen: int = 0) -> int:
     """Byte 1 of an envelope: the kind for generation 0, with the ratchet bit and gen mod 4 for generation 1 and later."""
-    if kind not in _KIND_DIR:
+    if kind not in _KINDS:
         raise SecureError(f"unknown kind {kind}")
     if gen < 0:
         raise SecureError("negative generation")
@@ -205,12 +208,18 @@ def seal_raw(
     """Build one envelope. The caller owns the counter. A backend to node kind needs a sender id (not 0), a node
     to backend kind has none. gen: generation of the key (0: the commissioning keys, the format of version 3 as it
     always was; 1 and later: the ratchet bits in the kind byte, key = the message key or downlink key of that
-    generation, see ratchet.py)."""
-    if kind not in _KIND_DIR:
+    generation, see ratchet.py). Kind 5 (commissioning) goes both ways: sender 0 is node to backend, sender
+    COMMISSION_SENDER is backend to node; it has no node id and no generation."""
+    if kind not in _KINDS:
         raise SecureError(f"unknown kind {kind}")
     if not 0 < counter <= _CTR_MAX:
         raise SecureError("counter out of range")
-    direction = _KIND_DIR[kind]
+    if kind == KIND_COMMISSION:
+        if sender not in (0, COMMISSION_SENDER) or gen or node_id is not None:
+            raise SecureError("a commissioning envelope has sender 0 or 1, no node id and generation 0")
+        direction = DIR_DOWN if sender else DIR_UP
+    else:
+        direction = _KIND_DIR[kind]
     if direction == DIR_DOWN:
         if not 0 < sender <= 0xFFFFFFFF:
             raise SecureError("a downlink needs a sender id")
@@ -263,7 +272,10 @@ def parse_header(payload: bytes) -> Header:
     key_id = struct.unpack_from("<I", payload, 10 if has_node else 2)[0]
     sender = struct.unpack_from("<I", payload, size - 8)[0] if direction == DIR_DOWN else 0
     counter = struct.unpack_from("<I", payload, size - 4)[0]
-    if _KIND_DIR.get(kind) != direction:
+    if kind == KIND_COMMISSION:
+        if ratchet or has_node or (direction == DIR_DOWN and sender != COMMISSION_SENDER):
+            raise SecureError("bad commissioning envelope: generation, node id or sender")
+    elif _KIND_DIR.get(kind) != direction:
         raise SecureError("kind does not match direction")
     if direction == DIR_DOWN and sender == 0:
         raise SecureError("downlink without a sender id")
@@ -422,7 +434,7 @@ class NodeSession:
 
     def open(self, payload: bytes) -> tuple[int, bytes]:
         h = parse_header(payload)
-        if h.direction != DIR_DOWN:
+        if h.direction != DIR_DOWN or h.kind == KIND_COMMISSION:
             raise SecureError("wrong direction")
         if h.key_id != self.keys.key_id:
             raise UnknownKeyError("wrong key id")
@@ -679,6 +691,8 @@ def _flock(path: Path):
 # not yet used mix) and `prev_up` (the uplink chain of the generation before, with the counter c1 where it ends). Up to
 # version 2 a node had the static keys only; they migrate to generation 0 with the root key R_0 (`ratchet.root0`).
 FILE_VERSION = 3
+REREAD_S = 1.0  # shortest time between two re-reads of the file for an unknown key id
+_monotonic = time.monotonic  # a module level name so that a test can move the time of the re-read limit
 _MAX_EPOCH_IDX = 1 << 26  # an epoch of a 32 bit counter is below this
 
 
@@ -1166,6 +1180,9 @@ class KeyStore:
     (`follow=`): it takes over the current generation, the answered mix and the previous chain (not the root key, the
     sender ids and the counters). A key store without it loses access at the next mix of a node.
 
+    An envelope with an unknown key id makes the store read its file again (at most once a second, whatever the ids),
+    so a node that another process added (the GUI, commissioning over BLE) is found without a restart.
+
     Provisioning again (`add_node`) raises the node's `prov`; the copy with the higher `prov` wins in a merge and in a
     follower, so the reset is not undone by a process that holds an older state. `add_node` returns a `NodeBackup` for
     `rollback_node`. `generation`, `node_state`, the follower refresh and every change take the store lock (re-entrant);
@@ -1217,6 +1234,7 @@ class KeyStore:
         self._follow_key = load_key_file(follow_key_file) if follow_key_file else self._key
         self._follow_sig: tuple | None = None
         self._resync_at = -1e9
+        self._reread_at = -1e9  # monotonic time of the last re-read for an unknown key id (`_reread_unknown`)
         self.file_was_plain = False  # the file read last was not sealed (a key store without a key file: warn)
         self._warned_plain = False
         self.autosave_s = autosave_s
@@ -1380,6 +1398,26 @@ class KeyStore:
                 mine.down_ctr = max(mine.down_ctr, theirs.down_ctr)
                 mine.prov = max(mine.prov, theirs.prov)
                 mine.up = _merge_window(mine.up, theirs.up)
+
+    def _reread_unknown(self) -> bool:
+        """An envelope came with a key id this store does not know. Another process (the GUI that just provisioned a
+        node, or commissioned it over BLE) may have added the node to the file: read the file again and merge it, at
+        most once per `REREAD_S` for the whole store, so a flood of unknown ids costs one read a second. Call with
+        `self._lock` held. Returns true if the file was read (the caller looks the key id up once more). The read needs
+        no file lock: the file is replaced atomically, and nothing is written."""
+        if self.path is None:
+            return False
+        now = _monotonic()
+        if now - self._reread_at < REREAD_S:
+            return False
+        self._reread_at = now
+        try:
+            self._merge_from_disk()
+        except (OSError, SecureError) as exc:
+            self._warn("reread", "key store %s: re-read for an unknown key id failed: %s", self.path, exc)
+            return False
+        self.stats["reread"] += 1
+        return True
 
     def _note_responder(self, recorded: str | None) -> None:
         """The file names the process that answers mixes. A responder that finds another id warns (once a minute), counts
@@ -1978,7 +2016,7 @@ def _select(node: _Node, h: Header, walker: Walker, now: float, node_id: int | N
 
 def _open_up(payload: bytes, store: KeyStore, commit: bool) -> Opened:
     h = parse_header(payload)
-    if h.direction != DIR_UP:
+    if h.direction != DIR_UP or h.kind == KIND_COMMISSION:
         raise SecureError("not a node to backend envelope")
     resynced = False
     for _attempt in range(4):
@@ -1986,6 +2024,8 @@ def _open_up(payload: bytes, store: KeyStore, commit: bool) -> Opened:
         with store._lock:
             store._follow_refresh()
             node_id = store._by_key_id.get(h.key_id)
+            if node_id is None and store._reread_unknown():  # a node that another process added since the last read
+                node_id = store._by_key_id.get(h.key_id)
             if node_id is None:
                 raise UnknownKeyError(f"unknown key id {h.key_id:08x}")
             if h.node_id is not None and h.node_id != node_id:

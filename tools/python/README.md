@@ -16,12 +16,14 @@ two in line.
 | `framing` | `lib/sensei_link` | CRC-16/32, COBS, stream frames (`StreamDecoder`), SPI frames, fragments and `Reassembler`, the channel ids and limits of `sensei_link.h`; `looks_sealed` and `kind_of` (the kind of a sealed payload without the generation bits) |
 | `secure` | `lib/sensei_secure` | key store (file version 3: sender id, counters, forward secrecy state), P-256 key derivation, envelope version 3 (`seal_raw`, `open_sealed`, `open_sealed_ex`, `peek_sealed`, `seal_downlink`), replay window; the node twin `NodeSession` (also the ratchet side of a node: `rekey_request`, `rekey_answer`); sealed settings records of the node (`seal_record`, `open_record`); key store file sealed with a 32 byte key file (`KeyStore(key_file=...)`, `SENSEI_KEYSTORE_KEY_FILE`; a key file that the group or others can access is refused, `new_key_file` syncs the file and its folder); `python -m sensei_sdk.secure new-sender \| new-key-file \| seal-file \| unseal-file \| rotate-file-key` |
 | `ratchet` | `lib/sensei_secure` | forward secrecy primitives: root key R_0, X25519, the mix, the uplink chain (`Chain`), epoch math. The envelope bits of generation 1 and later are in `secure` (`kind_of`, `seal_raw(gen=...)`, `Header.ratchet`, `gen_bits`) |
+| `commission` | `lib/sensei_secure` (later) | adding a node over BLE with a setup code: SPAKE2+ (RFC 9383) as `Prover` and `Verifier`, scrypt registration (`make_verifier`), the kind 5 `Channel`, fingerprints and proof of possession, setup code with Verhoeff check digit, QR payload (see "Commissioning") |
+| `p256` | | P-256 point arithmetic with Python ints for `commission`; not constant time, host only |
 | `chainwalk` | | cost control for the uplink chain walk of the key store: time-bound gap, cache of walked keys, budgets (see "Forward secrecy in the key store") |
 | `errors` | | the exceptions of the envelope (`SecureError` and its subclasses; `secure` re-exports them) |
 | `diag` | `lib/sensei_diag` | reset cause and reason names, the 52 B fault record (`pack_fault`, `unpack_fault`), `addr2line` and the ELF lookup by image id. The job names of `last_job` belong to the app: pass `job_names` |
 | `smp`, `smp_sim` | `NRF/system/ota` | MCUboot SMP client (serial and BLE links; upload, test, confirm, reset) and a simulated server. The board id of an image is a parameter: `load_image(source, kind=...)`; `python -m sensei_sdk.smp` is a small command line for it |
 | `transport`, `transport_serial`, `transport_ble` | | byte transports (loopback, USB serial, BLE). The GATT UUIDs and the advertising name are a `BleProfile` that the app supplies |
-| `vectors` | | the C test vectors of the three libraries above (below), including the ratchet vectors of `sensei_secure` |
+| `vectors`, `vectors_commission` | | the C test vectors of the three libraries above (below), including the ratchet vectors of `sensei_secure` and the commissioning vectors V9 to V14 |
 
 Needs Python 3.11 and `cryptography`. The serial and BLE transports need the extras `serial` (pyserial) and `ble` (bleak).
 
@@ -102,6 +104,50 @@ store.node_state(o.node_id)                   # gen, answered mix waiting, previ
   (disk error) keeps the verified message and is saved again with the next message or `flush`.
 - A new sender id is checked against the senders in the file, so two hosts never share one.
 
+## Commissioning
+
+A node is added over BLE with a setup code printed on a card (11 digits and a Verhoeff check digit, `1234-5678-9012`).
+The commissioner proves it knows the code with SPAKE2+ (RFC 9383, P-256), without sending it; the node stores only a
+verifier made at the bench. Messages are plain bytes here: the app puts them
+into its protobuf.
+
+```python
+from sensei_sdk import commission as com
+
+# bench: code, verifier (scrypt, 32 MiB, about 0.1 s). v.encode() is the 121 B record that the node stores
+code = com.generate_code()
+v = com.make_verifier(code, node_id)
+qr = com.qr_payload(node_id, code, com.node_fingerprint(node_id, node_pub))     # SN1:<id>:<code>:<fp>
+
+# commissioner: nonce_g in commission_begin; the node answers with its params (salt, scrypt cost) and nonce_n
+nonce_g = com.new_nonce()
+p = com.Prover.from_code(code, node_id, params, nonce_g, nonce_n)    # WrongCodeError later if the code is wrong
+share_p = p.share()
+confirm_p = p.finish(share_v, confirm_v)    # InvalidPointError, WrongCodeError; StateError if out of order
+ch = com.Channel(p.keys, com.PROVER)         # kind 5 envelopes: ch.seal(plain), ch.open(envelope)
+
+# node side (tests, simulators)
+s = v.session(node_id, nonce_g, nonce_n)
+share_v, confirm_v = s.pake1(share_p)
+s.pake3(confirm_p)
+node_ch = com.Channel(s.keys, com.VERIFIER)
+
+# after the key step
+com.check_proof(proof, store, node_id, nonce_g, nonce_n)   # the node holds the key it sent; else ProofError
+```
+
+- The commissioner accepts only scrypt (log2n 14 to 17, r 8, p 1) and a 16 byte salt (`Params.check`).
+- The channel is `secure.seal_raw` / `open_raw` with kind 5 (`KIND_COMMISSION`), key id = session id, no node id,
+  generation 0, counters from 1, replay window 64, at most 320 bytes. The node sends with sender 0, the commissioner with
+  sender 1. Every other receiver (`open_sealed`, `NodeSession.open`) refuses kind 5.
+- Fingerprint of the node key: `node_fingerprint` (16 B, QR) and `fingerprint_text` (`a1b2 c3d4 e5f6 0718`).
+  `collector_fingerprint` (8 B) tells whether a node is already ours.
+- `generate_code` draws again for one repeated digit and for ascending or descending runs. `parse_code` and `parse_qr`
+  check the check digit; the QR format is strict (upper case hex).
+- `p256` and `commission` are not constant time. Use them on a PC at the bench or the office, never on a node.
+- `open_sealed` reads the key store file again when it meets an unknown key id (at most once a second), so a node that
+  another process added is found without a restart.
+
 ## Tests and vectors
 
 ```sh
@@ -110,7 +156,7 @@ python -m sensei_sdk.vectors               # write the C test vectors
 python -m sensei_sdk.vectors --check       # fail if they are out of date (CI)
 ```
 
-The vectors go to `lib/sensei_link/tests/generated/vectors.h`, `lib/sensei_secure/tests/generated/vectors.h` and
-`lib/sensei_diag/tests/generated/vectors.h`; the host tests of the libraries check the C code against them
+The vectors go to `lib/sensei_link/tests/generated/vectors.h`, `lib/sensei_secure/tests/generated/vectors.h`,
+`lib/sensei_secure/tests/generated/vectors_commission.h` and `lib/sensei_diag/tests/generated/vectors.h`; the host tests of the libraries check the C code against them
 (`make test-host`). `tests/test_sdk_constants.py` compares the Python constants with the C headers. An app with
 messages of its own builds its vectors on `vectors.pattern`, `array`, `pairs` and `frag_cases`.

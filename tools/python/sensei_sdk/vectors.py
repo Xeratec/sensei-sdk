@@ -11,6 +11,10 @@ Writes, in the SDK:
                                                   ratchet (root key, X25519, mix, chain, generation 1 and later
                                                   envelopes, a scripted transcript); fixed test keys, never used on a
                                                   device
+    lib/sensei_secure/tests/generated/vectors_commission.h
+                                                  commissioning over BLE: RFC 9383 P-256, scrypt registration,
+                                                  session keys, channel, fingerprints and proof, QR and Verhoeff
+                                                  (vectors_commission.py); fake codes only
     lib/sensei_diag/tests/generated/vectors.h     packed fault records, reset and reason names
 
     python -m sensei_sdk.vectors             write the headers
@@ -34,6 +38,7 @@ SDK_ROOT = Path(__file__).resolve().parents[3]
 LINK_HEADER = "lib/sensei_link/tests/generated/vectors.h"
 SECURE_HEADER = "lib/sensei_secure/tests/generated/vectors.h"
 DIAG_HEADER = "lib/sensei_diag/tests/generated/vectors.h"
+COMMISSION_HEADER = "lib/sensei_secure/tests/generated/vectors_commission.h"  # V9 to V14, vectors_commission.py
 
 LICENSE = ("/*\n * SPDX-"
            "FileCopyrightText: 2026 ETH Zurich and University of Bologna\n"
@@ -631,8 +636,9 @@ def render_diag() -> str:
 
 
 def outputs(root: Path) -> list[tuple[Path, str]]:
+    from . import vectors_commission  # imports this module for its helpers
     return [(root / LINK_HEADER, render_link()), (root / SECURE_HEADER, render_secure()),
-            (root / DIAG_HEADER, render_diag())]
+            (root / DIAG_HEADER, render_diag()), (root / COMMISSION_HEADER, vectors_commission.render())]
 
 
 def main(argv: list[str] | None = None) -> int:

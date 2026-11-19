@@ -249,9 +249,12 @@ returns 0; the application (the node) defines it.
 - **Trigger.** Generation 0 after provisioning (at once); `rekey_days` since the generation started, by the running time
   (uptime plus the stored age) or by the wall clock, whichever says "due" first: a clock that is held back or stopped
   cannot postpone the mix; a chain of 4096 epochs; `sensei_e2e_rekey_now()`. A pending request is returned again after
-  `retry_h` hours and at the first call after a start; there is no give-up. A request that is more than 4096 epochs old
-  (`SENSEI_E2E_REKEY_STALE_EPOCHS`: a node that streams and never gets the answer) is replaced by a new one at the next
-  call, and an answer to it is refused with `-ETIMEDOUT`, so the answer walk stays short.
+  `retry_h` hours and at the first call after a start; there is no give-up. A request that is more than 32768 epochs old
+  (`SENSEI_E2E_REKEY_STALE_EPOCHS`, Kconfig `SENSEI_SECURE_REKEY_STALE_EPOCHS`: a node that streams and never gets the
+  answer) is replaced by a new one at the next call, and an answer to it is refused with `-ETIMEDOUT`, so the answer walk
+  stays short (about 1 to 2 s on the nRF5340 crypto queue, untested on hardware). Limit: a node that seals more than
+  32768 x 64 messages between a request and its answer does not mix until the traffic drops. The key store keeps the
+  time of the first unanswered request (`NodeState.next_since`), so the alert for a node that never mixes still fires.
 - **Age of the generation.** Every write of `e2e_rat` carries the age of the generation in hours (the `u16` at offset 2,
   rounded up, at most 65535 h = 7.4 years). At the load the start is `uptime - age`, so a node that restarts more often
   than `rekey_days` and has no wall clock still mixes after about `rekey_days` of running time. What is lost at a restart

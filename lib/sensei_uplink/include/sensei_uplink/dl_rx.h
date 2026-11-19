@@ -34,9 +34,14 @@ struct dl_rx {
 };
 
 /** buf, cap: the largest message (the node: a Downlink at its generated maximum inside the largest envelope). mtu:
- * chunk size of the sender (LoRa 222, LTE 1024). timeout_ms: time without a chunk after which a message in progress is
- *  dropped. */
+ * largest chunk of the sender (LoRa 222, LTE 1024; LoRa chunks may be smaller, see sensei_link/frag.h). timeout_ms:
+ * time without a chunk after which a message in progress is dropped. */
 void dl_rx_init(struct dl_rx *rx, uint8_t *buf, size_t cap, size_t mtu, uint32_t timeout_ms);
+
+/** Change the times at run time (LoRa: the next chunk of a message comes one uplink interval later). timeout_ms: time
+ * without a chunk after which a message in progress is dropped. remember_ms: how long a finished message is remembered,
+ * so that a copy of it is not applied twice (starts equal to timeout_ms). */
+void dl_rx_set_timeouts(struct dl_rx *rx, uint32_t timeout_ms, uint32_t remember_ms);
 
 /**
  * Feed one datagram received at now_ms. True when it completes a message: *msg and *len give it

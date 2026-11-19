@@ -26,6 +26,20 @@ config SENSEI_SECURE_RATCHET
 	  it sensei_e2e never asks for a mix and stays in generation 0 (sensei_ratchet_available() is false); a stored
 	  state of generation 1 or later cannot be used then and the device refuses to talk until it is provisioned again.
 
+config SENSEI_SECURE_REKEY_STALE_EPOCHS
+	int "Epochs after which an unanswered mix request is replaced"
+	default 32768
+	range 64 1048576
+	depends on SENSEI_SECURE_RATCHET
+	help
+	  A pending request that is older than this many epochs of sending (64 messages each, counted over all sealed
+	  traffic, including kind 3 over BLE and USB) is replaced by a new one, and an answer to it is refused with
+	  -ETIMEDOUT. The answer walks the uplink chain from the request to the current epoch: 32768 epochs take about
+	  1 to 2 s on the crypto work queue of the nRF5340 (one HMAC-SHA256 per epoch, an estimate: untested on hardware).
+	  That is far below the watchdog (SENSEI_WDT_TIMEOUT_S, 60 s, fed from another work queue) and below the 15 minute
+	  stall limit of the uplink. A node that seals more than this x 64 messages between a request and its answer does
+	  not mix until the traffic drops (the collector alert for a node that never mixes shows it).
+
 config SENSEI_SECURE_SETTINGS
 	bool "Keep the end-to-end keys and counters in the settings subsystem"
 	depends on SENSEI_SECURE

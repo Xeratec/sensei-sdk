@@ -24,6 +24,7 @@
 
 #define MQ_HDR 2u
 #define MQ_MAX_MSG 4096u
+_Static_assert(MQ_MAX_MSG <= 0x1FFFu, "MQ_MAX_MSG must fit the 13 bit length field of the header");
 
 /* Flags kept with a message (the uplink scheduler's). */
 #define MQ_FLAG_PLAIN 0x01u  /* an unsealed message: ops->prepare may change it for the radio */

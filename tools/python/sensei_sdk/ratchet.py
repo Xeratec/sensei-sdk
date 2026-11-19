@@ -34,6 +34,7 @@ MK_SIZE = 16  # AES-128-GCM message key
 EPOCH_BITS = 6
 EPOCH_SIZE = 1 << EPOCH_BITS  # counters per epoch = the replay window
 MAX_SKIP = 1 << 20  # epochs a chain is walked in one step (SENSEI_E2E_MAX_SKIP)
+STALE_EPOCHS = 32768  # a node replaces a request this many epochs old (SENSEI_E2E_REKEY_STALE_EPOCHS)
 _U32 = 0xFFFFFFFF
 
 

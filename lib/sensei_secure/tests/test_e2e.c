@@ -2141,6 +2141,7 @@ static void test_fs_stale_request(void) {
   uint32_t u1;
   int rl, rl2;
 
+  CHECK(SENSEI_E2E_REKEY_STALE_EPOCHS == 32768u); /* the walk of an answer stays at about 1 to 2 s */
   setup(&e, &col, &b);
   to_gen(&e, &col, 1);
   CHECK(cycle(&e, &col, false, NULL) > 0); /* the collector is in generation 1 too */

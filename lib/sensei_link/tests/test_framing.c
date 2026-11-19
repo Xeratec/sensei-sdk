@@ -300,6 +300,103 @@ static void test_frag_ack(void) {
   CHECK(sensei_reasm_feed(&r, ack, sizeof(ack), 0, &out, &out_len) == SENSEI_REASM_ERR_FORMAT);
 }
 
+/* The sender may use chunks smaller than the receiver's mtu (LoRa: 51, 115 or 222 B by data rate): in any order, the
+ * last chunk first, and a chunk of another size in the same message is refused. */
+static void test_frag_chunk_sizes(void) {
+  static uint8_t msg[400];
+  static uint8_t chunk[8][222];
+  static uint8_t rbuf[400];
+  size_t cn[8];
+  sensei_reasm_t r;
+  const uint8_t *out = NULL;
+  size_t out_len = 0;
+  size_t sizes[] = {51, 115, 222, 10};
+  size_t lens[] = {82, 1, 48, 49, 96, 97, 337, 380};
+  static const size_t orders[][8] = {
+      {0, 1, 2, 3, 4, 5, 6, 7}, {7, 6, 5, 4, 3, 2, 1, 0}, {1, 0, 2, 3, 4, 5, 6, 7}, {3, 1, 2, 0, 4, 5, 6, 7}};
+
+  for (size_t m = 0; m < sizeof(sizes) / sizeof(sizes[0]); m++) {
+    for (size_t l = 0; l < sizeof(lens) / sizeof(lens[0]); l++) {
+      size_t count = sensei_frag_count(lens[l], sizes[m]);
+
+      if (count == 0 || count > 8) {
+        continue;
+      }
+      fill(msg, lens[l], 21);
+      for (size_t i = 0; i < count; i++) {
+        cn[i] = sensei_frag_chunk(9, msg, lens[l], sizes[m], i, chunk[i], sizeof(chunk[i]));
+        CHECK(cn[i] > 0 && cn[i] <= sizes[m]);
+      }
+      for (size_t o = 0; o < sizeof(orders) / sizeof(orders[0]); o++) {
+        size_t fed = 0;
+        sensei_reasm_status_t st = SENSEI_REASM_INCOMPLETE;
+
+        sensei_reasm_init(&r, rbuf, sizeof(rbuf), 222, 1000);
+        for (size_t k = 0; k < 8; k++) {
+          size_t i = orders[o][k];
+
+          if (i >= count) {
+            continue;
+          }
+          fed++;
+          st = sensei_reasm_feed(&r, chunk[i], cn[i], (uint32_t)(fed * 10), &out, &out_len);
+          CHECK(st == (fed == count ? SENSEI_REASM_COMPLETE : SENSEI_REASM_INCOMPLETE));
+          /* a copy of a chunk that came already (the stashed last one too) changes nothing */
+          if (fed < count) {
+            CHECK(sensei_reasm_feed(&r, chunk[i], cn[i], (uint32_t)(fed * 10 + 1), &out, &out_len) ==
+                  SENSEI_REASM_DUPLICATE);
+          }
+        }
+        CHECK(st == SENSEI_REASM_COMPLETE && out_len == lens[l] && memcmp(out, msg, lens[l]) == 0);
+      }
+    }
+  }
+
+  /* one message with two chunk sizes, in the middle chunks: refused, the message goes on with the first size */
+  {
+    static uint8_t other[222];
+    size_t on;
+
+    fill(msg, 380, 5);
+    sensei_reasm_init(&r, rbuf, sizeof(rbuf), 222, 1000);
+    cn[0] = sensei_frag_chunk(2, msg, 380, 115, 0, chunk[0], sizeof(chunk[0])); /* 4 chunks of 112 B */
+    cn[1] = sensei_frag_chunk(2, msg, 380, 115, 1, chunk[1], sizeof(chunk[1]));
+    cn[2] = sensei_frag_chunk(2, msg, 380, 115, 2, chunk[2], sizeof(chunk[2]));
+    cn[3] = sensei_frag_chunk(2, msg, 380, 115, 3, chunk[3], sizeof(chunk[3]));
+    on = sensei_frag_chunk(2, msg, 380, 51, 1, other, sizeof(other)); /* index 1 of 8: other count */
+    CHECK(sensei_reasm_feed(&r, chunk[0], cn[0], 0, &out, &out_len) == SENSEI_REASM_INCOMPLETE);
+    memcpy(other, chunk[1], 3);
+    CHECK(sensei_reasm_feed(&r, other, on > 40 ? 40 : on, 1, &out, &out_len) == SENSEI_REASM_ERR_FORMAT);
+    CHECK(sensei_reasm_feed(&r, chunk[3], cn[3], 2, &out, &out_len) == SENSEI_REASM_INCOMPLETE);
+    CHECK(sensei_reasm_feed(&r, chunk[1], cn[1], 3, &out, &out_len) == SENSEI_REASM_INCOMPLETE);
+    CHECK(sensei_reasm_feed(&r, chunk[2], cn[2], 4, &out, &out_len) == SENSEI_REASM_COMPLETE);
+    CHECK(out_len == 380 && memcmp(out, msg, 380) == 0);
+  }
+
+  /* a last chunk that is longer than the others, and a stash that does not fit, are refused */
+  {
+    uint8_t c0[3 + 10], c1[3 + 20];
+
+    sensei_reasm_init(&r, rbuf, 25, 222, 1000);
+    c1[0] = 4;
+    c1[1] = 1;
+    c1[2] = 2;
+    c0[0] = 4;
+    c0[1] = 0;
+    c0[2] = 2;
+    memset(c0 + 3, 1, 10);
+    memset(c1 + 3, 2, 20);
+    CHECK(sensei_reasm_feed(&r, c1, sizeof(c1), 0, &out, &out_len) == SENSEI_REASM_INCOMPLETE); /* the last first */
+    CHECK(sensei_reasm_feed(&r, c0, sizeof(c0), 1, &out, &out_len) == SENSEI_REASM_ERR_FORMAT); /* 20 > 10 */
+    CHECK(sensei_reasm_feed(&r, c0, sizeof(c0), 2, &out, &out_len) == SENSEI_REASM_INCOMPLETE); /* a new message */
+    c0[0] = c1[0] = 5;
+    memset(c1 + 3, 2, 8);
+    CHECK(sensei_reasm_feed(&r, c1, 3 + 8, 3, &out, &out_len) == SENSEI_REASM_INCOMPLETE);
+    CHECK(sensei_reasm_feed(&r, c0, sizeof(c0), 4, &out, &out_len) == SENSEI_REASM_COMPLETE); /* 10 + 8 <= 25 */
+    CHECK(out_len == 18 && out[0] == 1 && out[10] == 2);
+  }
+}
+
 static void test_frag(void) {
   static uint8_t msg[3000];
   static uint8_t chunk[1100];
@@ -412,13 +509,15 @@ static void test_frag(void) {
     bad[2] = 3;
     CHECK(sensei_reasm_feed(&r, bad, 6, 0, &out, &out_len) == SENSEI_REASM_ERR_FORMAT); /* index >= count */
     bad[1] = 0;
-    bad[2] = 2; /* not the last chunk but short */
-    CHECK(sensei_reasm_feed(&r, bad, 6, 0, &out, &out_len) == SENSEI_REASM_ERR_FORMAT);
+    bad[2] = 2;
+    CHECK(sensei_reasm_feed(&r, bad, 3, 0, &out, &out_len) == SENSEI_REASM_ERR_FORMAT); /* not the last, but empty */
     fill(msg, 300, 0);
     sensei_frag_chunk(1, msg, 300, 222, 0, chunk, sizeof(chunk));
     CHECK(sensei_reasm_feed(&r, chunk, 222, 0, &out, &out_len) == SENSEI_REASM_ERR_OVERFLOW);
     CHECK(r.n_errors == 5);
   }
+
+  test_frag_chunk_sizes();
 
   /* encoder errors */
   CHECK(sensei_frag_chunk(1, msg, 100, 222, 1, chunk, sizeof(chunk)) == 0);

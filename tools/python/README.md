@@ -72,8 +72,18 @@ store.node_state(o.node_id)                   # gen, answered mix waiting, previ
   `NodeBackup`; if the provisioning of the node then fails, `rollback_node(backup)` gives the old keys and ratchet state
   back (counters only go up). Provision in the file that the collector uses: a follower that calls `add_node` resets its
   own copy only.
+- One responder per key store. A responder has an id (`responder_id=`, or the file in `SENSEI_REKEY_RESPONDER_ID_FILE`,
+  made by `secure.load_responder_id(path)`: 16 random hex characters, keep it in the responder's own config folder, not in
+  the key store folder). It is written to the key store file (`responder`) with every save. A responder that finds another
+  id warns once a minute, counts it (`store.stats["responder_conflict"]`) and still answers; the last one to save holds the
+  record. A copy of the store (GUI copy, restore from a backup) that also answers can send the node an answer that the
+  other store does not know: the node uses the first one it gets, the other store then never promotes. Old files
+  without the field stay readable.
 - A node that asks again with a new key (it lost its state) gets a new answer that replaces the open one in `next`; the
-  newer answer wins a merge with the file (`seq`).
+  newer answer wins a merge with the file (`seq`). `NodeState.next_since` keeps the time of the first unanswered request
+  while requests are replaced, so a node that never mixes shows its age. `NodeState.gen_since` is the time the generation became current (`cur.since` in the
+  file; None for a file from before the field). The node twin (`NodeSession`) replaces a request
+  after `ratchet.STALE_EPOCHS` (32768) epochs of sending, like the C library, and refuses the answer to the old one.
 - Walking the chain for a far message costs one HMAC per epoch, and anyone can send a frame with a far counter. The
   limits (`chainwalk`): a message may be ahead by at most `min(SENSEI_E2E_MAX_SKIP, 4096 + 1 epoch per second since the
   last verified one)` epochs, else `GapError` at once; walked keys are cached at checkpoints every 1024 epochs (at most

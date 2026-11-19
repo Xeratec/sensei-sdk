@@ -52,24 +52,31 @@ typedef enum {
   SENSEI_REASM_INCOMPLETE = 0,
   SENSEI_REASM_COMPLETE = 1,    /* message available, valid until the next feed */
   SENSEI_REASM_DUPLICATE = 2,   /* chunk already received (or message already delivered) */
-  SENSEI_REASM_ERR_FORMAT = -1, /* bad header or wrong chunk size */
+  SENSEI_REASM_ERR_FORMAT = -1, /* bad header, or a chunk size that differs from the others of the message */
   SENSEI_REASM_ERR_OVERFLOW = -2
 } sensei_reasm_status_t;
 
 /* Reassembly of one message at a time. A chunk of another message, or a chunk that arrives after
- * the timeout, drops the message in progress. */
+ * the timeout, drops the message in progress. `mtu` of sensei_reasm_init() is the largest chunk of the sender; the
+ * sender may use smaller ones (LoRa: the chunk size follows the data rate of the uplink, 51, 115 or 222 B): all chunks
+ * of a message but the last have the same size, which is learnt from the first one that arrives. A last chunk that
+ * comes first waits at the end of the buffer until then. */
 typedef struct {
   uint8_t *buf; /* caller storage for the message */
   size_t cap;
-  size_t chunk_data; /* data bytes of a full chunk (mtu - 3) */
-  uint32_t timeout_ms;
+  size_t chunk_data;   /* data bytes of a full chunk at most (mtu - 3) */
+  uint32_t timeout_ms; /* time without a chunk after which a message in progress is dropped */
+  uint32_t dup_ms;     /* time a finished message is remembered, so that a copy of it is not delivered again */
   /* state */
   bool active;
   bool done;
+  bool last_stashed; /* the last chunk came before any other one: it is in the top of buf, last_n bytes */
   uint8_t msg_id;
   uint8_t count;
   uint8_t received;
   uint8_t seen[32];
+  size_t csize; /* data bytes of every chunk but the last of this message, 0 until one has arrived */
+  size_t last_n;
   size_t total_len;
   uint32_t last_rx_ms;
   /* counters */
@@ -79,7 +86,12 @@ typedef struct {
   uint32_t n_errors;
 } sensei_reasm_t;
 
+/* dup_ms starts equal to timeout_ms. */
 void sensei_reasm_init(sensei_reasm_t *r, uint8_t *buf, size_t cap, size_t mtu, uint32_t timeout_ms);
+
+/* Change the two times (LoRa: the chunks of a message come one uplink apart, which the node can change at run time, but
+ * a finished message is remembered for a short time only). Takes effect at the next chunk. */
+void sensei_reasm_set_timeouts(sensei_reasm_t *r, uint32_t timeout_ms, uint32_t dup_ms);
 
 /* Feed one chunk received at `now_ms` (any monotonic millisecond clock, wraps at 2^32). On
  * COMPLETE,

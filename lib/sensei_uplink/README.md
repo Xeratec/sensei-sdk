@@ -72,8 +72,12 @@ The scheduler and the radios must keep two times below what the collector expect
 `dl_rx` joins the chunks (`msg_id | index | count | data`) that the collector or TTN sends, also for a message of one chunk.
 The app gives the buffer for the largest message (the node: a `Downlink` at its generated maximum inside the largest
 envelope, 337 B) and one receiver per radio. A 3-byte acknowledgement is dropped and counted (`n_acks`); a copy of a finished
-message inside the timeout gives no message and is not counted; a bad chunk and a message over the buffer give no message and
-count in `n_bad`.
+message gives no message and is not counted; a bad chunk and a message over the buffer give no message and count in `n_bad`.
+`mtu` of `dl_rx_init()` is the largest chunk of the sender. The sender may use smaller ones (LoRa: the chunk size follows the
+data rate of the uplink, 51, 115 or 222 B): all chunks of a message but the last must have the size of the first one that came
+(`sensei_link/frag.h`). The time without a chunk after which a message in progress is dropped and the time a finished message is
+remembered are two values (`dl_rx_set_timeouts()`, changeable at run time): LoRa chunks come one uplink interval apart, a finished
+message is remembered for a short time only (the 8 bit message id comes round).
 
 ## Configuration
 

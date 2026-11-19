@@ -19,6 +19,7 @@ zephyr_include_directories(${SENSEI_SECURE_DIR}/include)
 # <crypto/sensei_crypto.h> of the SDK crypto library
 zephyr_library_include_directories(${SENSEI_SECURE_DIR}/../../NRF/system)
 zephyr_compile_definitions(SENSEI_SECURE_BACKEND_ZEPHYR)
+zephyr_library_compile_definitions_ifdef(CONFIG_SENSEI_SECURE_RATCHET SENSEI_E2E_REKEY_STALE_EPOCHS=${CONFIG_SENSEI_SECURE_REKEY_STALE_EPOCHS}u)
 zephyr_library_sources_ifdef(CONFIG_SENSEI_SECURE_SETTINGS ${CMAKE_CURRENT_LIST_DIR}/sensei_e2e_settings.c)
 zephyr_library_sources_ifdef(CONFIG_SENSEI_SECURE_SETTINGS_SEAL_HUK ${CMAKE_CURRENT_LIST_DIR}/sensei_e2e_huk.c)
 zephyr_library_sources_ifdef(CONFIG_SENSEI_SECURE_SETTINGS_SEAL_TEST_KEY ${CMAKE_CURRENT_LIST_DIR}/sensei_e2e_testkey.c)

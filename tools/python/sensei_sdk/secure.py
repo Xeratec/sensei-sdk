@@ -372,6 +372,8 @@ class NodeSession:
     def rekey_request(self) -> RekeyRequest:
         """The request to send with the next uplink: made at the first call, the same one until it is answered (the
         node repeats it every few hours). A new one drops the downlink key of the generation before."""
+        if self.request_stale():
+            self.pending = None  # too many epochs sent since the request: ask again (the answer walk stays short)
         if self.pending is None:
             used = max(self.tx_counter, self.tx_reserved)
             up_base = ratchet.epoch(used) + 1
@@ -383,15 +385,27 @@ class NodeSession:
         _, pub, up_base = self.pending
         return RekeyRequest(self.gen + 1, pub, up_base)
 
+    def request_stale(self) -> bool:
+        """The open request is older than `ratchet.STALE_EPOCHS` epochs of sending (the C rule of request_stale): the
+        next `rekey_request` makes a new one, and `rekey_answer` refuses the answer to this one."""
+        if self.pending is None:
+            return False
+        ep = ratchet.epoch(self.tx_counter)
+        return ep > self.pending[2] and ep - self.pending[2] > ratchet.STALE_EPOCHS
+
     def rekey_answer(self, ans: RekeyAnswer) -> bool:
         """Take the answer. Ignored (False, nothing changes) if no request is open, the generation is not the next one,
-        the up_base is not the one asked, or the key has the wrong size; an all-zero DH result raises DhError. True when the
-        node switched to generation g+1: the state is replaced at once and the counter jumps above everything sent."""
+        the up_base is not the one asked, the key has the wrong size, or the request is stale (more than
+        `ratchet.STALE_EPOCHS` epochs sent since: -ETIMEDOUT in C; the next `rekey_request` is a new one); an all-zero DH
+        result raises DhError. True when the node switched to generation g+1: the state is replaced at once and the counter
+        jumps above everything sent."""
         if self.pending is None or ans.gen <= self.gen:
             return False
         priv, pub, up_base = self.pending
         if ans.gen != self.gen + 1 or ans.up_base != up_base or len(ans.pub) != ratchet.KEY_SIZE:
             return False
+        if self.request_stale():
+            return False  # -ETIMEDOUT; the node asks again with its next uplink
         mix = ratchet.mix_node(self.root, self.keys.key_id, ans.gen, up_base, priv, ans.pub)
         nxt = max(self.tx_counter + 1, up_base << ratchet.EPOCH_BITS)
         chain = ratchet.Chain(mix.ck, up_base)
@@ -492,6 +506,7 @@ _SEALED_AAD = b"sensei-keystore-sealed-v1"
 _ENV_KEY_FILE = "SENSEI_KEYSTORE_KEY_FILE"
 _ENV_REQUIRE_SEALED = "SENSEI_KEYSTORE_REQUIRE_SEALED"
 _ENV_RESPONDER = "SENSEI_REKEY_RESPONDER"
+_ENV_RESPONDER_ID_FILE = "SENSEI_REKEY_RESPONDER_ID_FILE"
 _ENV_MAX_SKIP = "SENSEI_E2E_MAX_SKIP"
 
 
@@ -543,6 +558,34 @@ def new_key_file(path: str | os.PathLike) -> None:
             p.unlink()
         raise
     _fsync_dir(p.parent)
+
+
+def load_responder_id(path: str | os.PathLike) -> str:
+    """The id of a responder process: 16 random hex characters in a small file of its own (mode 0600), made at the first
+    call. Keep the file in the config or state folder of the process that answers mixes, not in the key store folder: a
+    copy of the key store must not carry it (`KeyStore` records the id in the key store file, one responder per store)."""
+    p = Path(path)
+    try:
+        text = p.read_text().strip()
+    except FileNotFoundError:
+        text = ""
+    except OSError as exc:
+        raise SecureError(f"cannot read the responder id file {p}: {exc}") from exc
+    if text:
+        if not re.fullmatch(r"[0-9a-f]{16}", text):
+            raise SecureError(f"responder id file {p} is damaged (16 hex characters expected): delete it")
+        return text
+    p.parent.mkdir(parents = True, exist_ok = True)
+    new = secrets.token_hex(8)
+    try:
+        fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:  # another start made it in between
+        return load_responder_id(p)
+    with os.fdopen(fd, "w") as f:
+        f.write(new + "\n")
+        f.flush()
+        os.fsync(f.fileno())
+    return new
 
 
 def _file_key_id(key: bytes) -> bytes:
@@ -646,6 +689,7 @@ class _Cur:
     root: bytes | None
     k_down: bytes  # 16 B, downlink key of the generation
     up: ChainState | None
+    since: float = 0.0  # unix time this generation became the current one (0: not known, a file of before this field)
 
 
 @dataclass
@@ -747,6 +791,7 @@ def _node_to_json(n: _Node) -> dict:
         "prov": n.prov,
         "cur": {
             "gen": n.cur.gen,
+            "since": round(n.cur.since, 3),
             "root": _hex(n.cur.root),
             "k_down": n.cur.k_down.hex(),
             **_chain_to_json(n.cur.up),
@@ -795,7 +840,7 @@ def _node_from_json(n: dict) -> _Node:
         return node
     c = n["cur"]
     gen = int(c["gen"])
-    cur = _Cur(gen, _unhex(c.get("root"), 32), _unhex(c["k_down"], 16), None)
+    cur = _Cur(gen, _unhex(c.get("root"), 32), _unhex(c["k_down"], 16), None, float(c.get("since") or 0.0))
     if gen == 0:
         if k_up is None or k_down is None:
             raise ValueError("generation 0 without its keys")
@@ -857,6 +902,7 @@ class _File:
     retired: dict[int, _Retired]
     senders: dict[str, int]  # sender id by host fingerprint
     down: dict[int, int]  # last downlink counter by node id
+    responder: str | None = None  # id of the process that answered mixes last (None: not recorded)
 
 
 @functools.cache
@@ -995,8 +1041,9 @@ class NodeState:
     """The ratchet state of a node, for a GUI and for metrics."""
 
     gen: int
+    gen_since: float | None  # unix time this generation became the current one (None: not known)
     next_gen: int | None  # a mix that was answered and waits for its first uplink
-    next_since: float | None  # when it was answered (unix time)
+    next_since: float | None  # when it was answered; stays at the first unanswered request while a request is replaced
     prev_gen: int | None  # the previous generation is still accepted for late messages
     prev_ends: int | None  # ... below this counter
     up_idx: int | None  # chain index of the stored key (None in generation 0)
@@ -1054,6 +1101,8 @@ def _merge_ratchet(mine: _Node, theirs: _Node) -> None:
     else:
         if a.root is None and b.root is not None and a.gen == b.gen:
             a.root = b.root
+        if a.gen == b.gen and not a.since:
+            a.since = b.since
         if a.up is not None and b.up is not None and a.gen == b.gen:
             a.up.t = max(a.up.t, b.up.t)
     # `next`: the newer answer wins (a node that asked again with a new key), the file on a tie
@@ -1129,6 +1178,7 @@ class KeyStore:
         key_file: str | os.PathLike | None = None,
         require_sealed: bool | None = None,
         responder: bool | None = None,
+        responder_id: str | None = None,
         follow: str | os.PathLike | None = None,
         follow_key_file: str | os.PathLike | None = None,
         walker: Walker | None = None,
@@ -1147,6 +1197,13 @@ class KeyStore:
         if responder and follow:
             raise SecureError("a key store that answers mixes cannot follow another file")
         self.responder = bool(responder)  # answers the rekey requests of the nodes (`rekey_answer`)
+        if responder_id is None and self.responder and os.environ.get(_ENV_RESPONDER_ID_FILE):
+            responder_id = load_responder_id(os.environ[_ENV_RESPONDER_ID_FILE])
+        # Id of this responder process (`load_responder_id`); a responder writes it to the file with every save. None: the
+        # file is not marked.
+        self.responder_id = responder_id if self.responder else None
+        self._file_responder: str | None = None  # the id the file carries
+        self._seen_responder: str | None = None  # the other id that was warned about last
         self._clock = clock
         if walker is None:
             skip = os.environ.get(_ENV_MAX_SKIP, "").strip()
@@ -1217,6 +1274,7 @@ class KeyStore:
         store._retired = f.retired
         store._down = f.down
         store._senders = f.senders
+        store._note_responder(f.responder)
         if store._host in f.senders:
             store._sender = f.senders[store._host]
         elif f.senders:  # a copy, or another process: the sender must not be shared
@@ -1251,7 +1309,9 @@ class KeyStore:
         senders = {str(h): int(text, 16) for h, text in data.get("senders", {}).items()}
         if "sender" in data and not senders:  # one sender: the fingerprint of its host, if the file has one
             senders[data.get("host", self._host)] = int(data["sender"], 16)
-        return _File(bytes.fromhex(data["backend_public_key"]), nodes, retired, senders, down)
+        responder = data.get("responder")
+        return _File(bytes.fromhex(data["backend_public_key"]), nodes, retired, senders, down,
+                     str(responder) if responder else None)
 
     @contextlib.contextmanager
     def _file_lock(self):
@@ -1278,6 +1338,7 @@ class KeyStore:
         f = self._read_file()
         if self._pub is not None and f.pub != self._pub:
             raise SecureError("the key store file belongs to another backend key")
+        self._note_responder(f.responder)
         for node_id, n in f.down.items():
             self._down[node_id] = max(self._down.get(node_id, 0), n)
         # processes with this fingerprint that share the file share its sender (counters are merged under the lock)
@@ -1318,6 +1379,21 @@ class KeyStore:
                 mine.prov = max(mine.prov, theirs.prov)
                 mine.up = _merge_window(mine.up, theirs.up)
 
+    def _note_responder(self, recorded: str | None) -> None:
+        """The file names the process that answers mixes. A responder that finds another id warns (once a minute), counts
+        it (`stats["responder_conflict"]`, the collector exports it) and goes on answering: two responders on one store
+        can each lose the answer the node used."""
+        self._file_responder = recorded
+        if not (self.responder and self.responder_id and recorded and recorded != self.responder_id):
+            self._seen_responder = None
+            return
+        if recorded != self._seen_responder:
+            self._seen_responder = recorded
+            self.stats["responder_conflict"] += 1
+        self._warn("responder",
+                   "key store %s records another responder (%s, this one is %s): one responder per key store",
+                   self.path, recorded, self.responder_id)
+
     def save(self) -> None:
         """Write the file. Under a file lock, the file is read first and merged, so that a node another process
         added or a counter it advanced is not lost; the file is synced before it replaces the old one."""
@@ -1342,6 +1418,10 @@ class KeyStore:
                     _node_text(i): n for i, n in sorted(self._down.items())
                 },
             }
+            responder = self.responder_id or self._file_responder  # a responder takes the record, others keep it
+            if responder:
+                data["responder"] = responder
+                self._file_responder = responder
             inner = json.dumps(data, indent = 1)
             _write_atomic(self.path, _seal_text(inner.encode(), self._key) if self._key is not None else inner)
             self._dirty = False
@@ -1471,6 +1551,7 @@ class KeyStore:
                     self._down[node_id] = max(self._down.get(node_id, 0), back.down_ctr)
             self.walker.forget_node(node_id)
             node = _fresh_node(node_pub, keys, window)
+            node.cur.since = self._clock()
             node.prov = prov
             self._nodes[node_id] = node
             self._by_key_id[keys.key_id] = node_id
@@ -1574,6 +1655,7 @@ class KeyStore:
             up = n.cur.up
             return NodeState(
                 gen = n.cur.gen,
+                gen_since = n.cur.since or None,
                 next_gen = None if n.next is None else n.next.gen,
                 next_since = None if n.next is None else n.next.up.t,
                 prev_gen = None if n.prev is None else n.prev.gen,
@@ -1642,9 +1724,10 @@ class KeyStore:
                 del e_c_priv  # not kept anywhere
             # a request that replaces the open answer (the node dropped its state and asked again) makes a newer one, which
             # wins a merge with the file
+            # `t` stays at the first unanswered request when a request is replaced: a node that never mixes keeps its age
             node.next = _Next(req.gen, req.pub, e_c_pub, mix.root, mix.k_down,
-                              ChainState(req.gen, req.up_base, 0, mix.ck, self._clock()),
-                              1 if nxt is None else nxt.seq + 1)
+                              ChainState(req.gen, req.up_base, 0, mix.ck,
+                                         self._clock() if nxt is None else nxt.up.t), 1 if nxt is None else nxt.seq + 1)
             try:
                 self._touch(now = True)  # fsync before the answer leaves
             except BaseException:
@@ -1728,14 +1811,14 @@ class KeyStore:
         if theirs.prov < mine.prov:
             return
         if theirs.prov > mine.prov:
-            mine.cur = _Cur(b.gen, None, b.k_down, None if b.up is None else b.up.copy())
+            mine.cur = _Cur(b.gen, None, b.k_down, None if b.up is None else b.up.copy(), b.since)
             mine.prev = None if theirs.prev is None else theirs.prev.copy()
             mine.next = None
             mine.k_up, mine.k_down = theirs.k_up, theirs.k_down
             mine.prov = theirs.prov
         elif _cur_pos(b) > _cur_pos(a):
             up = None if b.up is None else b.up.copy()
-            mine.cur = _Cur(b.gen, None, b.k_down, up)
+            mine.cur = _Cur(b.gen, None, b.k_down, up, b.since)
             if b.gen > a.gen:
                 mine.prev = None if theirs.prev is None else theirs.prev.copy()
         elif a.up is not None and b.up is not None and a.gen == b.gen:
@@ -2001,7 +2084,7 @@ def _promote(store: KeyStore, node_id: int, node: _Node, sel: _Selection, h: Hea
                                                                    ratchet.epoch(node.up.highest) - 1 - chain.up_base),
              now)
     node.prev = prev
-    node.cur = _Cur(nxt.gen, nxt.root, nxt.k_down, chain)
+    node.cur = _Cur(nxt.gen, nxt.root, nxt.k_down, chain, now)
     node.next = None
     store.stats["promoted"] += 1
     log.info("node %s: generation %d is in use", _node_text(node_id), nxt.gen)

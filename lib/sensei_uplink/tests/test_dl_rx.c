@@ -172,7 +172,60 @@ static void test_duplicates_and_bad(void) {
   }
 }
 
+/* LoRa at DR0: the answer of a key mix is two chunks of 51 B, and TTN sends one per uplink frame, so the second one
+ * comes one uplink interval after the first (3600 s to 86400 s). The receiver asks for the time without a chunk
+ * (assembly) and remembers a finished message for a shorter time (copies), both changed at run time. */
+static void test_chunks_one_uplink_apart(void) {
+  static const uint32_t gaps_s[] = {3600, 86400};
+  uint8_t m[82];
+  uint8_t c0[51], c1[51];
+  const uint8_t *msg = NULL;
+  size_t len = 0;
+  size_t n0, n1;
+
+  for (size_t i = 0; i < sizeof(m); i++) {
+    m[i] = (uint8_t)(i * 3 + 9);
+  }
+  n0 = sensei_frag_chunk(70, m, sizeof(m), 51, 0, c0, sizeof(c0));
+  n1 = sensei_frag_chunk(70, m, sizeof(m), 51, 1, c1, sizeof(c1));
+  CHECK(n0 == 51 && n1 == 3 + (sizeof(m) - 48));
+
+  for (size_t g = 0; g < 2; g++) {
+    uint32_t gap = gaps_s[g] * 1000u;
+    uint32_t assemble = 2u * gap + 700000u; /* the node: 2 x uplink_s + 700 s */
+    uint32_t t = 5000;
+
+    /* the receiver is built for 222 B chunks, the sender used 51 */
+    dl_rx_init(&rx, rxbuf, RX_CAP, 222, 700000u);
+    dl_rx_set_timeouts(&rx, assemble, 700000u);
+    CHECK(!dl_rx_feed(&rx, c0, n0, t, &msg, &len) && rx.n_bad == 0);
+    t += gap;
+    CHECK(dl_rx_feed(&rx, c1, n1, t, &msg, &len));
+    CHECK(len == sizeof(m) && memcmp(msg, m, len) == 0 && rx.n_message == 1);
+    /* a copy of the last chunk soon after: not delivered again */
+    CHECK(!dl_rx_feed(&rx, c1, n1, t + 600000u, &msg, &len) && rx.n_message == 1);
+    /* the message is forgotten after the remember time: the same bytes are a new message (no uplink interval) */
+    CHECK(!dl_rx_feed(&rx, c0, n0, t + 600000u + 700001u, &msg, &len));
+    CHECK(dl_rx_feed(&rx, c1, n1, t + 600000u + 700001u + gap, &msg, &len) && rx.n_message == 2);
+  }
+
+  /* the fixed 700 s of before: the second chunk, one hour later, finds no first one */
+  dl_rx_init(&rx, rxbuf, RX_CAP, 222, 700000u);
+  CHECK(!dl_rx_feed(&rx, c0, n0, 0, &msg, &len));
+  CHECK(!dl_rx_feed(&rx, c1, n1, 3600u * 1000u, &msg, &len) && rx.n_message == 0 && rx.reasm.n_timeout == 1);
+
+  /* after the assembly time the first chunk is dropped: the second one alone does not make a message */
+  dl_rx_init(&rx, rxbuf, RX_CAP, 222, 700000u);
+  dl_rx_set_timeouts(&rx, 2u * 3600u * 1000u + 700000u, 700000u);
+  CHECK(!dl_rx_feed(&rx, c0, n0, 0, &msg, &len));
+  CHECK(!dl_rx_feed(&rx, c1, n1, 2u * 3600u * 1000u + 700001u, &msg, &len) && rx.n_message == 0);
+  CHECK(rx.reasm.n_timeout == 1);
+  /* ... and the first one again completes it */
+  CHECK(dl_rx_feed(&rx, c0, n0, 2u * 3600u * 1000u + 700002u, &msg, &len) && rx.n_message == 1);
+}
+
 int main(void) {
+  test_chunks_one_uplink_apart();
   test_vectors();
   test_acks();
   test_largest_message();

@@ -76,8 +76,14 @@ static int make_pair(struct sensei_e2e *e) {
   if (err) {
     return -EIO;
   }
+  err = e->ops->save_priv ? e->ops->save_priv(e->user, e->nv.priv) : 0;
+  if (err) { /* a key that is not stored is not kept */
+    memset(e->nv.priv, 0, sizeof(e->nv.priv));
+    memset(e->node_pub, 0, sizeof(e->node_pub));
+    return err;
+  }
   e->nv.have_priv = true;
-  return e->ops->save_priv ? e->ops->save_priv(e->user, e->nv.priv) : 0;
+  return 0;
 }
 
 static int read_pub(struct sensei_e2e *e) {
@@ -132,11 +138,21 @@ int sensei_e2e_init(struct sensei_e2e *e, const struct sensei_secure_crypto *c, 
   e->user = user;
   e->ctr_step = ctr_step ? ctr_step : 64;
   e->nv = *nv;
+  if (nv->key_unreadable) {
+    memset(e->nv.priv, 0, sizeof(e->nv.priv));
+    e->nv.have_priv = false;
+    return -EACCES;
+  }
   if (!e->nv.have_priv) {
     err = make_pair(e);
   } else {
     err = read_pub(e);
-    if (err) { /* a damaged key: start over, the collector has to be provisioned again */
+    if (err && e->nv.priv_sealed) { /* a sealed key is not damaged: a crypto error, keep the record, e2e stays off */
+      memset(e->nv.priv, 0, sizeof(e->nv.priv));
+      e->nv.have_priv = false;
+      return -EIO;
+    }
+    if (err) { /* a damaged plain key: start over, the collector has to be provisioned again */
       e->nv.have_backend = false;
       err = make_pair(e);
     }

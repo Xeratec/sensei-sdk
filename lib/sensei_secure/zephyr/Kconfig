@@ -26,6 +26,42 @@ config SENSEI_SECURE_SETTINGS_PREFIX
 	default "sensei_comm"
 	depends on SENSEI_SECURE_SETTINGS
 	help
-	  The keys are <prefix>/e2e_priv, e2e_bpub, e2e_tx, e2e_rxs and e2e_rxf. The default is the prefix
+	  The keys are <prefix>/e2e_priv (e2e_privx when sealed), e2e_bpub, e2e_tx, e2e_rxs and e2e_rxf. The default is the prefix
 	  of the SENSEI IEQ node: a node that updates keeps its keys. Changing it makes stored keys
 	  unreachable (a new key pair is made, the collector has to be provisioned again).
+
+config SENSEI_SECURE_SETTINGS_SEAL
+	bool "Seal the secret records of the key store (AES-128-GCM)"
+	depends on SENSEI_SECURE_SETTINGS
+	help
+	  The private key is stored as e2e_privx, a sealed record (sensei_e2e_seal.h: version, nonce, AES-128-GCM
+	  ciphertext, tag), not as plain e2e_priv. A plain e2e_priv of an earlier version is migrated at the first
+	  start: sealed, read back and checked, then deleted. The key comes from the function
+	  sensei_e2e_settings_seal_key() (sensei_e2e_settings.h): one of the providers below, or the application's
+	  own. If the key is not available, or a sealed record does not open, the key store does not start
+	  (sensei_e2e_init() fails) and no new key pair is made over the old one. The name e2e_rat is reserved for
+	  the ratchet state of a later version.
+
+if SENSEI_SECURE_SETTINGS_SEAL
+
+config SENSEI_SECURE_SETTINGS_SEAL_HUK
+	bool "Key from the hardware unique key (CryptoCell-312 and KMU of the nRF5340)"
+	depends on HAS_HW_NRF_CC312 && HW_UNIQUE_KEY_SUPPORTED && NRF_CC3XX_PLATFORM && !BUILD_WITH_TFM
+	depends on !SENSEI_SECURE_SETTINGS_SEAL_TEST_KEY
+	select HW_UNIQUE_KEY
+	select HW_UNIQUE_KEY_RANDOM
+	select MPU_ALLOW_FLASH_WRITE
+	help
+	  zephyr/sensei_e2e_huk.c: at the first use a random hardware unique key is written to the KMU (once, until
+	  the chip is erased; the CPU cannot read it), and the sealing key is derived from it with the label
+	  "SENSEI-E2E-AT-REST-v1". A flash image copied to another chip does not open, and stale settings pages
+	  are unreadable without code execution on the chip. The debug port must still be locked (APPROTECT).
+	  Needs NRF_CC3XX_PLATFORM (the application enables it; the CryptoCell also provides the random numbers).
+
+config SENSEI_SECURE_SETTINGS_SEAL_TEST_KEY
+	bool "Fixed key for tests (native_sim)"
+	help
+	  zephyr/sensei_e2e_testkey.c: a fixed key that a test can change or make fail. Never for a product: the
+	  key is in the image.
+
+endif # SENSEI_SECURE_SETTINGS_SEAL

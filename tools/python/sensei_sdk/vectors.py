@@ -7,7 +7,8 @@
 
 Writes, in the SDK:
     lib/sensei_link/tests/generated/vectors.h     CRC, COBS, stream frames, SPI frames, fragments, acknowledgements
-    lib/sensei_secure/tests/generated/vectors.h   keys and sealed envelopes (fixed test keys, never used on a device)
+    lib/sensei_secure/tests/generated/vectors.h   keys, sealed envelopes and sealed settings records (fixed test keys,
+                                                  never used on a device)
     lib/sensei_diag/tests/generated/vectors.h     packed fault records, reset and reason names
 
     python -m sensei_sdk.vectors             write the headers
@@ -115,6 +116,19 @@ def secure_cases() -> list[tuple[int, int | None, int, int, bytes]]:
         (secure.KIND_DOWNLINK, 0xFFFFFFFFFFFFFFFF, 0xFFFFFFFF, 5, pattern(12, 4)),
         (secure.KIND_SETTINGS, None, 0x0A0B0C0D, 9, pattern(77, 5)),
         (secure.KIND_DOWNLINK, None, 0x11223344, 1, pattern(30, 6)),  # same counter as above, other sender
+    ]
+
+
+SEAL_KEY = bytes(range(0x90, 0xA0))  # fixed test key of the sealed settings records, never used on a device
+SEAL_NONCE = bytes(range(0xB0, 0xBC))
+
+
+def seal_cases() -> list[tuple[str, bytes, bytes]]:
+    """(setting name, nonce, plaintext) of the sealed settings records (keys at rest). Vector 7 of the design."""
+    return [
+        ("e2e_privx", SEAL_NONCE, bytes(range(1, 33))),  # the node private key of the test keys above
+        ("e2e_rat", bytes(range(0xC0, 0xCC)), pattern(152, 9)),  # the name reserved for the ratchet state
+        ("e2e_privx", bytes(12), b""),  # empty value, all-zero nonce
     ]
 
 
@@ -243,6 +257,20 @@ def render_secure() -> str:
                     f"vec_sec_plain_{i}, {len(plain)}, vec_sec_sealed_{i}, {len(sealed)}}}")
     parts.append("static const vec_sec_t vec_sec[] = {\n" + ",\n".join(rows) + ",\n};\n")
     parts.append(f"#define VEC_SEC_COUNT {len(rows)}\n")
+    # sealed settings records (keys at rest): AES-128-GCM under a fixed key, the setting name is in the associated data
+    parts.append(array("vec_seal_key", SEAL_KEY))
+    parts.append("typedef struct {\n    const char *name;\n    const uint8_t *nonce;\n    const uint8_t *plain;\n"
+                 "    size_t plain_len;\n    const uint8_t *record;\n    size_t record_len;\n} vec_seal_t;\n")
+    rows = []
+    for i, (name, nonce, plain) in enumerate(seal_cases()):
+        record = secure.seal_record(SEAL_KEY, name, plain, nonce)
+        parts.append(array(f"vec_seal_nonce_{i}", nonce))
+        parts.append(array(f"vec_seal_plain_{i}", plain))
+        parts.append(array(f"vec_seal_record_{i}", record))
+        rows.append(f'    {{"{name}", vec_seal_nonce_{i}, vec_seal_plain_{i}, {len(plain)}, vec_seal_record_{i}, '
+                    f"{len(record)}}}")
+    parts.append("static const vec_seal_t vec_seal[] = {\n" + ",\n".join(rows) + ",\n};\n")
+    parts.append(f"#define VEC_SEAL_COUNT {len(rows)}\n")
     parts.append("#endif\n")
     return "\n".join(parts)
 

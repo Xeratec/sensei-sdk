@@ -1,8 +1,15 @@
 # SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
 # SPDX-License-Identifier: Apache-2.0
 ---
+common:
+  platform_allow:
+    - native_sim/native/64
+  tags: sensei secure settings
 tests:
-  sensei.secure.settings:
-    platform_allow:
-      - native_sim/native/64
-    tags: sensei secure settings
+  sensei.secure.settings: {}
+  # The private key sealed (AES-128-GCM) under the fixed key of the test provider: sealed names, a record that is
+  # changed or does not belong, a provider that fails, the migration of the plain key.
+  sensei.secure.settings.seal:
+    extra_configs:
+      - CONFIG_SENSEI_SECURE_SETTINGS_SEAL=y
+      - CONFIG_SENSEI_SECURE_SETTINGS_SEAL_TEST_KEY=y

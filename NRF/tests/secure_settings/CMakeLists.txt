@@ -14,3 +14,5 @@ project(sensei_secure_settings_test)
 
 # The key store of lib/sensei_secure on the settings subsystem (flash simulator of native_sim).
 target_sources(app PRIVATE src/main.c)
+# The vectors of the sealed settings records (vector 7), the same as in the host test of lib/sensei_secure.
+target_include_directories(app PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../../../lib/sensei_secure/tests/generated)

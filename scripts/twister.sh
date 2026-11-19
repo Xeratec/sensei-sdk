@@ -26,6 +26,7 @@
 #   TWISTER_PLATFORM      platforms, separated by spaces (default: native_sim/native/64 qemu_cortex_m3 mps2/an521/cpu0; with --host
 #                         or --coverage native_sim/native/64 only)
 #   TWISTER_IMAGE         Docker image (default sensei-twister:ncs-3.4.1)
+#   TWISTER_DOCKER_ARGS   more arguments for docker run, for example "--memory=6g --cpus=4" (Twister's own jobs: -- -j4)
 #   SENSEI_NRF_IMAGE      its base image, the toolchain (default sensei-nrf:ncs-3.4.1; scripts/docker/build.sh)
 #
 # Examples:
@@ -111,7 +112,8 @@ rc=0
 /workspace/zephyr/scripts/twister \"\$@\" || rc=\$?
 if [ \"\$coverage\" = 1 ] && [ -f /out/twister-out/coverage.json ]; then cov_report /sdk /out/twister-out || rc=\$?; fi
 exit \$rc"
-exec docker run --rm --user "$(id -u):$(id -g)" -e HOME=/out \
+# shellcheck disable=SC2086 # TWISTER_DOCKER_ARGS is a list of words
+exec docker run --rm ${TWISTER_DOCKER_ARGS:-} --user "$(id -u):$(id -g)" -e HOME=/out \
   -e ZEPHYR_BASE=/workspace/zephyr -e ZEPHYR_TOOLCHAIN_VARIANT=zephyr -e PYTHONDONTWRITEBYTECODE=1 \
   -v "$ws:/workspace:ro" -v "$sdk:/sdk:ro" -v "$out:/out" -w /out \
   "$image" bash -c "$in_container" twister "${TW[@]}" "$@"

@@ -16,20 +16,29 @@ sender by itself (`KeyStore.sender_changed`). `python -m sensei_sdk.secure new-s
 The backend (collector, GUI) holds a P-256 key pair. At commissioning each node sends its public key
 and receives the backend's. Both derive the same two AES-128-GCM keys with ECDH and HKDF-SHA256, so
 gateways and the network server only ever see ciphertext.
+
+Keys at rest. The node seals its secret settings records with a key from its hardware unique key (`seal_record`,
+the mirror of lib/sensei_secure/include/sensei_e2e_seal.h). The key store file can be sealed as a whole with a 32 byte
+key file kept outside the key store folder and its backups (`SENSEI_KEYSTORE_KEY_FILE`, see `KeyStore`):
+`python -m sensei_sdk.secure seal-file | unseal-file | rotate-file-key`.
 """
 
 from __future__ import annotations
 
 import argparse
+import base64
 import contextlib
 import functools
 import hashlib
+import hmac
 import json
 import logging
 import os
 import re
 import secrets
+import shlex
 import socket
+import stat
 import struct
 import subprocess
 import sys
@@ -301,6 +310,191 @@ class NodeSession:
         return h.kind, plain
 
 
+# ---- sealed settings records (node, keys at rest) ----
+
+SEAL_VERSION = 1
+SEAL_NONCE_SIZE = 12
+SEAL_OVERHEAD = 1 + SEAL_NONCE_SIZE + TAG_SIZE  # 29 B more than the plain value
+SEAL_NAME_MAX = 32
+_SEAL_AAD = b"sensei-e2e/"
+
+
+def _seal_aad(name: str) -> bytes:
+    raw = name.encode()
+    if not raw or len(raw) > SEAL_NAME_MAX:
+        raise SecureError("bad setting name")
+    return _SEAL_AAD + raw + bytes([SEAL_VERSION])
+
+
+def seal_record(key: bytes, name: str, plaintext: bytes, nonce: bytes | None = None) -> bytes:
+    """A sealed settings record as the node stores it: u8 version (1) | nonce[12] | AES-128-GCM ciphertext | tag[16].
+    Associated data: "sensei-e2e/" || setting name || version, so a record does not open under another name. `nonce`
+    is for test vectors; leave it out to take 12 random bytes (a nonce must never repeat under one key)."""
+    if len(key) != 16:
+        raise SecureError("the sealing key is 16 bytes")
+    nonce = secrets.token_bytes(SEAL_NONCE_SIZE) if nonce is None else nonce
+    if len(nonce) != SEAL_NONCE_SIZE:
+        raise SecureError("the nonce is 12 bytes")
+    return bytes([SEAL_VERSION]) + nonce + AESGCM(key).encrypt(nonce, plaintext, _seal_aad(name))
+
+
+def open_record(key: bytes, name: str, record: bytes) -> bytes:
+    """Open a sealed settings record of the node (see `seal_record`). Raises SecureError for a short record, an unknown
+    version, a wrong key, a wrong name or a changed record."""
+    if len(key) != 16:
+        raise SecureError("the sealing key is 16 bytes")
+    if len(record) < SEAL_OVERHEAD or record[0] != SEAL_VERSION:
+        raise SecureError("not a sealed record of this version")
+    try:
+        return AESGCM(key).decrypt(record[1:1 + SEAL_NONCE_SIZE], record[1 + SEAL_NONCE_SIZE:], _seal_aad(name))
+    except InvalidTag as exc:
+        raise SecureError("sealed record does not open (wrong key or name, or changed)") from exc
+
+
+# ---- key store file at rest ----
+
+SEALED_FORMAT = "sensei-keystore-sealed"
+SEALED_VERSION = 1
+KEY_FILE_SIZE = 32
+_KEY_ID_LABEL = b"sensei-keystore-key-id"
+_SEALED_AAD = b"sensei-keystore-sealed-v1"
+_ENV_KEY_FILE = "SENSEI_KEYSTORE_KEY_FILE"
+_ENV_REQUIRE_SEALED = "SENSEI_KEYSTORE_REQUIRE_SEALED"
+
+
+def check_key_file_mode(path: str | os.PathLike) -> None:
+    """Refuse a key file that the group or others can access (mode & 077), or that is not a plain file. Not checked on
+    Windows."""
+    p = Path(path)
+    try:
+        mode = p.stat().st_mode
+    except OSError as exc:
+        raise SecureError(f"cannot read the key store key file {p}: {exc}") from exc
+    if not stat.S_ISREG(mode):
+        raise SecureError(f"key store key file {p} is not a file")
+    if os.name != "nt" and mode & 0o077:
+        raise SecureError(f"key store key file {p} can be read by other users (mode {mode & 0o777:04o}) and holds the "
+                          f"key of the key store: chmod 400 {shlex.quote(str(p))}")
+
+
+def load_key_file(path: str | os.PathLike, check_mode: bool = True) -> bytes:
+    """Read the 32 byte key file of a sealed key store (raw bytes, `new_key_file` makes one). A file that the group or
+    others can access is refused (`check_mode`, see `check_key_file_mode`)."""
+    p = Path(path)
+    try:
+        key = p.read_bytes()
+    except OSError as exc:
+        raise SecureError(f"cannot read the key store key file {p}: {exc}") from exc
+    if len(key) != KEY_FILE_SIZE:  # before the mode: a file of the wrong kind says so first
+        raise SecureError(f"key store key file {p} must be exactly {KEY_FILE_SIZE} raw bytes (it has {len(key)}): "
+                          "make one with python -m sensei_sdk.secure new-key-file <file>")
+    if check_mode:
+        check_key_file_mode(p)
+    return key
+
+
+def new_key_file(path: str | os.PathLike) -> None:
+    """Write 32 random bytes to a new file (mode 0400), sync the file and its folder, so that a power loss cannot leave
+    an empty key file next to a sealed key store. Refuses to overwrite a key. A file that could not be written is
+    removed."""
+    p = Path(path)
+    p.parent.mkdir(parents = True, exist_ok = True)
+    fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o400)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(secrets.token_bytes(KEY_FILE_SIZE))
+            f.flush()
+            os.fsync(f.fileno())
+    except BaseException:
+        with contextlib.suppress(OSError):
+            p.unlink()
+        raise
+    _fsync_dir(p.parent)
+
+
+def _file_key_id(key: bytes) -> bytes:
+    return hmac.new(key, _KEY_ID_LABEL, hashlib.sha256).digest()[:8]
+
+
+def _seal_text(inner: bytes, key: bytes) -> str:
+    """The sealed key store file: a JSON wrapper around the inner key store JSON, AES-256-GCM under the key file with a
+    new nonce every time. Associated data: "sensei-keystore-sealed-v1" || key id (8 raw bytes)."""
+    key_id = _file_key_id(key)
+    nonce = secrets.token_bytes(12)
+    ct = AESGCM(key).encrypt(nonce, inner, _SEALED_AAD + key_id)
+    return json.dumps(
+        {
+            "format": SEALED_FORMAT,
+            "version": SEALED_VERSION,
+            "key_id": key_id.hex(),
+            "nonce": nonce.hex(),
+            "ct": base64.b64encode(ct).decode(),
+        },
+        indent = 1)
+
+
+def _unseal_text(outer: dict, key: bytes | None, where: object) -> bytes:
+    """The inner JSON bytes of a sealed wrapper (already parsed)."""
+    if outer.get("version") != SEALED_VERSION:
+        raise SecureError(f"unsupported sealed key store version {outer.get('version')}")
+    if key is None:
+        raise SecureError(f"key store {where} is sealed: give the key file ({_ENV_KEY_FILE})")
+    key_id = bytes.fromhex(outer["key_id"])
+    if key_id != _file_key_id(key):
+        raise SecureError(f"the key file does not belong to key store {where} (key id {_file_key_id(key).hex()}, "
+                          f"the file wants {key_id.hex()})")
+    try:
+        return AESGCM(key).decrypt(bytes.fromhex(outer["nonce"]), base64.b64decode(outer["ct"], validate = True),
+                                   _SEALED_AAD + key_id)
+    except InvalidTag as exc:
+        raise SecureError(f"key store {where} failed authentication: it was changed or is damaged") from exc
+
+
+def _open_text(text: str, key: bytes | None, where: object, require_sealed: bool = False) -> tuple[dict, bool]:
+    """Parse the text of a key store file, sealed or plain: (the inner JSON as a dict, was it sealed)."""
+    outer = json.loads(text)
+    if isinstance(outer, dict) and outer.get("format") == SEALED_FORMAT:
+        return json.loads(_unseal_text(outer, key, where)), True
+    if require_sealed:
+        raise SecureError(f"key store {where} is not sealed but {_ENV_REQUIRE_SEALED}=1: "
+                          "python -m sensei_sdk.secure seal-file <file> --key-file <key file>")
+    return outer, False
+
+
+def _write_atomic(path: Path, text: str) -> None:
+    """Temp file in the same folder, fsync, mode 0600, rename, fsync of the folder: the old file stays until the new one is
+    on disk."""
+    path.parent.mkdir(parents = True, exist_ok = True)
+    fd, tmp = tempfile.mkstemp(dir = path.parent, prefix = path.name + ".")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())  # the counters must survive a power loss
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+    _fsync_dir(path.parent)
+
+
+@contextlib.contextmanager
+def _flock(path: Path):
+    """Exclusive lock on `<file>.lock` (the lock stays plain). Without fcntl (Windows) there is none."""
+    path.parent.mkdir(parents = True, exist_ok = True)
+    if fcntl is None:
+        yield
+        return
+    with open(path.with_name(path.name + ".lock"), "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+
 # ---- key store ----
 
 
@@ -418,6 +612,13 @@ class KeyStore:
     on the host and the collector in Docker) used the file in between. A store loaded with a fingerprint the file
     does not know yet takes a new sender (`sender_changed` is then true once; the GUI shows a warning). The node has
     room for 8 senders: keep the fingerprint stable. `new_sender` or the command line take a new one by hand.
+
+    At rest the file can be sealed as a whole (AES-256-GCM) with a 32 byte key file, `key_file` or the environment
+    variable SENSEI_KEYSTORE_KEY_FILE. Keep the key file outside the key store folder and its backups (a Docker secret):
+    a stolen file or backup is then useless. With a key file every save writes a sealed file (a plain file is read and
+    sealed at the next save), with a new nonce each time; a sealed file needs the key file, and a wrong key is named as
+    such. `require_sealed` (SENSEI_KEYSTORE_REQUIRE_SEALED=1) also refuses a plain file and a missing key file. The lock
+    file stays plain. A key file that is configured but missing is an error, never a silent fall back to a plain file.
     """
 
     def __init__(
@@ -425,8 +626,19 @@ class KeyStore:
         path: str | os.PathLike | None = None,
         private_pem: str | os.PathLike | None = None,
         autosave_s: float = 5.0,
+        key_file: str | os.PathLike | None = None,
+        require_sealed: bool | None = None,
     ) -> None:
         self.path = Path(path) if path else None
+        key_file = key_file or os.environ.get(_ENV_KEY_FILE) or None
+        if require_sealed is None:
+            require_sealed = os.environ.get(_ENV_REQUIRE_SEALED, "").strip() == "1"
+        self._key: bytes | None = load_key_file(key_file) if key_file else None
+        self._require_sealed = require_sealed
+        if require_sealed and self._key is None:
+            raise SecureError(f"{_ENV_REQUIRE_SEALED}=1 needs a key file ({_ENV_KEY_FILE})")
+        self.file_was_plain = False  # the file read last was not sealed (a key store without a key file: warn)
+        self._warned_plain = False
         self.autosave_s = autosave_s
         self._lock = threading.RLock()
         self._nodes: dict[int, _Node] = {}
@@ -455,6 +667,11 @@ class KeyStore:
             self._priv = key.private_numbers().private_value.to_bytes(32, "big")
             self._pub = _public_bytes(key)
 
+    @property
+    def sealed(self) -> bool:
+        """True if this store writes its file sealed (it has a key file)."""
+        return self._key is not None
+
     @classmethod
     def load(cls, path: str | os.PathLike, private_pem: str | os.PathLike | None = None, **kw) -> KeyStore:
         """Read the file; a missing file gives an empty store that save() creates."""
@@ -479,10 +696,15 @@ class KeyStore:
         return store
 
     def _read_file(self) -> _File:
-        """Parse the file. Version 1 (no sender, counters inside the nodes) is read as well."""
+        """Parse the file, sealed or plain. Version 1 (no sender, counters inside the nodes) is read as well."""
         assert self.path is not None
         try:
-            data = json.loads(self.path.read_text())
+            data, was_sealed = _open_text(self.path.read_text(), self._key, self.path, self._require_sealed)
+            self.file_was_plain = not was_sealed
+            if not was_sealed and self._key is None and not self._warned_plain:
+                self._warned_plain = True
+                log.warning("key store %s is not sealed: its keys are readable by anyone who gets the file (%s)",
+                            self.path, _ENV_KEY_FILE)
             version = data.get("version")
             if version not in (1, 2):
                 raise SecureError(f"unsupported key store version {version}")
@@ -509,15 +731,12 @@ class KeyStore:
             finally:
                 self._lock_depth -= 1
             return
-        self.path.parent.mkdir(parents = True, exist_ok = True)
-        with open(self.path.with_name(self.path.name + ".lock"), "a") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+        with _flock(self.path):
             self._lock_depth = 1
             try:
                 yield
             finally:
                 self._lock_depth = 0
-                fcntl.flock(lock, fcntl.LOCK_UN)
 
     def _merge_from_disk(self) -> None:
         """Take over what another process wrote to the file: nodes it added, higher counters. Never lowers a
@@ -580,20 +799,8 @@ class KeyStore:
                     _node_text(i): n for i, n in sorted(self._down.items())
                 },
             }
-            self.path.parent.mkdir(parents = True, exist_ok = True)
-            fd, tmp = tempfile.mkstemp(dir = self.path.parent, prefix = self.path.name + ".")
-            try:
-                with os.fdopen(fd, "w") as f:
-                    json.dump(data, f, indent = 1)
-                    f.flush()
-                    os.fsync(f.fileno())  # the counters must survive a power loss
-                os.chmod(tmp, 0o600)
-                os.replace(tmp, self.path)
-            except BaseException:
-                with contextlib.suppress(OSError):
-                    os.unlink(tmp)
-                raise
-            _fsync_dir(self.path.parent)
+            inner = json.dumps(data, indent = 1)
+            _write_atomic(self.path, _seal_text(inner.encode(), self._key) if self._key is not None else inner)
             self._dirty = False
             self._added.clear()
             self._removed.clear()
@@ -601,7 +808,8 @@ class KeyStore:
 
     def _touch(self, now: bool = False) -> None:
         """Mark the store changed and save it if `now`, or if the last save is old. The save of a replay counter
-        (`now` false) may fail without losing the message that moved it: it is tried again later. A counter that
+        (`now` false) may fail (disk error, or a key file or key store file that changed under the process) without losing
+        the message that moved it: it is tried again later. A counter that
         must not be reused (`now` true) raises."""
         self._dirty = True
         if self.path is None:
@@ -611,7 +819,10 @@ class KeyStore:
         elif time.monotonic() - self._last_save >= self.autosave_s:
             try:
                 self.save()
-            except OSError as exc:
+            except (OSError, SecureError) as exc:
+                # A SecureError here: the file or its key changed under the running process (rotate-file-key,
+                # seal-file). The counter is marked in RAM already, so the message is still good: it is returned, the
+                # save is tried again later and the key store keeps working in RAM.
                 self._last_save = time.monotonic()  # do not retry on every message
                 log.warning("key store %s not saved, will retry: %s", self.path, exc)
 
@@ -722,6 +933,56 @@ def backend_keygen(private_pem_path: str | os.PathLike) -> bytes:
     return _public_bytes(key)
 
 
+def seal_file(path: str | os.PathLike, key_file: str | os.PathLike, create_key: bool = False) -> None:
+    """Seal a plain key store file in place (under the file lock, the old file stays until the new one is on disk).
+    `create_key` makes the key file first if it does not exist. Stop the processes that use the file, or give them the
+    key file and restart them: a store without the key cannot read the sealed file."""
+    p, kf = Path(path), Path(key_file)
+    if create_key and not kf.exists():
+        new_key_file(kf)
+    key = load_key_file(kf)
+    with _flock(p):
+        inner, was_sealed = _open_text(p.read_text(), key, p)
+        if was_sealed:
+            raise SecureError(f"key store {p} is sealed already")
+        _write_atomic(p, _seal_text(json.dumps(inner, indent = 1).encode(), key))
+
+
+def unseal_file(path: str | os.PathLike, key_file: str | os.PathLike) -> None:
+    """Write a sealed key store file back as plain JSON, in place. The keys of all nodes are then readable by anyone who
+    gets the file."""
+    p = Path(path)
+    key = load_key_file(key_file)
+    with _flock(p):
+        inner, was_sealed = _open_text(p.read_text(), key, p)
+        if not was_sealed:
+            raise SecureError(f"key store {p} is not sealed")
+        _write_atomic(p, json.dumps(inner, indent = 1))
+
+
+def rotate_file_key(
+    path: str | os.PathLike,
+    key_file: str | os.PathLike,
+    new_key: str | os.PathLike,
+    create_key: bool = False,
+) -> None:
+    """Seal a sealed key store file again under another key file. Stop the processes that use it (or change their key file
+    and restart them) at the same time: the old key no longer opens the file. Keep the old key file until the new
+    one works, then destroy it and every backup of the old file."""
+    p, old, new = Path(path), Path(key_file), Path(new_key)
+    old_key = load_key_file(old)
+    if create_key and not new.exists():
+        new_key_file(new)
+    new_bytes = load_key_file(new)
+    if _file_key_id(new_bytes) == _file_key_id(old_key):
+        raise SecureError("the new key file holds the old key")
+    with _flock(p):
+        inner, was_sealed = _open_text(p.read_text(), old_key, p)
+        if not was_sealed:
+            raise SecureError(f"key store {p} is not sealed: use seal-file")
+        _write_atomic(p, _seal_text(json.dumps(inner, indent = 1).encode(), new_bytes))
+
+
 def open_sealed(payload: bytes, store: KeyStore) -> tuple[int, int, bytes]:
     """Open a sealed payload from a node: (node_id, kind, plaintext). Raises SecureError (UnknownKeyError,
     ReplayError are subclasses) if the key is unknown, the tag does not verify or the counter was seen."""
@@ -784,10 +1045,48 @@ def main(argv: list[str] | None = None) -> int:
     sub = ap.add_subparsers(dest = "cmd", required = True)
     ns = sub.add_parser("new-sender", help = "give a copy of a key store its own sender id")
     ns.add_argument("keystore", help = "key store file")
+    nk = sub.add_parser("new-key-file", help = "make a 32 byte key file for sealed key stores (mode 0400)")
+    nk.add_argument("key_file", help = "key file to create (never overwritten)")
+    sf = sub.add_parser("seal-file", help = "seal a plain key store file in place")
+    sf.add_argument("keystore", help = "key store file")
+    sf.add_argument("--key-file",
+                    default = os.environ.get(_ENV_KEY_FILE),
+                    help = f"key file (default: ${_ENV_KEY_FILE})")
+    sf.add_argument("--create-key", action = "store_true", help = "make the key file if it does not exist")
+    uf = sub.add_parser("unseal-file", help = "write a sealed key store file back as plain JSON, in place")
+    uf.add_argument("keystore", help = "key store file")
+    uf.add_argument("--key-file",
+                    default = os.environ.get(_ENV_KEY_FILE),
+                    help = f"key file (default: ${_ENV_KEY_FILE})")
+    rk = sub.add_parser("rotate-file-key", help = "seal a sealed key store file again under a new key file")
+    rk.add_argument("keystore", help = "key store file")
+    rk.add_argument("--key-file", default = os.environ.get(_ENV_KEY_FILE), help = "the current key file")
+    rk.add_argument("--new-key-file", required = True, help = "the new key file")
+    rk.add_argument("--create-key", action = "store_true", help = "make the new key file if it does not exist")
     args = ap.parse_args(argv)
-    if args.cmd == "new-sender":
-        store = KeyStore.load(args.keystore)
-        print(f"sender id {store.new_sender():08x}")
+    try:
+        if args.cmd == "new-sender":
+            store = KeyStore.load(args.keystore)
+            print(f"sender id {store.new_sender():08x}")
+            return 0
+        if args.cmd == "new-key-file":
+            new_key_file(args.key_file)
+            print(f"wrote {args.key_file}: keep it outside the key store folder and its backups")
+            return 0
+        if not args.key_file:
+            ap.error(f"--key-file or ${_ENV_KEY_FILE} is needed")
+        if args.cmd == "seal-file":
+            seal_file(args.keystore, args.key_file, args.create_key)
+            print(f"sealed {args.keystore}: give the processes the key file ({_ENV_KEY_FILE}) and restart them")
+        elif args.cmd == "unseal-file":
+            unseal_file(args.keystore, args.key_file)
+            print(f"{args.keystore} is plain now: the keys of all nodes are readable by anyone who gets the file")
+        elif args.cmd == "rotate-file-key":
+            rotate_file_key(args.keystore, args.key_file, args.new_key_file, args.create_key)
+            print(f"sealed {args.keystore} under {args.new_key_file}: switch the processes to it and restart them")
+    except (SecureError, OSError, ValueError) as exc:
+        print(f"error: {exc}", file = sys.stderr)
+        return 1
     return 0
 
 

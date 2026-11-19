@@ -1657,7 +1657,7 @@ class KeyStore:
         it if the key step fails."""
         return self.add_node(node_id, node_pub, reset = False)
 
-    def reset_if_node_restarted(self, node_id: int, proof: bytes) -> NodeBackup | None:
+    def reset_if_node_restarted(self, node_id: int, proof: bytes, expect: bytes | None = None) -> NodeBackup | None:
         """The proof of a commissioning key step says in its header (generation bits and the ratchet bit) which generation the
         node is in. A node that was provisioned again drops its ratchet state and seals in generation 0 (no ratchet bit); if the
         store is ahead of that (generation 1 or later), the store must start at generation 0 as well: `add_node` with the reset
@@ -1666,8 +1666,10 @@ class KeyStore:
         node (the check of the proof refuses it).
 
         The header is not authenticated, so the proof is opened first, in memory, with the generation 0 keys and the replay
-        window of the node; the store is reset and saved only if that worked. A save that fails (OSError) raises SecureError
-        and leaves the store as it was."""
+        window of the node; the store is reset and saved only if that worked. `expect` is the plaintext of this run's proof
+        (`commission.proof_plain`): if it is given, the kind and the plaintext must match too, so a real generation 0
+        envelope of the node from another run (a replay) resets nothing. `commission.check_key_proof` passes it. A save
+        that fails (OSError) raises SecureError and leaves the store as it was."""
         with self._lock:
             node = self._nodes.get(node_id)
             if node is None:
@@ -1687,9 +1689,11 @@ class KeyStore:
             return None
         try:
             seen.check(h.counter)
-            open_raw(keys.k_up, proof, h)
+            plain = open_raw(keys.k_up, proof, h)
         except SecureError:
             return None  # not from the node: nothing is reset, nothing is saved
+        if expect is not None and (h.kind != KIND_NODE_TO_HOST or not hmac.compare_digest(plain, expect)):
+            return None  # a real envelope of the node, but not the proof of this run
         try:
             return self.add_node(node_id, node_pub, reset = True)
         except OSError as exc:
@@ -1749,7 +1753,8 @@ class KeyStore:
                 prov = max(prov, back.prov)
             self.walker.forget_node(node_id)
             self._nodes[node_id] = _Node(old.node_pub, old.key_id, old.k_up, old.k_down, window, old.cur, old.next,
-                                         old.prev, old.t_up, prov + 1)
+                                         old.prev, old.t_up, prov + 1, old.commissioned, old.commissioned_at,
+                                         old.commissioned_fp)
             self._by_key_id[old.key_id] = node_id
             self._added.add(node_id)
             self._removed.discard(node_id)

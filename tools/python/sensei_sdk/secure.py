@@ -1622,6 +1622,35 @@ class KeyStore:
                 raise
             return NodeBackup(node_id, old, prov, True)
 
+    def add_node_for_commissioning(self, node_id: int, node_pub: bytes) -> NodeBackup:
+        """`add_node` for the key step of a commissioning. A node that the store knows with the same public key and key id
+        (an earlier session keyed it and dropped, or the node is commissioned again) is left as it is: no reset, nothing
+        saved, whatever generation it is in (it may have mixed meanwhile). A new node or a new key is made as `add_node`
+        makes it. The proof that the node then sends is checked against this state (`commission.check_key_proof`), which
+        resets only if the node turns out to have started again at generation 0. Keep the backup and `rollback_node`
+        it if the key step fails."""
+        return self.add_node(node_id, node_pub, reset = False)
+
+    def reset_if_node_restarted(self, node_id: int, proof: bytes) -> NodeBackup | None:
+        """The proof of a commissioning key step says in its header (generation bits and the ratchet bit) which generation the
+        node is in. A node that was provisioned again drops its ratchet state and seals in generation 0 (no ratchet bit); if the
+        store is ahead of that (generation 1 or later), the store must start at generation 0 as well: `add_node` with the reset
+        (saved at once, `rollback_node` undoes it). Returns that backup, or None if nothing had to be reset: the store is at
+        generation 0, the proof is of a ratchet generation (the same state continues), or it is not a proof for this node
+        (the check of the proof refuses it)."""
+        with self._lock:
+            node = self._nodes.get(node_id)
+            if node is None:
+                return None
+            try:
+                h = parse_header(proof)
+            except SecureError:
+                return None
+            if h.ratchet or h.key_id != node.key_id or self.generation(node_id) == 0:
+                return None
+            node_pub = node.node_pub
+        return self.add_node(node_id, node_pub, reset = True)
+
     def rollback_node(self, backup: NodeBackup) -> None:
         """Undo an `add_node` that changed the node, because the provisioning of the node failed: the node has its old keys
         and ratchet state again, in this process, in the file, in the other processes and in the followers of it (the

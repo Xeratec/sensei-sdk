@@ -66,7 +66,8 @@ extern "C" {
 #define SENSEI_COMMISSION_RECORD_VERSION 1u
 #define SENSEI_COMMISSION_FP_SIZE 16u          /* node fingerprint */
 #define SENSEI_COMMISSION_COLLECTOR_FP_SIZE 8u /* collector fingerprint */
-#define SENSEI_COMMISSION_POP_SIZE 64u         /* plaintext of the proof of possession */
+#define SENSEI_COMMISSION_SESSION_ID_SIZE 16u  /* hash of the PAKE transcript, both sides */
+#define SENSEI_COMMISSION_POP_SIZE 80u         /* plaintext of the proof of possession */
 #define SENSEI_COMMISSION_CODE_DIGITS 11u      /* random digits of the setup code */
 #define SENSEI_COMMISSION_CODE_SIZE 12u        /* with the Verhoeff check digit */
 #define SENSEI_COMMISSION_QR_SIZE 66u          /* characters of the QR payload (without the end of string) */
@@ -200,6 +201,7 @@ struct sensei_commission_verifier {
   uint8_t confirm_p[SENSEI_COMMISSION_CONFIRM_SIZE]; /* what confirmP must be (from pake1 to pake3) */
   uint8_t k_c2n[16], k_n2c[16];
   uint32_t sid;
+  uint8_t session_id[SENSEI_COMMISSION_SESSION_ID_SIZE]; /* names this PAKE run: valid from pake1 until end */
   uint32_t t_begin, t_phase;
   struct sensei_commission_limits lim; /* defaults filled in */
   struct sensei_commission_channel ch;
@@ -268,6 +270,7 @@ struct sensei_commission_prover {
   uint8_t nonce_g[SENSEI_COMMISSION_NONCE_SIZE];
   uint8_t nonce_n[SENSEI_COMMISSION_NONCE_SIZE];
   uint8_t share_p[SENSEI_COMMISSION_POINT_SIZE];
+  uint8_t session_id[SENSEI_COMMISSION_SESSION_ID_SIZE]; /* of this PAKE run, set by finish() */
   uint64_t node_id;
   struct sensei_commission_channel ch;
 };
@@ -324,12 +327,14 @@ struct sensei_commission_schedule {
   uint8_t k_confirm_p[32];
   uint8_t k_confirm_v[32];
   uint8_t k_shared[32];
-  uint8_t confirm_p[32]; /* HMAC(K_confirmP, shareV): sent by the prover */
-  uint8_t confirm_v[32]; /* HMAC(K_confirmV, shareP): sent by the verifier */
+  uint8_t confirm_p[32];                                 /* HMAC(K_confirmP, shareV): sent by the prover */
+  uint8_t confirm_v[32];                                 /* HMAC(K_confirmV, shareP): sent by the verifier */
+  uint8_t session_id[SENSEI_COMMISSION_SESSION_ID_SIZE]; /* HKDF(nil, K_main, "SessionId", 16): names this PAKE run */
 };
 
 /** K_main = SHA-256(TT); K_confirmP || K_confirmV = HKDF(nil, K_main, "ConfirmationKeys", 64); K_shared = HKDF(nil,
- * K_main, "SharedKey", 32). 0 or ERR_CRYPTO. The caller wipes *out. */
+ * K_main, "SharedKey", 32); session_id = HKDF(nil, K_main, "SessionId", 16): a hash of the transcript TT that both
+ * sides have and nobody else (it is not K_main itself, which stays secret). 0 or ERR_CRYPTO. The caller wipes *out. */
 int sensei_commission_schedule(const struct sensei_secure_crypto *c, const uint8_t *tt, size_t tt_len,
                                const uint8_t share_p[SENSEI_COMMISSION_POINT_SIZE],
                                const uint8_t share_v[SENSEI_COMMISSION_POINT_SIZE],
@@ -371,10 +376,13 @@ int sensei_commission_collector_fingerprint(const struct sensei_secure_crypto *c
                                             const uint8_t backend_pub[SENSEI_SECURE_PUB_SIZE],
                                             uint8_t out[SENSEI_COMMISSION_COLLECTOR_FP_SIZE]);
 
-/** The plaintext of the proof of possession: "SENSEI-COMMISSION-pop-v1" || node id (8 B BE) || nonce_G || nonce_N. The
- * node seals it as kind 3 under k_up through sensei_e2e_seal() (the normal counter path), after the key step. */
+/** The plaintext of the proof of possession: "SENSEI-COMMISSION-pop-v2" || node id (8 B BE) || nonce_G || nonce_N ||
+ * session_id (16 B of this PAKE run: verifier->session_id, prover->session_id). A relay that runs one PAKE with the
+ * node and another with the commissioner has two session ids, so the node's proof does not pass at the commissioner.
+ * The node seals it as kind 3 under k_up through sensei_e2e_seal() (the normal counter path), after the key step. */
 void sensei_commission_proof_plain(uint64_t node_id, const uint8_t nonce_g[SENSEI_COMMISSION_NONCE_SIZE],
                                    const uint8_t nonce_n[SENSEI_COMMISSION_NONCE_SIZE],
+                                   const uint8_t session_id[SENSEI_COMMISSION_SESSION_ID_SIZE],
                                    uint8_t out[SENSEI_COMMISSION_POP_SIZE]);
 
 /* ---- setup code, QR payload, label (the commissioner's side; the node never sees the code) ---- */

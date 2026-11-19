@@ -27,6 +27,7 @@ NODE_ID = 0x00A1B2C3D4E5F607
 CODE = "000000000003"  # fake: the bench never draws a code of one repeated digit
 SALT = bytes(range(0x10, 0x20))
 NG, NN = bytes(range(0x30, 0x40)), bytes(range(0x50, 0x60))
+SID = bytes(range(0x70, 0x80))  # the id of a PAKE run
 
 
 @pytest.fixture(scope = "module", autouse = True)
@@ -742,28 +743,30 @@ def provisioned(tmp_path):
 
 def test_proof_of_possession(provisioned):
     store, node, _ = provisioned
-    proof = com.make_proof(node.keys, NODE_ID, NG, NN, 1)
+    proof = com.make_proof(node.keys, NODE_ID, NG, NN, SID, 1)
     node.tx_counter = 1  # the proof used the node's next counter
-    assert secure.parse_header(proof).kind == secure.KIND_NODE_TO_HOST and len(proof) == 26 + 24 + 8 + 32
-    com.check_proof(proof, store, NODE_ID, NG, NN)
+    assert secure.parse_header(proof).kind == secure.KIND_NODE_TO_HOST and len(proof) == 26 + 24 + 8 + 32 + 16
+    com.check_proof(proof, store, NODE_ID, NG, NN, SID)
     with pytest.raises(ProofError):  # a replay
-        com.check_proof(proof, store, NODE_ID, NG, NN)
+        com.check_proof(proof, store, NODE_ID, NG, NN, SID)
     # the node goes on with its next counter
     assert secure.open_sealed(node.seal(secure.KIND_UPLINK, b"data"), store)[2] == b"data"
 
 
 def test_proof_binds_the_session(provisioned):
     store, node, _ = provisioned
-    for i, (nid, ng, nn) in enumerate([(NODE_ID, NG, NG), (NODE_ID, NN, NN), (NODE_ID + 1, NG, NN)]):
+    other = bytes([SID[0] ^ 1]) + SID[1:]
+    cases = [(NODE_ID, NG, NG, SID), (NODE_ID, NN, NN, SID), (NODE_ID + 1, NG, NN, SID), (NODE_ID, NG, NN, other)]
+    for i, (nid, ng, nn, sid) in enumerate(cases):
         with pytest.raises(ProofError):
-            com.check_proof(com.make_proof(node.keys, nid, ng, nn, 1 + i), store, NODE_ID, NG, NN)
+            com.check_proof(com.make_proof(node.keys, nid, ng, nn, sid, 1 + i), store, NODE_ID, NG, NN, SID)
     # a proof for another session is a replay of nothing: the counters it used are gone, a fresh one still works
-    com.check_proof(com.make_proof(node.keys, NODE_ID, NG, NN, 9), store, NODE_ID, NG, NN)
+    com.check_proof(com.make_proof(node.keys, NODE_ID, NG, NN, SID, 9), store, NODE_ID, NG, NN, SID)
 
 
 def test_proof_every_byte_is_checked(provisioned):
     store, node, _ = provisioned
-    proof = com.make_proof(node.keys, NODE_ID, NG, NN, 1)
+    proof = com.make_proof(node.keys, NODE_ID, NG, NN, SID, 1)
     for pos in range(len(proof)):
         with pytest.raises(ProofError):
             com.check_proof(proof[:pos] + bytes([proof[pos] ^ 1]) + proof[pos + 1:],
@@ -771,12 +774,13 @@ def test_proof_every_byte_is_checked(provisioned):
                             NODE_ID,
                             NG,
                             NN,
+                            SID,
                             commit = False)
     for bad in (b"", proof[:10], proof[:-1], proof + b"x"):
         with pytest.raises(ProofError):
-            com.check_proof(bad, store, NODE_ID, NG, NN)
-    com.check_proof(proof, store, NODE_ID, NG, NN, commit = False)  # peek: not consumed
-    com.check_proof(proof, store, NODE_ID, NG, NN)
+            com.check_proof(bad, store, NODE_ID, NG, NN, SID)
+    com.check_proof(proof, store, NODE_ID, NG, NN, SID, commit = False)  # peek: not consumed
+    com.check_proof(proof, store, NODE_ID, NG, NN, SID)
 
 
 def test_a_fake_node_with_the_real_public_key_cannot_prove_it(provisioned):
@@ -787,26 +791,92 @@ def test_a_fake_node_with_the_real_public_key_cannot_prove_it(provisioned):
     fake = secure.derive_keys(fake_priv, store.backend_public_key(), node.node_pub, store.backend_public_key())
     assert fake.key_id != node.keys.key_id
     with pytest.raises(ProofError, match = "key id"):
-        com.check_proof(com.make_proof(fake, NODE_ID, NG, NN, 1), store, NODE_ID, NG, NN)
+        com.check_proof(com.make_proof(fake, NODE_ID, NG, NN, SID, 1), store, NODE_ID, NG, NN, SID)
     # even with the right key id on the envelope: the tag fails
-    forged = secure.seal_raw(fake.k_up, node.keys.key_id, 1, secure.KIND_NODE_TO_HOST, com.proof_plain(NODE_ID, NG, NN))
+    forged = secure.seal_raw(fake.k_up, node.keys.key_id, 1, secure.KIND_NODE_TO_HOST,
+                             com.proof_plain(NODE_ID, NG, NN, SID))
     with pytest.raises(ProofError, match = "failed"):
-        com.check_proof(forged, store, NODE_ID, NG, NN)
+        com.check_proof(forged, store, NODE_ID, NG, NN, SID)
     with pytest.raises(ProofError):  # a node the store does not know
-        com.check_proof(com.make_proof(node.keys, NODE_ID + 5, NG, NN, 3), store, NODE_ID + 5, NG, NN)
+        com.check_proof(com.make_proof(node.keys, NODE_ID + 5, NG, NN, SID, 3), store, NODE_ID + 5, NG, NN, SID)
 
 
 def test_proof_plain_layout():
-    assert com.proof_plain(NODE_ID, NG, NN) == b"SENSEI-COMMISSION-pop-v1" + NODE_ID.to_bytes(8, "big") + NG + NN
+    assert com.proof_plain(NODE_ID, NG, NN,
+                           SID) == b"SENSEI-COMMISSION-pop-v2" + NODE_ID.to_bytes(8, "big") + NG + NN + SID
     with pytest.raises(CommissionError):
-        com.proof_plain(NODE_ID, NG[:5], NN)
+        com.proof_plain(NODE_ID, NG[:5], NN, SID)
 
 
 def test_the_proof_vectors_match(provisioned):
     keys = vc.fixed_keys()
-    for node_id, ng, nn, counter in vc.proof_cases():
-        proof = com.make_proof(keys, node_id, ng, nn, counter)
-        assert secure.open_raw(keys.k_up, proof) == com.proof_plain(node_id, ng, nn)
+    for node_id, ng, nn, sid, counter in vc.proof_cases():
+        proof = com.make_proof(keys, node_id, ng, nn, sid, counter)
+        assert secure.open_raw(keys.k_up, proof) == com.proof_plain(node_id, ng, nn, sid)
+
+
+def test_both_sides_get_the_same_session_id_and_it_is_not_k_main(verifier):
+    ver = verifier
+    ng, nn = com.new_nonce(), com.new_nonce()
+    prover = com.Prover.from_code(CODE, NODE_ID, ver.params, ng, nn)
+    node = ver.session(NODE_ID, ng, nn)
+    share_v, confirm_v = node.pake1(prover.share())
+    node.pake3(prover.finish(share_v, confirm_v))
+    assert len(prover.session_id) == com.SESSION_ID_SIZE == 16 and prover.session_id == node.session_id
+    with pytest.raises(StateError):
+        com.Prover.from_code(CODE, NODE_ID, ver.params, ng, nn).session_id
+
+
+def test_the_session_id_is_a_hash_of_the_transcript_of_this_run(verifier):
+    """Two runs with the same nonces (what a relay sees) have different ids: the shares are fresh."""
+    ver = verifier
+    ng, nn = com.new_nonce(), com.new_nonce()
+    ids = []
+    for _ in range(2):
+        prover = com.Prover.from_code(CODE, NODE_ID, ver.params, ng, nn)
+        node = ver.session(NODE_ID, ng, nn)
+        sv, cv = node.pake1(prover.share())
+        node.pake3(prover.finish(sv, cv))
+        ids.append(node.session_id)
+    assert ids[0] != ids[1]
+
+
+def test_a_relay_between_two_pake_runs_cannot_pass_the_proof_on(provisioned, verifier):
+    """The relay holds the code. It is the verifier to the commissioner (run 1) and the prover to the node (run 2), with the
+    same nonces and salt. The node's proof is bound to run 2; the commissioner checks it against run 1."""
+    store, node, _ = provisioned
+    ver = verifier
+    ng, nn = com.new_nonce(), com.new_nonce()
+    # run 2: relay (prover) <-> node
+    p2 = com.Prover.from_code(CODE, NODE_ID, ver.params, ng, nn)
+    n2 = ver.session(NODE_ID, ng, nn)
+    sv, cv = n2.pake1(p2.share())
+    n2.pake3(p2.finish(sv, cv))
+    # run 1: commissioner (prover) <-> relay (verifier)
+    p1 = com.Prover.from_code(CODE, NODE_ID, ver.params, ng, nn)
+    n1 = ver.session(NODE_ID, ng, nn)
+    sv, cv = n1.pake1(p1.share())
+    n1.pake3(p1.finish(sv, cv))
+    assert p1.session_id != n2.session_id
+    proof = com.make_proof(node.keys, NODE_ID, ng, nn, n2.session_id, 1)  # what the node sends
+    with pytest.raises(ProofError):  # the commissioner's check, in its run
+        com.check_proof(proof, store, NODE_ID, ng, nn, p1.session_id, commit = False)
+    com.check_proof(proof, store, NODE_ID, ng, nn, n2.session_id)  # in the node's own run it passes
+
+
+def test_a_prover_can_start_from_w0_and_w1(verifier):
+    ver = verifier
+    w0, w1 = com.derive_w(CODE, NODE_ID, ver.params)
+    ng, nn = com.new_nonce(), com.new_nonce()
+    prover = com.Prover.from_w(w0, w1, NODE_ID, ver.params, ng, nn)
+    node = ver.session(NODE_ID, ng, nn)
+    sv, cv = node.pake1(prover.share())
+    node.pake3(prover.finish(sv, cv))
+    assert prover.keys == node.keys
+    with pytest.raises(CommissionError):
+        com.Prover.from_w(0, w1, NODE_ID, ver.params, ng, nn)
+    with pytest.raises(com.ParamsError):  # the parameters are checked as in from_code
+        com.Prover.from_w(w0, w1, NODE_ID, com.Params(ver.params.salt, log2n = 18), ng, nn)
 
 
 # ---- setup code (V14) ----
@@ -1109,17 +1179,17 @@ def test_the_peek_path_checks_the_node(provisioned):
     other_priv, other_pub = secure.generate_keypair()
     store.add_node(NODE_ID + 1, other_pub)
     other = NodeSession(other_priv, store.backend_public_key())
-    proof = com.make_proof(other.keys, NODE_ID + 1, NG, NN, 1)
-    com.check_proof(proof, store, NODE_ID + 1, NG, NN, commit = False)
+    proof = com.make_proof(other.keys, NODE_ID + 1, NG, NN, SID, 1)
+    com.check_proof(proof, store, NODE_ID + 1, NG, NN, SID, commit = False)
     # a proof of the other node, offered for this node id: refused on the key id, on both paths
     for commit in (True, False):
         with pytest.raises(ProofError):
-            com.check_proof(proof, store, NODE_ID, NG, NN, commit = commit)
+            com.check_proof(proof, store, NODE_ID, NG, NN, SID, commit = commit)
     # the proof of the right node but the plaintext of another node id
-    wrong = com.make_proof(node.keys, NODE_ID + 7, NG, NN, 1)
+    wrong = com.make_proof(node.keys, NODE_ID + 7, NG, NN, SID, 1)
     for commit in (True, False):
         with pytest.raises(ProofError, match = "does not match"):
-            com.check_proof(wrong, store, NODE_ID, NG, NN, commit = commit)
+            com.check_proof(wrong, store, NODE_ID, NG, NN, SID, commit = commit)
 
 
 # V15 and the replay of the negatives through the real classes

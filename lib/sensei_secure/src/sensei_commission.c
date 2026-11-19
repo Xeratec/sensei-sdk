@@ -32,7 +32,7 @@ static const uint8_t CONTEXT_LABEL[20] = {'S', 'E', 'N', 'S', 'E', 'I', '-', 'C'
                                           'M', 'I', 'S', 'S', 'I', 'O', 'N', '-', 'v', '1'};
 static const uint8_t CHANNEL_INFO[7] = {'c', 'h', 'a', 'n', 'n', 'e', 'l'};
 static const uint8_t POP_LABEL[24] = {'S', 'E', 'N', 'S', 'E', 'I', '-', 'C', 'O', 'M', 'M', 'I',
-                                      'S', 'S', 'I', 'O', 'N', '-', 'p', 'o', 'p', '-', 'v', '1'};
+                                      'S', 'S', 'I', 'O', 'N', '-', 'p', 'o', 'p', '-', 'v', '2'};
 static const uint8_t FP_NODE_LABEL[17] = {'S', 'E', 'N', 'S', 'E', 'I', '-', 'N', 'O',
                                           'D', 'E', '-', 'F', 'P', '-', 'v', '1'};
 static const uint8_t FP_COLLECTOR_LABEL[22] = {'S', 'E', 'N', 'S', 'E', 'I', '-', 'C', 'O', 'L', 'L',
@@ -226,12 +226,15 @@ int sensei_commission_schedule(const struct sensei_secure_crypto *c, const uint8
   static const uint8_t no_salt[1] = {0};
   static const uint8_t lbl_conf[16] = {'C', 'o', 'n', 'f', 'i', 'r', 'm', 'a', 't', 'i', 'o', 'n', 'K', 'e', 'y', 's'};
   static const uint8_t lbl_shared[9] = {'S', 'h', 'a', 'r', 'e', 'd', 'K', 'e', 'y'};
+  static const uint8_t lbl_sid[9] = {'S', 'e', 's', 's', 'i', 'o', 'n', 'I', 'd'};
   uint8_t conf[64];
   int err = ERR_CRYPTO;
 
   if (c->sha256(c->ctx, tt, tt_len, out->k_main) != 0 ||
       c->hkdf(c->ctx, out->k_main, 32, no_salt, 0, lbl_conf, sizeof(lbl_conf), conf, sizeof(conf)) != 0 ||
-      c->hkdf(c->ctx, out->k_main, 32, no_salt, 0, lbl_shared, sizeof(lbl_shared), out->k_shared, 32) != 0) {
+      c->hkdf(c->ctx, out->k_main, 32, no_salt, 0, lbl_shared, sizeof(lbl_shared), out->k_shared, 32) != 0 ||
+      c->hkdf(c->ctx, out->k_main, 32, no_salt, 0, lbl_sid, sizeof(lbl_sid), out->session_id,
+              SENSEI_COMMISSION_SESSION_ID_SIZE) != 0) {
     goto out;
   }
   memcpy(out->k_confirm_p, conf, 32);
@@ -275,6 +278,7 @@ out:
 struct derived {
   uint8_t confirm_p[32], confirm_v[32];
   uint8_t k_c2n[16], k_n2c[16];
+  uint8_t session_id[SENSEI_COMMISSION_SESSION_ID_SIZE];
   uint32_t sid;
 };
 
@@ -297,6 +301,7 @@ static int derive(const struct sensei_secure_crypto *c, const uint8_t *ctx, cons
   if (err == 0) {
     memcpy(out->confirm_p, sch.confirm_p, 32);
     memcpy(out->confirm_v, sch.confirm_v, 32);
+    memcpy(out->session_id, sch.session_id, SENSEI_COMMISSION_SESSION_ID_SIZE);
     err = sensei_commission_channel_keys(c, sch.k_shared, node_id, nonce_g, nonce_n, out->k_c2n, out->k_n2c, &out->sid);
   }
   wipe(&sch, sizeof(sch));
@@ -566,6 +571,7 @@ int sensei_commission_verifier_pake1(struct sensei_commission_verifier *v, uint3
   memcpy(v->k_c2n, d.k_c2n, sizeof(v->k_c2n));
   memcpy(v->k_n2c, d.k_n2c, sizeof(v->k_n2c));
   v->sid = d.sid;
+  memcpy(v->session_id, d.session_id, sizeof(v->session_id));
   wipe(v->rec.w0, sizeof(v->rec.w0));
   wipe(v->rec.l, sizeof(v->rec.l));
   v->state = SENSEI_COMMISSION_SENT;
@@ -749,6 +755,7 @@ int sensei_commission_prover_finish(struct sensei_commission_prover *p,
     goto fail;
   }
   memcpy(confirm_p, d.confirm_p, sizeof(d.confirm_p));
+  memcpy(p->session_id, d.session_id, sizeof(p->session_id));
   wipe(p->w0, sizeof(p->w0));
   wipe(p->w1, sizeof(p->w1));
   wipe(p->x, sizeof(p->x));
@@ -815,11 +822,13 @@ int sensei_commission_collector_fingerprint(const struct sensei_secure_crypto *c
 
 void sensei_commission_proof_plain(uint64_t node_id, const uint8_t nonce_g[SENSEI_COMMISSION_NONCE_SIZE],
                                    const uint8_t nonce_n[SENSEI_COMMISSION_NONCE_SIZE],
+                                   const uint8_t session_id[SENSEI_COMMISSION_SESSION_ID_SIZE],
                                    uint8_t out[SENSEI_COMMISSION_POP_SIZE]) {
   memcpy(out, POP_LABEL, sizeof(POP_LABEL));
   put64be(out + sizeof(POP_LABEL), node_id);
   memcpy(out + sizeof(POP_LABEL) + 8, nonce_g, SENSEI_COMMISSION_NONCE_SIZE);
   memcpy(out + sizeof(POP_LABEL) + 8 + SENSEI_COMMISSION_NONCE_SIZE, nonce_n, SENSEI_COMMISSION_NONCE_SIZE);
+  memcpy(out + sizeof(POP_LABEL) + 8 + 2 * SENSEI_COMMISSION_NONCE_SIZE, session_id, SENSEI_COMMISSION_SESSION_ID_SIZE);
 }
 
 /* ---- setup code, QR payload, label ---- */

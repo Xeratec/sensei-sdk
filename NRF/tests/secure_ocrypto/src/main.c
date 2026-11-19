@@ -51,7 +51,8 @@ static int node_calls(void) {
   k += (int)sensei_commission_verifier_sid(&v) + (int)sensei_commission_verifier_state(&v);
   sensei_commission_verifier_end(&v);
   k += sensei_commission_fingerprint(cfg.c, 1, b, b) + sensei_commission_collector_fingerprint(cfg.c, b, b);
-  sensei_commission_proof_plain(1, b, b, b);
+  sensei_commission_proof_plain(1, b, b, b, c);
+  k += (int)v.session_id[0];
   return k;
 }
 #else

@@ -430,11 +430,13 @@ def fp_cases() -> list[tuple[int, bytes]]:
     return [(0x00A1B2C3D4E5F607, node_pub), (0x0123456789ABCDEF, node_pub), (0xFFFFFFFFFFFFFFFF, backend_pub)]
 
 
-def proof_cases() -> list[tuple[int, bytes, bytes, int]]:
-    """(node id, nonce_G, nonce_N, counter) of the proofs, made with the fixed keys of the envelope vectors."""
+def proof_cases() -> list[tuple[int, bytes, bytes, bytes, int]]:
+    """(node id, nonce_G, nonce_N, session id, counter) of the proofs, made with the fixed keys of the envelope vectors.
+    The first session id is that of session 0 of V11, the second a pattern."""
     return [
-        (0x00A1B2C3D4E5F607, bytes(range(0x30, 0x40)), bytes(range(0x50, 0x60)), 1),
-        (0x0123456789ABCDEF, pattern(16, 5), pattern(16, 6), 70000),
+        (0x00A1B2C3D4E5F607, bytes(range(0x30, 0x40)), bytes(range(0x50,
+                                                                   0x60)), ses_cases()[0].values["sch"].session_id, 1),
+        (0x0123456789ABCDEF, pattern(16, 5), pattern(16, 6), pattern(16, 7), 70000),
     ]
 
 
@@ -584,7 +586,7 @@ def render() -> str:
         "    const uint8_t *v;\n    const uint8_t *tt;\n    size_t tt_len;\n    const uint8_t *k_main;\n"
         "    const uint8_t *k_confirm_p;\n    const uint8_t *k_confirm_v;\n    const uint8_t *confirm_p;\n"
         "    const uint8_t *confirm_v;\n    const uint8_t *k_shared;\n    const uint8_t *k_c2n;\n"
-        "    const uint8_t *k_n2c;\n    uint32_t sid;\n} vec_com_ses_t;\n")
+        "    const uint8_t *k_n2c;\n    const uint8_t *session_id;\n    uint32_t sid;\n} vec_com_ses_t;\n")
     rows = []
     for i, ses in enumerate(ses_cases()):
         v, sch = ses.values, ses.values["sch"]
@@ -592,7 +594,8 @@ def render() -> str:
                  ("share_p", v["share_p"]), ("y", ses.y), ("share_v", v["share_v"]), ("z", v["z"]), ("v", v["v"]),
                  ("tt", v["tt"]), ("k_main", sch.k_main), ("k_confirm_p", sch.k_confirm_p),
                  ("k_confirm_v", sch.k_confirm_v), ("confirm_p", sch.confirm_p), ("confirm_v", sch.confirm_v),
-                 ("k_shared", sch.k_shared), ("k_c2n", ses.keys.k_c2n), ("k_n2c", ses.keys.k_n2c)]
+                 ("k_shared", sch.k_shared), ("k_c2n", ses.keys.k_c2n), ("k_n2c", ses.keys.k_n2c),
+                 ("session_id", sch.session_id)]
         for name, data in items:
             parts.append(array(f"vec_com_ses{i}_{name}", data))
         names = [n for n, _ in items]
@@ -633,21 +636,24 @@ def render() -> str:
         "/* proof of possession: a kind 3 envelope under k_up (no node id field) with the plaintext given */\n")
     parts.append(array("vec_com_pop_k_up", keys.k_up))
     parts.append(f"#define VEC_COM_POP_KEY_ID 0x{keys.key_id:08X}u\n")
-    parts.append("typedef struct {\n    uint64_t node_id;\n    const uint8_t *nonce_g;\n    const uint8_t *nonce_n;\n"
-                 "    uint32_t counter;\n    const uint8_t *plain;\n    size_t plain_len;\n    const uint8_t *proof;\n"
-                 "    size_t proof_len;\n} vec_com_pop_t;\n")
+    parts.append(
+        "typedef struct {\n    uint64_t node_id;\n    const uint8_t *nonce_g;\n    const uint8_t *nonce_n;\n"
+        "    const uint8_t *session_id;\n    uint32_t counter;\n    const uint8_t *plain;\n    size_t plain_len;\n    const uint8_t *proof;\n"
+        "    size_t proof_len;\n} vec_com_pop_t;\n")
     rows = []
-    for i, (node_id, ng, nn, counter) in enumerate(proof_cases()):
-        plain = com.proof_plain(node_id, ng, nn)
-        proof = com.make_proof(keys, node_id, ng, nn, counter)
+    for i, (node_id, ng, nn, sid, counter) in enumerate(proof_cases()):
+        plain = com.proof_plain(node_id, ng, nn, sid)
+        proof = com.make_proof(keys, node_id, ng, nn, sid, counter)
         parts += [
             array(f"vec_com_pop_ng_{i}", ng),
             array(f"vec_com_pop_nn_{i}", nn),
+            array(f"vec_com_pop_sid_{i}", sid),
             array(f"vec_com_pop_plain_{i}", plain),
             array(f"vec_com_pop_{i}", proof)
         ]
-        rows.append(f"{{{node_id}ull, vec_com_pop_ng_{i}, vec_com_pop_nn_{i}, {counter}u, vec_com_pop_plain_{i}, "
-                    f"{len(plain)}, vec_com_pop_{i}, {len(proof)}}}")
+        rows.append(
+            f"{{{node_id}ull, vec_com_pop_ng_{i}, vec_com_pop_nn_{i}, vec_com_pop_sid_{i}, {counter}u, vec_com_pop_plain_{i}, "
+            f"{len(plain)}, vec_com_pop_{i}, {len(proof)}}}")
     parts += _table("vec_com_pop", "vec_com_pop_t", rows)
     # V14
     parts.append(

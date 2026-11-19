@@ -56,7 +56,8 @@ ID_VERIFIER_PREFIX = b"SENSEI-node"
 CONTEXT_LABEL = b"SENSEI-COMMISSION-v1"
 CONTEXT_SIZE = 73
 CHANNEL_INFO = b"channel"
-POP_LABEL = b"SENSEI-COMMISSION-pop-v1"
+POP_LABEL = b"SENSEI-COMMISSION-pop-v2"
+SESSION_ID_SIZE = 16  # of the PAKE run
 FP_NODE_LABEL = b"SENSEI-NODE-FP-v1"
 FP_COLLECTOR_LABEL = b"SENSEI-COLLECTOR-FP-v1"
 NODE_FP_SIZE = 16
@@ -253,17 +254,25 @@ def collector_fingerprint(backend_pub: bytes) -> bytes:
     return hashlib.sha256(FP_COLLECTOR_LABEL + backend_pub).digest()[:COLLECTOR_FP_SIZE]
 
 
-def proof_plain(node_id: int, nonce_g: bytes, nonce_n: bytes) -> bytes:
-    """"SENSEI-COMMISSION-pop-v1" || node id (8 BE) || nonce_G || nonce_N."""
+def proof_plain(node_id: int, nonce_g: bytes, nonce_n: bytes, session_id: bytes) -> bytes:
+    """"SENSEI-COMMISSION-pop-v2" || node id (8 BE) || nonce_G || nonce_N || session_id (16 B).
+
+    `session_id` names the PAKE run (`Schedule.session_id`, `Prover.session_id`, `VerifierSession.session_id`). A relay
+    that holds the code and runs one PAKE with the node and another with the commissioner (the same nonces passed on)
+    has two session ids, so the proof of the node does not pass at the commissioner."""
     if len(nonce_g) != NONCE_SIZE or len(nonce_n) != NONCE_SIZE:
         raise CommissionError("a nonce is 16 bytes")
-    return POP_LABEL + node_id.to_bytes(8, "big") + nonce_g + nonce_n
+    if len(session_id) != SESSION_ID_SIZE:
+        raise CommissionError("a session id is 16 bytes")
+    return POP_LABEL + node_id.to_bytes(8, "big") + nonce_g + nonce_n + session_id
 
 
-def make_proof(keys: secure.SessionKeys, node_id: int, nonce_g: bytes, nonce_n: bytes, counter: int) -> bytes:
+def make_proof(keys: secure.SessionKeys, node_id: int, nonce_g: bytes, nonce_n: bytes, session_id: bytes,
+               counter: int) -> bytes:
     """The node's proof that it holds the key it just sent: a kind 3 envelope under k_up with the node's next counter.
     A fake node that replays the public key of the real one cannot make it."""
-    return secure.seal_raw(keys.k_up, keys.key_id, counter, KIND_NODE_TO_HOST, proof_plain(node_id, nonce_g, nonce_n))
+    return secure.seal_raw(keys.k_up, keys.key_id, counter, KIND_NODE_TO_HOST,
+                           proof_plain(node_id, nonce_g, nonce_n, session_id))
 
 
 def check_proof(proof: bytes,
@@ -271,13 +280,15 @@ def check_proof(proof: bytes,
                 node_id: int,
                 nonce_g: bytes,
                 nonce_n: bytes,
+                session_id: bytes,
                 commit: bool = True) -> None:
     """The commissioner's check, with the key store entry that `add_node` made. The key id must be the store's, the
-    envelope must open with the store's keys and carry exactly this session's plaintext. `commit` marks the counter
+    envelope must open with the store's keys (in any generation: the node may have mixed already) and carry exactly this
+    session's plaintext, which includes the id of this PAKE run. `commit` marks the counter
     as seen, as for any uplink (a replayed proof fails the second time). Raises ProofError.
 
     What it proves: whoever sent it holds the private key behind the node public key that `add_node` used, and saw
-    this session's nonces. The node id is not part of the key derivation (HKDF info = node_pub || backend_pub): that the
+    this session's nonces and PAKE run (a relay between two runs cannot pass it on). The node id is not part of the key derivation (HKDF info = node_pub || backend_pub): that the
     key belongs to this node id comes from the fingerprint, which the commissioner must have compared with the QR
     (or had confirmed by the user) before `add_node`."""
     try:
@@ -297,8 +308,37 @@ def check_proof(proof: bytes,
     except SecureError as exc:
         raise ProofError(f"proof of possession failed: {exc}") from exc
     if got_id != node_id or kind != KIND_NODE_TO_HOST or not hmac.compare_digest(
-            plain, proof_plain(node_id, nonce_g, nonce_n)):
+            plain, proof_plain(node_id, nonce_g, nonce_n, session_id)):
         raise ProofError("proof of possession does not match this session")
+
+
+def check_key_proof(proof: bytes,
+                    store: secure.KeyStore,
+                    node_id: int,
+                    nonce_g: bytes,
+                    nonce_n: bytes,
+                    session_id: bytes,
+                    commit: bool = True) -> secure.NodeBackup | None:
+    """The check of the proof of a commissioning key step, for a node that `store.add_node_for_commissioning` added or
+    left as it was. If the proof says that the node started again at generation 0 while the store is ahead, the store is
+    reset first (`KeyStore.reset_if_node_restarted`); then the proof is checked against the state as it is, in any
+    generation. Returns the backup of that reset (None if there was none), which the caller rolls back with the entry of
+    `add_node_for_commissioning` if the key step fails after all. If the proof does not pass, the reset made here is
+    rolled back and ProofError is raised."""
+    reset = None
+    try:
+        reset = store.reset_if_node_restarted(node_id, proof)
+        check_proof(proof, store, node_id, nonce_g, nonce_n, session_id, commit)
+    except BaseException as exc:
+        if reset is not None:
+            try:
+                store.rollback_node(reset)
+            except SecureError:
+                pass
+        if isinstance(exc, SecureError) and not isinstance(exc, ProofError):
+            raise ProofError(f"proof of possession failed: {exc}") from exc
+        raise
+    return reset
 
 
 # ---- registration (scrypt) ----
@@ -451,6 +491,7 @@ class Schedule:
     k_shared: bytes
     confirm_p: bytes  # HMAC(K_confirmP, shareV): sent by the prover
     confirm_v: bytes  # HMAC(K_confirmV, shareP): sent by the verifier
+    session_id: bytes  # HKDF(nil, K_main, "SessionId", 16): names this PAKE run (not K_main itself)
 
 
 def _hkdf(ikm: bytes, length: int, salt: bytes | None, info: bytes) -> bytes:
@@ -462,8 +503,9 @@ def key_schedule(tt: bytes, share_p: bytes, share_v: bytes) -> Schedule:
     k_main = hashlib.sha256(tt).digest()
     conf = _hkdf(k_main, 64, None, b"ConfirmationKeys")
     k_shared = _hkdf(k_main, 32, None, b"SharedKey")
+    session_id = _hkdf(k_main, SESSION_ID_SIZE, None, b"SessionId")
     return Schedule(k_main, conf[:32], conf[32:], k_shared, hmac.digest(conf[:32], share_v, "sha256"),
-                    hmac.digest(conf[32:], share_p, "sha256"))
+                    hmac.digest(conf[32:], share_p, "sha256"), session_id)
 
 
 @dataclass(frozen = True)
@@ -546,6 +588,24 @@ class Prover:
         self._share: bytes | None = None
         self._state = "new"
         self._keys: ChannelKeys | None = None
+        self._session_id = b""
+
+    @classmethod
+    def from_w(cls,
+               w0: int,
+               w1: int,
+               node_id: int,
+               params: Params,
+               nonce_g: bytes,
+               nonce_n: bytes,
+               x: bytes | None = None,
+               rng: Callable[[int], bytes] = secrets.token_bytes) -> Prover:
+        """Like `from_code` from the two scalars that `derive_w(code, node_id, params)` gave. The commissioner derives them
+        once (scrypt) and drops the code string; a second session on the same node (the parameters and the node id must
+        be the same) starts from them. w0 and w1 give the same power over this node as the code does."""
+        params.check()
+        return cls(w0, w1, context(params, nonce_g, nonce_n), ID_PROVER, id_verifier(node_id), node_id, nonce_g,
+                   nonce_n, x, rng)
 
     @classmethod
     def from_code(cls,
@@ -588,6 +648,7 @@ class Prover:
             if len(confirm_v) != 32 or not hmac.compare_digest(confirm_v, sch.confirm_v):
                 raise WrongCodeError("wrong setup code (key confirmation failed)")
             self._keys = channel_keys(sch.k_shared, self._node_id, self._ng, self._nn)
+            self._session_id = sch.session_id
             self._state = "done"  # K_shared is not kept: the channel keys are all that follows from it
             return sch.confirm_p
         finally:
@@ -598,6 +659,13 @@ class Prover:
         if self._keys is None:
             raise StateError("the session is not complete")
         return self._keys
+
+    @property
+    def session_id(self) -> bytes:
+        """The id of this PAKE run (16 B), after `finish`: it goes into the proof of possession."""
+        if not self._session_id:
+            raise StateError("the session is not complete")
+        return self._session_id
 
 
 class VerifierSession:
@@ -629,6 +697,7 @@ class VerifierSession:
         self._state = "new"
         self._sch: Schedule | None = None
         self._keys: ChannelKeys | None = None
+        self._session_id = b""
 
     def pake1(self, share_p: bytes) -> tuple[bytes, bytes]:
         """Check shareP (a valid point, not w0*M), compute shareV = y*G + w0*N and confirmV."""
@@ -642,6 +711,7 @@ class VerifierSession:
         v = p256.encode(p256.mul(self._y, p256.decode(self._l)))
         tt = transcript(self._ctx, *self._ids, share_p, share_v, z, v, self._w0)
         self._sch = key_schedule(tt, share_p, share_v)
+        self._session_id = self._sch.session_id
         self._y = 0
         self._state = "sent"
         return share_v, self._sch.confirm_v
@@ -662,6 +732,13 @@ class VerifierSession:
         if self._keys is None:
             raise StateError("the session is not complete")
         return self._keys
+
+    @property
+    def session_id(self) -> bytes:
+        """The id of this PAKE run (16 B), from `pake1` on: it goes into the proof of possession the node seals."""
+        if not self._session_id:
+            raise StateError("the session is not complete")
+        return self._session_id
 
 
 # ---- the channel (kind 5 envelopes) ----

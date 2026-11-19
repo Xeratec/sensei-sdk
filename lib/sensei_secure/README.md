@@ -381,6 +381,17 @@ context, identities, transcript, key schedule, channel keys, node and collector 
 possession (the node seals it as kind 3 through `sensei_e2e_seal()`, the normal counter path), Verhoeff digit, setup code,
 QR payload and label lines (`sensei_commission_qr_parse()` and `_format()`).
 
+**The proof binds the PAKE run.** The key schedule also gives a `session_id` (16 B): `HKDF(nil, K_main, "SessionId", 16)`, a hash of the
+transcript TT that both sides have and nobody else (not K_main itself, which stays secret). The verifier has it from `pake1`
+(`verifier->session_id`), the prover from `finish` (`prover->session_id`). The proof plaintext is `"SENSEI-COMMISSION-pop-v2" || node
+id (8 B BE) || nonce_G || nonce_N || session_id` (80 B). A relay that holds the code and runs one PAKE with the node and another with
+the commissioner passes the same nonces on, but the two runs have different ids, so the proof of the node does not pass at the
+commissioner. The node can also name its session to the application (the node's `open_commissioning` carries it).
+Python: `proof_plain(node_id, nonce_g, nonce_n, session_id)`, `make_proof`, `check_proof(..., session_id)`,
+`check_key_proof()` (see "Key store" in `sensei_sdk.secure`: `KeyStore.add_node_for_commissioning()` leaves a node that is known
+with the same key alone, whatever generation it is in, and `reset_if_node_restarted()` resets the store only if the proof says the
+node started again at generation 0), `Prover.from_w(w0, w1, ...)` (derive the scalars once with `derive_w`, drop the code).
+
 **Random numbers.** `random()` is called once in `begin` (nonce_n, 16 B) and once in `pake1` or the prover's `begin` (40 B reduced
 mod n, again in the 2^-250 case of 0). A test gives a backend whose `random()` returns fixed bytes.
 

@@ -396,7 +396,9 @@ static void test_v11(void) {
     CHECK(sensei_commission_schedule(C0, tt, s->tt_len, s->share_p, s->share_v, &sch) == 0);
     CHECK(memcmp(sch.k_main, s->k_main, 32) == 0 && memcmp(sch.k_confirm_p, s->k_confirm_p, 32) == 0 &&
           memcmp(sch.k_confirm_v, s->k_confirm_v, 32) == 0 && memcmp(sch.confirm_p, s->confirm_p, 32) == 0 &&
-          memcmp(sch.confirm_v, s->confirm_v, 32) == 0 && memcmp(sch.k_shared, s->k_shared, 32) == 0);
+          memcmp(sch.confirm_v, s->confirm_v, 32) == 0 && memcmp(sch.k_shared, s->k_shared, 32) == 0 &&
+          memcmp(sch.session_id, s->session_id, 16) == 0);
+    CHECK(memcmp(sch.session_id, sch.k_main, 16) != 0); /* a hash of its own, not half of K_main */
     CHECK(sensei_commission_channel_keys(C0, sch.k_shared, s->node_id, s->nonce_g, s->nonce_n, k_c2n, k_n2c, &sid) ==
           0);
     CHECK(memcmp(k_c2n, s->k_c2n, 16) == 0 && memcmp(k_n2c, s->k_n2c, 16) == 0 && sid == s->sid);
@@ -429,6 +431,18 @@ static void test_v11(void) {
       CHECK(sensei_commission_verifier_pake3(&ver, 1020, confirm_p) == 0);
       CHECK(sensei_commission_verifier_state(&ver) == SENSEI_COMMISSION_OPEN);
       CHECK(sensei_commission_verifier_sid(&ver) == s->sid);
+      /* both sides name this PAKE run the same way (the vector's session id), and a proof binds it */
+      CHECK(memcmp(ver.session_id, s->session_id, 16) == 0 && memcmp(pro.session_id, s->session_id, 16) == 0);
+      {
+        uint8_t pa[SENSEI_COMMISSION_POP_SIZE], pb[SENSEI_COMMISSION_POP_SIZE];
+        uint8_t other[16];
+
+        memcpy(other, s->session_id, 16);
+        other[0] ^= 1;
+        sensei_commission_proof_plain(s->node_id, s->nonce_g, nonce_n, ver.session_id, pa);
+        sensei_commission_proof_plain(s->node_id, s->nonce_g, nonce_n, other, pb);
+        CHECK(memcmp(pa, pb, sizeof(pa)) != 0); /* a relay's second run has another id: its proof differs */
+      }
       CHECK(counters_are(0, 0) && F.writes == 2);
       /* the channel uses the keys of the vector: the frames are what a seal with those keys gives */
       {
@@ -540,7 +554,7 @@ static void test_v12(void) {
 /* ---- V13: fingerprints and the proof ---- */
 
 static void test_v13(void) {
-  uint8_t fp[16], cfp[8], plain[64];
+  uint8_t fp[16], cfp[8], plain[SENSEI_COMMISSION_POP_SIZE];
 
   for (int i = 0; i < VEC_COM_FP_COUNT; i++) {
     CHECK(sensei_commission_fingerprint(C0, vec_com_fp[i].node_id, vec_com_fp[i].node_pub, fp) == 0);
@@ -554,14 +568,14 @@ static void test_v13(void) {
     uint8_t env[200];
     int n;
 
-    sensei_commission_proof_plain(p->node_id, p->nonce_g, p->nonce_n, plain);
-    CHECK(p->plain_len == 64 && memcmp(plain, p->plain, 64) == 0);
+    sensei_commission_proof_plain(p->node_id, p->nonce_g, p->nonce_n, p->session_id, plain);
+    CHECK(p->plain_len == 80 && memcmp(plain, p->plain, 80) == 0);
     /* the proof is a kind 3 envelope under k_up with the counter of the node: the normal seal path */
     memcpy(k.k_up, vec_com_pop_k_up, 16);
     memset(k.k_down, 7, 16);
     k.key_id = VEC_COM_POP_KEY_ID;
     CHECK(sensei_secure_init(&node, C0, SENSEI_SECURE_ROLE_NODE, &k, 0, p->counter - 1, 1000, NULL, 0, NULL) == 0);
-    n = sensei_secure_seal(&node, SENSEI_SECURE_KIND_NODE_TO_HOST, NULL, plain, 64, env, sizeof(env));
+    n = sensei_secure_seal(&node, SENSEI_SECURE_KIND_NODE_TO_HOST, NULL, plain, 80, env, sizeof(env));
     CHECK(n == (int)p->proof_len && memcmp(env, p->proof, p->proof_len) == 0);
     sensei_secure_close(&node);
   }

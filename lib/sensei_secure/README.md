@@ -16,7 +16,8 @@ allocation, no Zephyr in the core (`src/sensei_secure.c`). The cipher comes in t
 - `src/sensei_secure_openssl.c`: OpenSSL 3, for host tests and tools.
 
 On top of the envelope, `src/sensei_e2e.c` is the key store of a device (key pair, collector key, counters in flash), and
-`zephyr/sensei_e2e_settings.c` keeps it in the Zephyr settings subsystem (see Key store below).
+`zephyr/sensei_e2e_settings.c` keeps it in the Zephyr settings subsystem (see Key store below). `src/sensei_e2e_seal.c` is
+the sealed record format for secret settings (keys at rest, see "Keys at rest").
 
 ## Keys
 
@@ -101,9 +102,50 @@ opens the session and persists the counters. No Zephyr and no allocation; the ci
 Zephyr: `CONFIG_SENSEI_SECURE_SETTINGS=y` adds the storage on the settings subsystem (`sensei_e2e_settings.h`):
 `sensei_e2e_settings_ops` and `sensei_e2e_settings_load()`. The keys are `<prefix>/e2e_priv`, `e2e_bpub`, `e2e_tx`,
 `e2e_rxs` and `e2e_rxf`; the prefix is `CONFIG_SENSEI_SECURE_SETTINGS_PREFIX` (default `sensei_comm`, the one of the SENSEI
-IEQ node, so a node that updates keeps its keys). The private key is not encrypted at rest: the SDK crypto library has no
-persistent keys, so protect the chip (APPROTECT) in the field. ECC needs a few kB of stack: run the calls on a thread or
+IEQ node, so a node that updates keeps its keys). Without `CONFIG_SENSEI_SECURE_SETTINGS_SEAL` the private key is plain in
+flash: protect the chip (APPROTECT) in the field. ECC needs a few kB of stack: run the calls on a thread or
 work queue with enough stack (the node uses one work queue, 6 kB).
+
+### Keys at rest
+
+`CONFIG_SENSEI_SECURE_SETTINGS_SEAL=y` stores the private key as the sealed record `e2e_privx` instead of `e2e_priv`
+(`include/sensei_e2e_seal.h`, `src/sensei_e2e_seal.c`, mirror in Python: `sensei_sdk.secure.seal_record()`):
+
+```
+u8 version (1) | nonce[12] | AES-128-GCM ciphertext | tag[16]       29 B more than the plain value
+associated data = "sensei-e2e/" || setting name || version
+```
+
+The name is in the associated data, so a record does not open in another place. The nonce is 12 random bytes of the backend
+(new at every save). The key (16 B) comes from the function `int sensei_e2e_settings_seal_key(uint8_t key[16])`, which one of
+these defines (a choice of Kconfig options, or the application):
+
+- `CONFIG_SENSEI_SECURE_SETTINGS_SEAL_HUK` (`zephyr/sensei_e2e_huk.c`): nRF5340 application core. The first call writes a random
+  hardware unique key into the KMU of the CryptoCell-312 (`hw_unique_key_write_random()`, once, until the chip is erased; the CPU
+  cannot read it), then derives the key from the MEXT slot with the label `SENSEI-E2E-AT-REST-v1`. Selects `HW_UNIQUE_KEY`,
+  `HW_UNIQUE_KEY_RANDOM` and `MPU_ALLOW_FLASH_WRITE`; needs `NRF_CC3XX_PLATFORM`. No TF-M. The crypto itself (ECDH, AES, SHA)
+  runs on the Oberon driver; the CryptoCell provides the random numbers and holds the hardware key.
+- `CONFIG_SENSEI_SECURE_SETTINGS_SEAL_TEST_KEY` (`zephyr/sensei_e2e_testkey.c`): a fixed key that a test can change
+  (`sensei_e2e_testkey_set()`) or make fail, for `native_sim`. Never for a product.
+
+The settings code imports the key once as a volatile PSA key and wipes the copy in RAM. Behaviour:
+
+- `sensei_e2e_settings_load()` opens the record. A plain `e2e_priv` of an earlier version is migrated at the first start: sealed
+  to `e2e_privx`, read back and compared, then `e2e_priv` is deleted. The key and the key id do not change. If the migration
+  stops between the two writes, the next start keeps the sealed record and deletes the plain one. The old plain value stays in the
+  flash page until the garbage collection of the settings: a device whose flash others could read must be reset.
+- If the key is not available, or the record does not open (changed, sealed for another name, wrong size, another chip),
+  `nv->key_unreadable` is set, `nv->have_priv` is false, and `sensei_e2e_init()` returns `-EACCES` without making a new key pair
+  and without touching the stored record. The device then has no end-to-end security (visible to the caller). Only
+  `sensei_e2e_reset()` starts over. A provider that fails when there is no key yet makes `sensei_e2e_init()` fail with its error
+  and stores nothing.
+- The name `e2e_rat` is reserved for the ratchet state of a later version (sealed the same way). `erase` deletes it.
+- `sensei_e2e_settings_seal()`, `_unseal()`, `_seal_status()` and `_seal_close()` are the pieces, for the application and tests.
+  Call everything from the one thread that uses the key store.
+
+What it adds: a flash image copied to another chip, and stale settings pages, do not give up the key. What it does not stop: code
+that runs on the chip (open debug port, glitch, a malicious signed image) can use the provider and read the key while it is in use.
+APPROTECT stays the main barrier. A record for a later version of the format has another version byte and is refused.
 
 ## API (`include/sensei_secure.h`)
 
@@ -132,7 +174,12 @@ without the library).
   `tests/generated/vectors.h`. The vectors come from the Python implementation in `tools/python`
   (`python -m sensei_sdk.vectors`, `make vectors`; CI checks that they are current); do not edit the file by hand.
 - `test_e2e` checks the key store (`sensei_e2e`) with a fake flash: first start, provisioning, key A then B then A,
-  two senders, failing writes, full table of senders, clearing and the floor, reset, a damaged key.
+  two senders, failing writes, full table of senders, clearing and the floor, reset, a damaged key, an unreadable key and a key
+  that cannot be stored.
+- `test_seal` checks the sealed settings records against the Python vectors (vector 7, `tests/generated/vectors.h`): the same bytes
+  both ways, every byte covered by the tag, wrong name and key, short and long records, new nonce at every seal.
 
 The same test files run with the Zephyr backend (PSA, Mbed TLS) on `native_sim`: `NRF/tests/secure` (`test_secure`) and
-`NRF/tests/secure_settings` (the settings storage: names, sizes, restart, erase) (`make twister`).
+`NRF/tests/secure_settings` (the settings storage: names, sizes, restart, erase; a second build with sealing and the fixed-key
+provider: sealed names, a record that is changed or does not belong, another key, a failing provider, the migration of the plain key)
+(`make twister`).

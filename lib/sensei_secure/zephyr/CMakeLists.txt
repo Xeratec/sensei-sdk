@@ -11,6 +11,7 @@ zephyr_library_named(sensei_secure)
 zephyr_library_sources(
   ${SENSEI_SECURE_DIR}/src/sensei_secure.c
   ${SENSEI_SECURE_DIR}/src/sensei_e2e.c
+  ${SENSEI_SECURE_DIR}/src/sensei_e2e_seal.c
   ${SENSEI_SECURE_DIR}/src/sensei_secure_zephyr.c
 )
 zephyr_include_directories(${SENSEI_SECURE_DIR}/include)
@@ -18,3 +19,5 @@ zephyr_include_directories(${SENSEI_SECURE_DIR}/include)
 zephyr_library_include_directories(${SENSEI_SECURE_DIR}/../../NRF/system)
 zephyr_compile_definitions(SENSEI_SECURE_BACKEND_ZEPHYR)
 zephyr_library_sources_ifdef(CONFIG_SENSEI_SECURE_SETTINGS ${CMAKE_CURRENT_LIST_DIR}/sensei_e2e_settings.c)
+zephyr_library_sources_ifdef(CONFIG_SENSEI_SECURE_SETTINGS_SEAL_HUK ${CMAKE_CURRENT_LIST_DIR}/sensei_e2e_huk.c)
+zephyr_library_sources_ifdef(CONFIG_SENSEI_SECURE_SETTINGS_SEAL_TEST_KEY ${CMAKE_CURRENT_LIST_DIR}/sensei_e2e_testkey.c)

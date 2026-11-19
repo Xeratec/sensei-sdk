@@ -89,7 +89,7 @@ IMG_ERRORS = (
     "invalid hash",
     "invalid flash address",
     "version read failed",
-    "the running version is not older (upgrade-only upload)",
+    "refused by the version rule (an older image, or a test or confirm while slot 1 holds an older image)",
     "image already pending",
     "invalid image vector table",
     "image too large for the slot",

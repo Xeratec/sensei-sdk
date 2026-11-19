@@ -81,6 +81,8 @@ struct m10s_data {
   enum gnss_navigation_mode nav_mode;
   gnss_systems_t systems;
   bool systems_set;
+  struct gnss_m10s_pvt_ext pvt_ext; /* extras of the last NAV-PVT, under pvt_lock */
+  struct k_spinlock pvt_lock;
   bool active;     /* not in standby */
   bool configured; /* module answered and took the configuration */
   int (*bus_lock)(void *ctx);
@@ -114,6 +116,7 @@ static int m10s_write(const struct device *dev, const uint8_t *buf, size_t len) 
 }
 
 static void m10s_publish_pvt(const struct device *dev, const struct ubx_nav_pvt *p) {
+  struct m10s_data *mdata = dev->data;
   enum gnss_fix_status status = GNSS_FIX_STATUS_NO_FIX;
   enum gnss_fix_quality quality = GNSS_FIX_QUALITY_INVALID;
 
@@ -172,6 +175,22 @@ static void m10s_publish_pvt(const struct device *dev, const struct ubx_nav_pvt 
               .century_year = (uint8_t)(p->year % 100U),
           },
   };
+
+  /* Stored before the publish: inside a GNSS data callback the extras belong to this fix. */
+  k_spinlock_key_t key = k_spin_lock(&mdata->pvt_lock);
+
+  mdata->pvt_ext = (struct gnss_m10s_pvt_ext){
+      .itow_ms = p->itow_ms,
+      .h_acc_mm = p->h_acc_mm,
+      .v_acc_mm = p->v_acc_mm,
+      .height_mm = p->height_mm,
+      .p_dop_e2 = p->pdop_e2,
+      .fix_type = p->fix_type,
+      .num_sv = p->num_sv,
+      .fix_ok = (p->flags & UBX_PVT_FLAGS_GNSS_FIX_OK) && !(p->flags3 & UBX_PVT_FLAGS3_INVALID_LLH),
+      .valid = true,
+  };
+  k_spin_unlock(&mdata->pvt_lock, key);
 
   gnss_publish_data(dev, &data);
 }
@@ -710,6 +729,15 @@ void gnss_m10s_set_bus_hooks(const struct device *dev, int (*lock)(void *ctx), v
   data->bus_unlock = unlock;
   data->bus_ctx = ctx;
   k_mutex_unlock(&data->lock);
+}
+
+int gnss_m10s_get_pvt_ext(const struct device *dev, struct gnss_m10s_pvt_ext *out) {
+  struct m10s_data *data = dev->data;
+  k_spinlock_key_t key = k_spin_lock(&data->pvt_lock);
+
+  *out = data->pvt_ext;
+  k_spin_unlock(&data->pvt_lock, key);
+  return out->valid ? 0 : -EAGAIN;
 }
 
 bool gnss_m10s_is_configured(const struct device *dev) {

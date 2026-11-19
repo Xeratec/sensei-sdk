@@ -67,6 +67,28 @@ int gnss_m10s_reset(const struct device *dev);
  */
 void gnss_m10s_set_bus_hooks(const struct device *dev, int (*lock)(void *ctx), void (*unlock)(void *ctx), void *ctx);
 
+/** What the Zephyr GNSS API does not carry from the last UBX-NAV-PVT. */
+struct gnss_m10s_pvt_ext {
+  uint32_t itow_ms;  /**< GPS time of week of the fix, ms (to match it with a published fix) */
+  uint32_t h_acc_mm; /**< horizontal accuracy estimate */
+  uint32_t v_acc_mm; /**< vertical accuracy estimate */
+  int32_t height_mm; /**< height above the WGS84 ellipsoid */
+  uint16_t p_dop_e2; /**< position DOP, 0.01 */
+  uint8_t fix_type;  /**< UBX fixType: 2 = 2D, 3 = 3D */
+  uint8_t num_sv;    /**< satellites used */
+  bool fix_ok;       /**< gnssFixOK flag set and the position valid */
+  bool valid;        /**< a NAV-PVT has arrived since boot */
+};
+
+/**
+ * @brief Copy the extras of the last NAV-PVT (thread and callback safe).
+ *
+ * The driver stores them just before it publishes the fix. Called from inside a GNSS_DATA_CALLBACK they belong to
+ * the fix being published. From elsewhere they are those of the latest fix, which may be newer than the one seen.
+ * @retval 0, -EAGAIN if no NAV-PVT has arrived yet (out is zero)
+ */
+int gnss_m10s_get_pvt_ext(const struct device *dev, struct gnss_m10s_pvt_ext *out);
+
 /** @brief True if the module answered and accepted the configuration. */
 bool gnss_m10s_is_configured(const struct device *dev);
 

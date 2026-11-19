@@ -47,6 +47,7 @@ struct bme688_data {
   bool probed;
   bool present;
   bool heater_dirty;
+  bool heater_off; /* kept across the probe, which loads the devicetree defaults */
   uint32_t meas_ms;
   struct bme68x_data sample;
 };
@@ -91,7 +92,8 @@ static int apply_heater(const struct device *dev) {
   if (bme68x_set_heatr_conf(BME68X_FORCED_MODE, &d->heatr, &d->dev) != BME68X_OK) {
     return -EIO;
   }
-  d->meas_ms = bme68x_get_meas_dur(BME68X_FORCED_MODE, &d->conf, &d->dev) / 1000 + d->heatr.heatr_dur + 2;
+  d->meas_ms = bme68x_get_meas_dur(BME68X_FORCED_MODE, &d->conf, &d->dev) / 1000 +
+               (d->heatr.enable == BME68X_ENABLE ? d->heatr.heatr_dur : 0) + 2;
   d->heater_dirty = false;
   return 0;
 }
@@ -120,7 +122,7 @@ int sensei_bme688_probe(const struct device *dev) {
   if (bme68x_set_conf(&d->conf, &d->dev) != BME68X_OK) {
     return -EIO;
   }
-  d->heatr.enable = BME68X_ENABLE;
+  d->heatr.enable = d->heater_off ? BME68X_DISABLE : BME68X_ENABLE;
   d->heatr.heatr_temp = cfg->heater_temp_c;
   d->heatr.heatr_dur = cfg->heater_dur_ms;
   if (apply_heater(dev) < 0) {
@@ -139,6 +141,15 @@ int sensei_bme688_set_heater(const struct device *dev, uint16_t temp_c, uint16_t
   }
   d->heatr.heatr_temp = temp_c;
   d->heatr.heatr_dur = duration_ms;
+  d->heater_dirty = true; /* written at the next start, once the chip is set up */
+  return 0;
+}
+
+int sensei_bme688_set_heater_enabled(const struct device *dev, bool enabled) {
+  struct bme688_data *d = dev->data;
+
+  d->heater_off = !enabled;
+  d->heatr.enable = enabled ? BME68X_ENABLE : BME68X_DISABLE;
   d->heater_dirty = true; /* written at the next start, once the chip is set up */
   return 0;
 }

@@ -22,6 +22,7 @@
 #ifndef SENSEI_DRIVERS_BME688_H_
 #define SENSEI_DRIVERS_BME688_H_
 
+#include <stdbool.h>
 #include <stdint.h>
 #include <zephyr/device.h>
 
@@ -41,6 +42,14 @@ int sensei_bme688_probe(const struct device *dev);
  * @param duration_ms 1 to 4032
  */
 int sensei_bme688_set_heater(const struct device *dev, uint16_t temp_c, uint16_t duration_ms);
+
+/**
+ * @brief Switch the gas heater off or on (on by default). Applies from the next measurement.
+ *
+ * Off: no heater current, no self-heating of the temperature and humidity reading, and a shorter measurement
+ * (no heater duration). SENSOR_CHAN_GAS_RES then reads 0. Can be called before the chip is set up.
+ */
+int sensei_bme688_set_heater_enabled(const struct device *dev, bool enabled);
 
 /**
  * @brief Start one forced measurement.

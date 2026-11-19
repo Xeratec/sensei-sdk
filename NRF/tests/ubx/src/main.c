@@ -43,6 +43,7 @@ static void make_pvt(uint8_t *pl) {
   put32(&pl[32], 450000);              /* height */
   put32(&pl[36], 408000);              /* hMSL */
   put32(&pl[40], 3200);                /* hAcc */
+  put32(&pl[44], 4500);                /* vAcc */
   put32(&pl[60], 1500);                /* gSpeed */
   put32(&pl[64], (uint32_t)-9000000);  /* headMot -90 deg */
   put16(&pl[76], 123);                 /* pDOP */
@@ -149,6 +150,9 @@ ZTEST(ubx, test_parse_nav_pvt) {
   zassert_equal(pvt.lat_e7, 474100000);
   zassert_equal(pvt.hmsl_mm, 408000);
   zassert_equal(pvt.h_acc_mm, 3200);
+  zassert_equal(pvt.v_acc_mm, 4500);
+  zassert_equal(pvt.height_mm, 450000);
+  zassert_equal(pvt.flags & UBX_PVT_FLAGS_GNSS_FIX_OK, UBX_PVT_FLAGS_GNSS_FIX_OK);
   zassert_equal(pvt.gspeed_mmps, 1500);
   zassert_equal(pvt.head_mot_e5, -9000000);
   zassert_equal(pvt.pdop_e2, 123);

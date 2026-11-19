@@ -196,10 +196,10 @@ API. Not tested on hardware.
   and is off or offline, sets it). The normal functional mode activates the GNSS that is in the system mode, so the connect takes it back at once
   (`LTE_LC_FUNC_MODE_DEACTIVATE_GNSS`): GNSS is active only for an attempt: a worker thread sets functional mode 31, starts a single fix
   (`fix_interval` 0, `fix_retry` = the timeout, no NMEA strings), waits for a valid PVT frame, the timeout or a cancel, stops and ends the fix
-  (`lte_gnss_end()`): functional mode 30 if the modem was running when the fix began, **0 (power off) if it was off (mode 0 or 4)**, also when LTE is wanted but the connect failed, so that the modem saves what the GNSS learned
+  (`lte_gnss_end()`): functional mode 30 if the modem was running when the fix began, **0 (power off) if it was off (mode 0 or 4)**, also when LTE is wanted but the connect failed, **and if LTE was released during the fix** (a disconnect or deep sleep queued before the fix began), so that the modem saves what the GNSS learned
   (ephemerides, time, last position) before the node cuts the shield's supply. Then it queues the event. It works with LTE off. The functional
   mode changes of a fix and of the LTE worker (release, deep sleep) take one lock; a release or deep sleep that comes while a fix has GNSS active
-  deactivates only LTE (mode 20), and the end of the fix does the rest. The fix time stamps the PVT frame: the result carries `age_ms` and the
+  deactivates only LTE (mode 20) and makes the end of the fix power the modem off, not leave it in mode 30 (`gnss_end_power_off`). The fix time stamps the PVT frame: the result carries `age_ms` and the
   UTC of the fix rounded with the receiver's milliseconds. **Warm and cold start.** A power cycle of the shield between two fixes is a warm start
   (the modem keeps its data in its flash); a cold start needs `nrf_modem_gnss_nv_data_delete()`, which is a debug feature. There is no shell on
   the shield: change `gnss.c` for a test. Untested on hardware: that mode 0 before the cut keeps the data (node repo `firmware/docs/TESTING.md`, T15.15).

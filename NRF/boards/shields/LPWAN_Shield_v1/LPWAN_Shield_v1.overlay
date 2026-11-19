@@ -14,7 +14,7 @@
  * - nRF21540 TX_EN on P0.27 and RX_EN on P1.13 (not used by the firmware yet). Its power-down nPD and MODE are on the
  *   expander (P5, P6): the client holds both low while the extender is not in use (the default).
  * - Without a shield the expander does not answer: its driver stays down and the client never starts (the node uses
- *   BLE for its uplinks).
+ *   BLE for its uplinks). The client then gives P1.12 back (no pull-up, no interrupt).
  */
 
 &pinctrl {
@@ -47,6 +47,11 @@
 		#gpio-cells = <2>;
 		ngpios = <8>;
 		int-gpios = <&gpio1 12 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
+		/* The expander stays on its rail over a reset of the nRF5340. The driver's automatic reset would turn all
+		 * pins into inputs at every boot, until lpwan_init(): EN_3V3 (1 M pull-up) switches the shield on and
+		 * nPD and MODE float. Without it the driver reads the pins as they are, so they keep their outputs. At a
+		 * power-up of the whole node the expander starts as all inputs anyway (see HARDWARE.md). */
+		no-auto-reset;
 	};
 };
 

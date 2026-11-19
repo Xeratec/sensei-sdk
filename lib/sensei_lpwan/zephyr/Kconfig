@@ -121,14 +121,16 @@ config SENSEI_LPWAN_SIM
 	  The link to the nRF9151 is a TCP connection to the simulated shield app (NRF/apps/lpwan_shield built for
 	  native_sim): `zephyr.exe -lpwan_shield=<host>:<port>`. Connecting is the power of the shield, closing the
 	  connection cuts it. Without a target the simulated node has no shield, as a base board without the LPWAN
-	  shield. For tests without hardware. See lib/sensei_lpwan/README.md.
+	  shield; on BabbleSim that is the only case (no target there). For tests without hardware. See
+	  lib/sensei_lpwan/README.md.
 
 config SENSEI_LPWAN_SIM_TARGET
 	string "Where the simulated shield listens, host:port (the command line option -lpwan_shield wins)"
 	default ""
-	depends on SENSEI_LPWAN_SIM
+	depends on SENSEI_LPWAN_SIM && BOARD_NATIVE_SIM
 	help
 	  For tests that cannot give a command line (Twister). A port that nobody listens on is a shield that never boots.
+	  Not on BabbleSim: its time is simulated, a TCP peer runs in real time. A BabbleSim node has no shield.
 
 config SENSEI_LPWAN_SPI_HZ
 	int "SPI clock, Hz"

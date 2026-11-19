@@ -31,6 +31,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 
+#include "../src/lte.h"
 #include "sensei_lpwan/lpwan_sim.h"
 #include "sim_shield.h"
 
@@ -384,6 +385,11 @@ void sim_modem_command(int argc, char **argv) {
 #endif
   } else if (argc >= 2 && strcmp(argv[0], "energy") == 0) {
     energy = atoi(argv[1]);
+  } else if (argc >= 1 && strcmp(argv[0], "sleep_deep") == 0) {
+    /* The LTE worker gets a deep sleep request (power off), as lte_sleep(1) of a client that asks for it (the nRF5340
+     * client does not today). With a fix running only LTE goes, and the end of the fix powers the modem off. */
+    LOG_INF("modem: deep sleep requested");
+    (void)lte_sleep(1);
   } else if (argc >= 1 && strcmp(argv[0], "fault") == 0) {
     struct nrf_modem_fault_info f = {.reason = 0x4D, .program_counter = 0x20001234};
 

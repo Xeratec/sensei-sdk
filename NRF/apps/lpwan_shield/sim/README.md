@@ -80,6 +80,7 @@ Harness to shield:
 | `modem rai 0/1` / `modem energy N` | the cell supports RAI or not; the energy class of the connection evaluation (5 excessive, 7 normal) |
 | `gnss fix [delay_s [lat_e7 lon_e7 alt_m acc_m sats]]` | the next fix attempts end with a valid fix after `delay_s` (default 3 s; default place: 47.3764 N, 8.5476 E, 410 m, 5 m, 8 satellites) |
 | `gnss timeout` / `gnss blocked [unblock_s]` / `gnss error` | no fix until the retry time ends the attempt (`timeout`); GNSS blocked by LTE and, without `unblock_s`, never unblocked, so the result is `blocked` (with `unblock_s` it is unblocked then and the attempt ends as `timeout`); the start of the receiver fails (`failed`) |
+| `modem sleep_deep` | the LTE worker gets a deep sleep request (`lte_sleep(1)`: LTE off, the modem powered off; the nRF5340 client does not send it today). During a fix only LTE goes, and the end of the fix powers the modem off |
 | `modem fault` | the modem core crashes: `nrf_modem_fault_handler` records it and resets the chip |
 | `shield reset` | the shield restarts |
 

@@ -50,6 +50,8 @@ ZTEST(lpwan_absent, test_no_shield_means_absent_and_inert) {
   static const uint8_t data[4] = {1, 2, 3, 4};
   sensei_LpwanVersion v;
   sensei_LpwanRequest rq = sensei_LpwanRequest_init_zero;
+  sensei_LoraProvision keys = sensei_LoraProvision_init_zero;
+  struct lpwan_info info;
 
   zassert_equal(sensei_lpwan_shield_state(), LPWAN_SHIELD_UNKNOWN, "not decided before init");
   zassert_equal(sensei_lpwan_init(&hooks, &cfg), -ENODEV);
@@ -70,6 +72,11 @@ ZTEST(lpwan_absent, test_no_shield_means_absent_and_inert) {
   zassert_equal(sensei_lpwan_cmd_power(true), -ENODEV);
   zassert_equal(sensei_lpwan_cmd_connect(sensei_Radio_RADIO_LTEM), -ENODEV);
   zassert_equal(sensei_lpwan_lte_link_check(), SENSEI_LPWAN_LINK_OK);
+  /* LoRa keys are not kept in RAM with nothing to take them (the shell and the app call these) */
+  zassert_equal(sensei_lpwan_lora_keys_queue(&keys), -ENODEV);
+  zassert_equal(sensei_lpwan_lora_provision(&keys), -ENODEV);
+  sensei_lpwan_get_info(&info);
+  zassert_false(info.provisioned_pending, "no keys waiting");
   zassert_equal(sensei_lpwan_shield_version(&v), -ENODATA);
   sensei_lpwan_set_config(&cfg); /* harmless */
 

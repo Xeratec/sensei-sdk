@@ -28,6 +28,11 @@ static int cmd_status(const struct shell *sh, size_t argc, char **argv) {
     shell_print(sh, "shield absent (the expander does not answer): the node sends over BLE; reboot to look again");
     return 0;
   }
+  if (sensei_lpwan_shield_state() == LPWAN_SHIELD_FAULT) {
+    shell_print(
+        sh, "shield fault (the expander answers but cannot be set up): the node sends over BLE; reboot to look again");
+    return 0;
+  }
   shell_print(sh, "shield %s, link %s, state %s, tech %s%s", i.shield_on ? "on" : "off", i.link_up ? "up" : "down",
               lpwan_state_name(i.state), lpwan_tech_name(i.tech),
               i.tech == LPWAN_TECH_LTE ? (i.lte_mode_nb ? " (NB-IoT)" : " (LTE-M)") : "");

@@ -16,8 +16,9 @@
  * has ended; a result that never comes ends with -ETIMEDOUT and a cancel request; power off during a fix ends it with
  * -ENOTCONN and the next fix works; a result that arrives before the answer to the request is taken; an update of the
  * shield is refused (-EBUSY); the time of the fix is moved to now, counted from the EVENT edge of the result and not
- * from the moment the client thread read it (a slow answer to another request holds the thread); a release that the
- * shield refuses (BUSY: it still runs the fix after the client gave it up) is tried again. */
+ * from the moment the client thread read it (a slow answer to another request holds the thread), also with an earlier
+ * event queued before it; a release that the shield refuses (BUSY: it still runs the fix after the client gave it up)
+ * is tried again, five times, and again after a give-up; a connect that comes meanwhile cancels the retry. */
 
 #include <string.h>
 
@@ -566,6 +567,75 @@ ZTEST(lpwan_gnss, test_release_is_tried_again_after_busy) {
   zassert_true(ok > first);
   zassert_equal(fk.log[ok].res, sensei_LpwanResult_LPWAN_OK);
   zassert_equal(fake_sm().tech, LPWAN_TECH_NONE, "released");
+}
+
+ZTEST(lpwan_gnss, test_result_time_with_several_events_queued) {
+  static const uint8_t data[4] = {1, 2, 3, 4};
+  sensei_LpwanEvent stray = sensei_LpwanEvent_init_zero;
+
+  /* EVENT stays high while events are queued: the interrupt sees the edge of the first one only. An earlier event is
+   * queued at 0.1 s and the result at 0.7 s; the client thread is held by a slow answer until 1.5 s and reads both
+   * then. The result is not older than 0.8 s, and with age 0 it must not be moved on by more than that: +1 s at most.
+   * Counted from the edge of the first event (1.4 s) it would be +2 s, the clock ahead. */
+  stray.which_body = sensei_LpwanEvent_error_tag;
+  stray.error.code = sensei_LpwanResult_LPWAN_BUSY;
+  connect_lte();
+  start_fix(60);
+  k_mutex_lock(&st_lock, K_FOREVER);
+  fk.age_ms = 0;
+  fk.send_delay_ms = 1500;
+  k_mutex_unlock(&st_lock);
+  zassert_ok(sensei_lpwan_radio_send(sensei_Radio_RADIO_LTEM, data, sizeof(data), send_done, NULL));
+  k_msleep(100); /* the request is at the shield, its answer is held */
+  k_mutex_lock(&st_lock, K_FOREVER);
+  push(&stray);
+  k_mutex_unlock(&st_lock);
+  k_msleep(600);
+  fake_end_fix(sensei_GnssFixStatus_GNSS_FIX_OK);
+  zassert_true(wait_int(&fix_calls, 1, 20000));
+  zassert_true(wait_int(&sent_calls, 1, 20000));
+  zassert_equal(fix_res.status, sensei_GnssFixStatus_GNSS_FIX_OK);
+  zassert_true(fix_res.unix_time <= FIX_UTC + 1, "time +%d s: counted from the first event's edge",
+               (int)(fix_res.unix_time - FIX_UTC));
+}
+
+ZTEST(lpwan_gnss, test_release_gives_up_and_a_later_release_is_tried_again) {
+  /* The shield keeps refusing the release (BUSY). The client tries RELEASE_TRIES_MAX more times, then gives up and
+   * resets the count: a release that comes later gets its tries again (it did not: the count stayed at 6). */
+  k_mutex_lock(&st_lock, K_FOREVER);
+  fk.ignore_cancel = true;
+  k_mutex_unlock(&st_lock);
+  connect_lte();
+  start_fix(1);
+  zassert_ok(sensei_lpwan_cmd_disconnect());
+  zassert_true(wait_int(&fix_calls, 1, 60000));
+  zassert_true(wait_log(sensei_LpwanRequest_lte_disconnect_tag, 6, 60000), "the first release and five tries");
+  k_msleep(10000);
+  zassert_equal(log_count(sensei_LpwanRequest_lte_disconnect_tag), 6, "no seventh try: given up");
+  zassert_ok(sensei_lpwan_cmd_disconnect()); /* a later release */
+  zassert_true(wait_log(sensei_LpwanRequest_lte_disconnect_tag, 8, 20000), "no new tries after the give-up");
+  fake_end_fix(sensei_GnssFixStatus_GNSS_FIX_CANCELLED); /* the shield is done: the next try goes through */
+  zassert_true(wait_log(sensei_LpwanRequest_lte_disconnect_tag, 9, 10000));
+  k_msleep(300);
+  zassert_equal(fake_sm().tech, LPWAN_TECH_NONE, "released");
+}
+
+ZTEST(lpwan_gnss, test_a_connect_cancels_the_release_that_waits_for_its_retry) {
+  /* The release was refused (BUSY) and waits for its retry. LTE is wanted again meanwhile: the retry does nothing. */
+  k_mutex_lock(&st_lock, K_FOREVER);
+  fk.ignore_cancel = true;
+  k_mutex_unlock(&st_lock);
+  connect_lte();
+  start_fix(1);
+  zassert_ok(sensei_lpwan_cmd_disconnect());
+  zassert_true(wait_int(&fix_calls, 1, 60000));
+  zassert_true(wait_log(sensei_LpwanRequest_lte_disconnect_tag, 1, 5000), "the release was tried");
+  zassert_ok(sensei_lpwan_cmd_connect(sensei_Radio_RADIO_LTEM)); /* LTE is wanted again */
+  k_msleep(300);
+  fake_end_fix(sensei_GnssFixStatus_GNSS_FIX_CANCELLED);
+  k_msleep(8000); /* the retry timer has run out */
+  zassert_equal(log_count(sensei_LpwanRequest_lte_disconnect_tag), 1, "the retry released a connection that is wanted");
+  zassert_equal(fake_sm().tech, LPWAN_TECH_LTE);
 }
 
 ZTEST(lpwan_gnss, test_lte_connect_waits_for_the_fix) {

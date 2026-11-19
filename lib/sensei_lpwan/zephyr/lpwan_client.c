@@ -30,6 +30,7 @@
 #include <zephyr/devicetree.h>
 #include <zephyr/drivers/gpio.h>
 #ifndef CONFIG_SENSEI_LPWAN_SIM
+#include <zephyr/drivers/i2c.h>
 #include <zephyr/drivers/pinctrl.h>
 #endif
 #include <zephyr/drivers/spi.h>
@@ -57,6 +58,7 @@ LOG_MODULE_REGISTER(sensei_lpwan, CONFIG_SENSEI_LPWAN_LOG_LEVEL);
 #define LINK_NODE DT_ALIAS(lpwan_link)
 #define SPI_NODE DT_ALIAS(lpwan_spi)
 #define SPI_BUS DT_BUS(SPI_NODE)
+#define EXPANDER_NODE DT_GPIO_CTLR(LINK_NODE, power_gpios)
 #endif
 
 #define LORA_MTU SENSEI_LPWAN_MTU_LORA
@@ -116,6 +118,10 @@ static const struct gpio_dt_spec pin_fem_pd = GPIO_DT_SPEC_GET(LINK_NODE, fem_pd
 static const struct gpio_dt_spec pin_fem_mode = GPIO_DT_SPEC_GET(LINK_NODE, fem_mode_gpios);
 #endif
 
+/* The expander over plain I2C (the start-up check and the power cut when its driver is down) and its INT line. */
+static const struct i2c_dt_spec expander_i2c = I2C_DT_SPEC_GET(EXPANDER_NODE);
+static const struct gpio_dt_spec expander_int = GPIO_DT_SPEC_GET(EXPANDER_NODE, int_gpios);
+
 static const struct spi_dt_spec spi_nrf91 =
     SPI_DT_SPEC_GET(SPI_NODE, SPI_OP_MODE_MASTER | SPI_WORD_SET(8) | SPI_TRANSFER_MSB);
 static const struct device *const spi_dev = DEVICE_DT_GET(SPI_BUS);
@@ -142,9 +148,10 @@ PINCTRL_DT_DEFINE(SPI_BUS); /* own copy of the pin states: the driver's is stati
  */
 
 static K_SEM_DEFINE(event_sem, 0, 1);
-/* Uptime of the first EVENT edge that the thread has not caught up with yet (0: none), set in the EVENT interrupt. It
- * ends when the thread has read the events and the line is low again. An edge older than EDGE_MAX_AGE_MS is not
- * believed. */
+/* Uptime of the EVENT edge of the event that the thread reads next (0: none), set in the EVENT interrupt. EVENT is a
+ * level: it stays high while events are queued, so the interrupt sees the edge of the first one only. After each event
+ * that the thread has read while the line is still high, the stamp is set to that moment (edge_restamp(): the next
+ * event was queued by then). It ends when the line is low again. An edge older than EDGE_MAX_AGE_MS is not believed. */
 #define EDGE_MAX_AGE_MS 30000
 static struct k_spinlock edge_lock;
 static int64_t event_edge;
@@ -164,6 +171,13 @@ static int64_t edge_get(void) {
 
   k_spin_unlock(&edge_lock, k);
   return e;
+}
+
+static void edge_restamp(void) {
+  k_spinlock_key_t k = k_spin_lock(&edge_lock);
+
+  event_edge = MAX(k_uptime_get(), 1);
+  k_spin_unlock(&edge_lock, k);
 }
 
 static void edge_clear(void) {
@@ -186,6 +200,13 @@ static atomic_t shield_state = LPWAN_SHIELD_UNKNOWN;
 static bool client_up;
 
 static enum lpwan_shield_state shield_state_get(void) { return (enum lpwan_shield_state)atomic_get(&shield_state); }
+
+/* False once the start-up check found no shield or one that cannot be used (the client does not run then). */
+static bool shield_usable_or_unknown(void) {
+  const enum lpwan_shield_state st = shield_state_get();
+
+  return st != LPWAN_SHIELD_ABSENT && st != LPWAN_SHIELD_FAULT;
+}
 
 static void level_update(void);
 
@@ -270,7 +291,8 @@ enum cmd_type {
   CMD_DFU,
   CMD_EVAL,
   CMD_GNSS,
-  CMD_GNSS_CANCEL
+  CMD_GNSS_CANCEL,
+  CMD_RELEASE_RETRY /* the timer of a release that the shield refused (BUSY): runs in the thread */
 };
 
 struct cmd {
@@ -518,7 +540,9 @@ static void finish_send(int err) {
 /* ---- shield power and link ---- */
 
 /* The nRF21540 lines. The extender is not used by default (CONFIG_SENSEI_LPWAN_FEM off): nPD (P5) and MODE (P6) are
- * driven low, at every bring-up and at power-off, and stay so. Never left as inputs: they would float. */
+ * driven low, at every bring-up and at power-off, and stay so. Never left as inputs: they would float. In use, nPD goes
+ * high after the shield's 3.3 V is on (shield_up()) and low before it is cut (expander_outputs(false), shield_down()).
+ */
 #ifdef HAVE_FEM_PINS
 static int fem_drive(bool shield_is_on) {
   const struct lpwan_fem_levels l = lpwan_fem_levels(IS_ENABLED(CONFIG_SENSEI_LPWAN_FEM), shield_is_on,
@@ -539,7 +563,8 @@ static int expander_outputs(bool on) {
   int err = 0;
 
 #ifdef HAVE_FEM_PINS
-  err |= fem_drive(on);
+  err |=
+      fem_drive(false); /* low before the 3.3 V changes: on the way up it is raised later, on the way down it is low */
 #endif
   err |= gpio_pin_configure_dt(
       &pin_bbmode, on ? (IS_ENABLED(CONFIG_SENSEI_LPWAN_BB_MODE_PFM) ? GPIO_OUTPUT_INACTIVE : GPIO_OUTPUT_ACTIVE)
@@ -835,11 +860,13 @@ static void event_apply(void *c, const sensei_LpwanEvent *evt) {
 }
 
 /* An event frame was read. When the EVENT line is low again the thread has caught up: the edge of the next event is a
- * new one. */
+ * new one. While it is still high, the next event is already queued: its edge is not the first one's. */
 static void op_on_event(void *c, const sensei_LpwanEvent *evt) {
   event_apply(c, evt);
   if (!op_event_pending(NULL)) {
     edge_clear();
+  } else {
+    edge_restamp();
   }
 }
 
@@ -1120,6 +1147,9 @@ static int shield_up_for(uint32_t boot_timeout_ms) {
     }
     /* 3.3 V on, then the level shifter (unless GAP9 has the bus), then SPI. */
     k_msleep(5);
+#if defined(HAVE_FEM_PINS) && defined(CONFIG_SENSEI_LPWAN_FEM)
+    (void)fem_drive(true); /* the extender wakes up on a supply that is on */
+#endif
     shield_on = true;
     report_power(true);
     level_update();
@@ -1184,12 +1214,12 @@ static void shield_down(void) {
 #ifdef CONFIG_SENSEI_LPWAN_SIM
   (void)lpwan_sim_master_power(false); /* 3.3 V off */
 #else
+#ifdef HAVE_FEM_PINS
+  (void)fem_drive(false); /* the extender goes down before its supply */
+#endif
   (void)gpio_pin_configure_dt(&pin_level, GPIO_OUTPUT_INACTIVE);
   (void)gpio_pin_configure_dt(&pin_ack, GPIO_OUTPUT_INACTIVE);
   (void)gpio_pin_configure_dt(&pin_power, GPIO_OUTPUT_INACTIVE); /* 3.3 V off */
-#ifdef HAVE_FEM_PINS
-  (void)fem_drive(false);
-#endif
 #endif
   level_on = false;
   lpwan_upd_power_cut(&upd); /* an image on trial goes back: a swap at power-up */
@@ -1559,12 +1589,10 @@ static void do_gnss_cancel(void) {
 #define RELEASE_RETRY_MS 3000
 #define RELEASE_TRIES_MAX 5
 
+/* System work queue: only posts. release_deferred belongs to the thread, which looks at it (CMD_RELEASE_RETRY). */
 static void release_fn(struct k_work *w) {
   ARG_UNUSED(w);
-  if (release_deferred) { /* a connect that came since has cleared it */
-    release_deferred = false;
-    (void)post(CMD_DISCONNECT, sensei_Radio_RADIO_BLE, false);
-  }
+  (void)post(CMD_RELEASE_RETRY, sensei_Radio_RADIO_BLE, false);
 }
 
 static void do_disconnect(void) {
@@ -1578,11 +1606,16 @@ static void do_disconnect(void) {
   if (simple_request(sensei_LpwanRequest_lte_disconnect_tag) == 0) {
     release_tries = 0;
     (void)lpwan_master_fetch_events(&master, 8);
-  } else if (last_result == sensei_LpwanResult_LPWAN_BUSY && sm.tech == LPWAN_TECH_LTE &&
-             release_tries++ < RELEASE_TRIES_MAX) {
-    LOG_INF("release refused (BUSY), again in %u s", (unsigned)(RELEASE_RETRY_MS / 1000));
-    release_deferred = true;
-    (void)k_work_reschedule(&release_work, K_MSEC(RELEASE_RETRY_MS));
+  } else if (last_result == sensei_LpwanResult_LPWAN_BUSY && sm.tech == LPWAN_TECH_LTE) {
+    if (release_tries < RELEASE_TRIES_MAX) {
+      release_tries++;
+      LOG_INF("release refused (BUSY), again in %u s", (unsigned)(RELEASE_RETRY_MS / 1000));
+      release_deferred = true;
+      (void)k_work_reschedule(&release_work, K_MSEC(RELEASE_RETRY_MS));
+    } else {
+      release_tries = 0; /* given up: a later release gets its tries again */
+      LOG_WRN("release refused (BUSY) %u times, given up", (unsigned)RELEASE_TRIES_MAX);
+    }
   }
 }
 
@@ -1911,6 +1944,12 @@ static void handle_cmd(const struct cmd *c) {
     break;
   case CMD_GNSS_CANCEL:
     do_gnss_cancel();
+    break;
+  case CMD_RELEASE_RETRY:
+    if (release_deferred) { /* a connect that came since has cleared it */
+      release_deferred = false;
+      do_disconnect();
+    }
     break;
   case CMD_SETTINGS:
     /* The next connect configures from the new settings. A connected LoRa or LTE link is
@@ -2242,9 +2281,97 @@ void sensei_lpwan_set_config(const struct sensei_lpwan_config *c) {
   (void)post(CMD_SETTINGS, sensei_Radio_RADIO_BLE, false);
 }
 
-int sensei_lpwan_init(const struct sensei_lpwan_hooks *h, const struct sensei_lpwan_config *c) {
+#ifndef CONFIG_SENSEI_LPWAN_SIM
+/* ---- start-up check of the shield (lpwan_shield.h): the hardware side ---- */
+
+/* TCAL6408 (and PCAL6408A): output drive strength 0 resets to 0xFF. A PCA6416A has no register 0x40. */
+#define EXPANDER_REG_ID 0x40
+#define EXPANDER_ID_VALUE 0xFF
+#define EXPANDER_REG_OUTPUT 0x01
+#define EXPANDER_REG_CONFIG 0x03
+#define PIN_RETRY_PAUSE_MS 20
+
+static bool start_expander_answers(void *c) {
+  uint8_t v = 0;
+
+  ARG_UNUSED(c);
+  return i2c_is_ready_dt(&expander_i2c) && i2c_reg_read_byte_dt(&expander_i2c, EXPANDER_REG_ID, &v) == 0 &&
+         v == EXPANDER_ID_VALUE;
+}
+
+static bool start_devices_ready(void *c) {
+  ARG_UNUSED(c);
+  return device_is_ready(spi_dev) && gpio_is_ready_dt(&pin_event) && gpio_is_ready_dt(&pin_busy) &&
+         gpio_is_ready_dt(&pin_power) && gpio_is_ready_dt(&pin_gap_sel);
+}
+
+static int start_pins_init(void *c) {
   int err = 0;
 
+  ARG_UNUSED(c);
+  /* Shield off, SPI pins parked, GAP9 free to use the bus. */
+  err |= gpio_pin_configure_dt(&pin_gap_sel, GPIO_OUTPUT_INACTIVE);
+  err |= gpio_pin_configure_dt(&pin_event, GPIO_INPUT | GPIO_PULL_DOWN);
+  err |= expander_outputs(false);
+  return err ? -EIO : 0;
+}
+
+static int start_irq_setup(void *c) {
+  int err;
+
+  ARG_UNUSED(c);
+  gpio_init_callback(&event_cb, event_isr, BIT(pin_event.pin));
+  err = gpio_add_callback(pin_event.port, &event_cb);
+  err |= gpio_pin_interrupt_configure_dt(&pin_event, GPIO_INT_EDGE_RISING);
+  return err ? -EIO : 0;
+}
+
+/* EN_3V3 low, with the driver if it is up, else over plain I2C: read-modify-write of the output and the direction
+ * register, so the other pins keep what they have. The driver's own copy is stale then, which does not matter: a node
+ * in this state never uses the expander again. */
+static void start_power_cut(void *c) {
+  uint8_t out, dir;
+
+  ARG_UNUSED(c);
+  if (gpio_is_ready_dt(&pin_power) && gpio_pin_configure_dt(&pin_power, GPIO_OUTPUT_INACTIVE) == 0) {
+    return;
+  }
+  if (i2c_is_ready_dt(&expander_i2c) && i2c_reg_read_byte_dt(&expander_i2c, EXPANDER_REG_OUTPUT, &out) == 0 &&
+      i2c_reg_read_byte_dt(&expander_i2c, EXPANDER_REG_CONFIG, &dir) == 0) {
+    out &= (uint8_t)~BIT(DT_GPIO_PIN(LINK_NODE, power_gpios));
+    dir &= (uint8_t)~BIT(DT_GPIO_PIN(LINK_NODE, power_gpios)); /* output */
+    (void)i2c_reg_write_byte_dt(&expander_i2c, EXPANDER_REG_OUTPUT, out);
+    (void)i2c_reg_write_byte_dt(&expander_i2c, EXPANDER_REG_CONFIG, dir);
+  }
+}
+
+/* No shield: the driver, which failed, left P1.12 (the base board's MSP_CS net) as an input with a pull-up and an
+ * edge interrupt: every falling edge would start an I2C read to nothing. Give it back. */
+static void start_release(void *c) {
+  ARG_UNUSED(c);
+  if (gpio_is_ready_dt(&expander_int)) {
+    (void)gpio_pin_interrupt_configure_dt(&expander_int, GPIO_INT_DISABLE);
+    (void)gpio_pin_configure_dt(&expander_int, GPIO_DISCONNECTED);
+  }
+}
+
+static void start_pause(void *c) {
+  ARG_UNUSED(c);
+  k_msleep(PIN_RETRY_PAUSE_MS);
+}
+
+static const struct lpwan_shield_ops start_ops = {
+    .expander_answers = start_expander_answers,
+    .devices_ready = start_devices_ready,
+    .pins_init = start_pins_init,
+    .irq_setup = start_irq_setup,
+    .power_cut = start_power_cut,
+    .release = start_release,
+    .pause = start_pause,
+};
+#endif /* !CONFIG_SENSEI_LPWAN_SIM */
+
+int sensei_lpwan_init(const struct sensei_lpwan_hooks *h, const struct sensei_lpwan_config *c) {
   hooks = *h;
   cfg = *c;
 
@@ -2268,7 +2395,8 @@ int sensei_lpwan_init(const struct sensei_lpwan_hooks *h, const struct sensei_lp
     LOG_WRN("no LPWAN shield (the simulator has no -lpwan_shield): the node uses BLE");
     return -ENODEV;
   }
-  err = lpwan_sim_master_init(event_isr_sim);
+  int err = lpwan_sim_master_init(event_isr_sim);
+
   if (err) {
     LOG_ERR("simulated shield link failed: %d", err);
     return err;
@@ -2277,33 +2405,26 @@ int sensei_lpwan_init(const struct sensei_lpwan_hooks *h, const struct sensei_lp
   shield_off_at = k_uptime_get();
   bus_set_listener(gap9_listener, NULL);
 #else
-  /* Is a shield stacked? The expander (I2C 0x20) is on the shield only. Its driver does not come up when the expander
-   * does not answer, so its pins are not ready. That is the check, made once: no power-on, no retries. */
-  if (!device_is_ready(spi_dev) || !gpio_is_ready_dt(&pin_event) || !gpio_is_ready_dt(&pin_busy) ||
-      !gpio_is_ready_dt(&pin_power) || !gpio_is_ready_dt(&pin_gap_sel)) {
-    atomic_set(&shield_state, lpwan_shield_probe(false, false));
-    LOG_WRN("no LPWAN shield (the expander does not answer): the node uses BLE until the next boot");
-    return -ENODEV;
-  }
-  /* Shield off, SPI pins parked, GAP9 free to use the bus. */
-  err |= gpio_pin_configure_dt(&pin_gap_sel, GPIO_OUTPUT_INACTIVE);
-  err |= gpio_pin_configure_dt(&pin_event, GPIO_INPUT | GPIO_PULL_DOWN);
-  err |= expander_outputs(false);
-  atomic_set(&shield_state, lpwan_shield_probe(true, err == 0));
-  shield_off_at = k_uptime_get(); /* the shield may have been on before a reset of the nRF5340 */
-  pinctrl_apply_state(PINCTRL_DT_DEV_CONFIG_GET(SPI_BUS), PINCTRL_STATE_SLEEP);
-  (void)gpio_pin_configure_dt(&spi_nrf91.config.cs.gpio, GPIO_DISCONNECTED);
-  if (err) {
-    LOG_WRN("no LPWAN shield (the expander pins do not answer): the node uses BLE until the next boot");
-    return -EIO;
+  /* Is a shield stacked? The expander (I2C 0x20) is on the shield only. The check is made once (lpwan_shield.h): no
+   * shield, a shield that cannot be used (its 3.3 V is driven low as far as possible), or a shield. No retries after
+   * it. */
+  {
+    const enum lpwan_shield_state st = lpwan_shield_start(&start_ops, NULL);
+
+    atomic_set(&shield_state, st);
+    shield_off_at = k_uptime_get(); /* the shield may have been on before a reset of the nRF5340 */
+    if (st == LPWAN_SHIELD_ABSENT) {
+      LOG_WRN("no LPWAN shield (the expander does not answer): the node uses BLE until the next boot");
+      return -ENODEV;
+    }
+    pinctrl_apply_state(PINCTRL_DT_DEV_CONFIG_GET(SPI_BUS), PINCTRL_STATE_SLEEP);
+    (void)gpio_pin_configure_dt(&spi_nrf91.config.cs.gpio, GPIO_DISCONNECTED);
+    if (st != LPWAN_SHIELD_PRESENT) {
+      LOG_ERR("LPWAN shield fault (the expander answers but cannot be set up): the node uses BLE until the next boot");
+      return -EIO;
+    }
   }
   bus_set_listener(gap9_listener, NULL);
-  gpio_init_callback(&event_cb, event_isr, BIT(pin_event.pin));
-  err = gpio_add_callback(pin_event.port, &event_cb);
-  err |= gpio_pin_interrupt_configure_dt(&pin_event, GPIO_INT_EDGE_RISING);
-  if (err) {
-    return -EIO;
-  }
 #endif
 
   client_up = true;
@@ -2354,8 +2475,8 @@ uint32_t sensei_lpwan_version_reads(void) { return (uint32_t)atomic_get(&ver_rea
 enum lpwan_shield_state sensei_lpwan_shield_state(void) { return shield_state_get(); }
 
 int sensei_lpwan_gnss_supported(void) {
-  if (shield_state_get() == LPWAN_SHIELD_ABSENT) {
-    return 0; /* no shield, no GNSS of the shield */
+  if (!shield_usable_or_unknown()) {
+    return 0; /* no shield (or one that cannot be used), no GNSS of the shield */
   }
   k_spinlock_key_t k = k_spin_lock(&ver_lock);
   int r = shield_ver_valid ? (shield_ver.gnss ? 1 : 0) : -ENODATA;
@@ -2413,6 +2534,9 @@ int sensei_lpwan_shield_version(sensei_LpwanVersion *out) {
 int sensei_lpwan_lora_keys_queue(const sensei_LoraProvision *k) {
   if (k == NULL) {
     return -EINVAL;
+  }
+  if (!shield_usable_or_unknown()) {
+    return -ENODEV; /* nothing would take the keys: do not keep them in RAM */
   }
   keys = *k;
   keys_tries = 0;
@@ -2478,6 +2602,9 @@ void sensei_lpwan_get_info(struct lpwan_info *i) {
 const char *sensei_lpwan_state_str(void) {
   if (shield_state_get() == LPWAN_SHIELD_ABSENT) {
     return "no shield";
+  }
+  if (shield_state_get() == LPWAN_SHIELD_FAULT) {
+    return "shield fault";
   }
   if (proto_bad) {
     return "protocol mismatch";

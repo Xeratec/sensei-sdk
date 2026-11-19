@@ -176,12 +176,27 @@ Vsys (base board) ---+                                                          
   `lpwan_fem_levels()` (`lib/sensei_lpwan`, host tested). Untested on hardware: the shield current with the extender off, see the SENSEI IEQ
   `firmware/docs/TESTING.md`.
 
-## Without a shield
+## Without a shield, and the expander at start-up
 
 The expander (TCAL6408, I2C 0x20 on I2C_A) is on the shield only. On a base board with the sensor shield and no LPWAN shield nothing answers
 there, the expander driver does not come up, and `sensei_lpwan_init()` finds that at start-up (once; a reboot looks again): the state is
-"absent", the client does not start, the shield is never powered and no power-on is retried. See `lib/sensei_lpwan/README.md`. Whether the I2C_A
-lines have pull-ups on the base board (so that the missing device gives a NACK and not a stuck bus) is **verify**.
+"absent", the client does not start, the shield is never powered and no power-on is retried. The check reads the expander's output drive strength
+register (0x40, 0xFF after a reset) over plain I2C: a chip at 0x20 that has no such register (a PCA6416A) is not taken for the expander. The failed
+driver leaves P1.12 (INT, the base board's `MSP_CS` net) with a pull-up and an edge interrupt; the client gives it back (no pull, no interrupt).
+See `lib/sensei_lpwan/README.md`. Whether the I2C_A lines have pull-ups on the base board (so that the missing device gives a NACK and not a
+stuck bus) is **verify**.
+
+**A shield that is there but not usable ("fault").** The expander answers, but its driver did not come up (a one-off I2C error), its pins did not take the first
+writes (three tries, 20 ms apart) or the EVENT interrupt could not be set up. Then the state is "fault", the client does not start and the node
+sends over BLE until the next boot. Such a shield may be powered: while the expander pins are inputs, the 1 M pull-up of EN_3V3 (P4) switches the
+shield's 3.3 V on, and nothing else switches it off. The client therefore tries to drive EN_3V3 low, with the driver, else with plain I2C (read and
+write of the output and direction registers). Untested on hardware.
+
+**Pin state around a reset.** The expander sits on the always-on rail, so its registers survive a reset of the nRF5340. The overlay sets
+`no-auto-reset` on it: the Zephyr driver then reads the registers as they are and does not turn all pins into inputs. EN_3V3, nPD and MODE
+keep their outputs from the reset until `lpwan_init()` (it runs after the sensors, GAP9, the data and the comm layer are up) sets them again
+(shield off, nPD and MODE low). Not covered: **a power-up of the whole node**, where the expander starts as all inputs (its power-on state) and
+EN_3V3 is pulled high, so a stacked shield is powered until `lpwan_init()`. Untested on hardware.
 
 ## GAP9 and SPI_A: the answer
 

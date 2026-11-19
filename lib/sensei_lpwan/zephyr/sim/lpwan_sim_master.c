@@ -31,7 +31,9 @@ LOG_MODULE_REGISTER(sensei_lpwan_sim, CONFIG_SENSEI_LPWAN_LOG_LEVEL);
 #define CONNECT_RETRY_MS 20
 #define XFER_TIMEOUT_MS 5000
 
+#ifdef CONFIG_BOARD_NATIVE_SIM
 static char *target; /* "host:port", option -lpwan_shield */
+#endif
 static char host[96];
 static int port;
 
@@ -51,6 +53,9 @@ static struct lpwan_sim_rx rx;
 static struct k_thread thread;
 K_THREAD_STACK_DEFINE(stack, 2048);
 
+#ifdef CONFIG_BOARD_NATIVE_SIM
+/* No option on BabbleSim: its time is simulated and a TCP peer would run in real time. A BabbleSim node has no shield.
+ */
 static void add_options(void) {
   static struct args_struct_t opts[] = {
       {
@@ -66,6 +71,7 @@ static void add_options(void) {
   native_add_command_line_opts(opts);
 }
 NATIVE_TASK(add_options, PRE_BOOT_1, 10);
+#endif
 
 static void pins_reset(void) {
   busy = true;
@@ -159,7 +165,11 @@ static void link_main(void *a, void *b, void *c) {
 }
 
 static void parse_target(void) {
+#ifdef CONFIG_BOARD_NATIVE_SIM
   const char *tgt = target != NULL ? target : CONFIG_SENSEI_LPWAN_SIM_TARGET; /* the option wins */
+#else
+  const char *tgt = ""; /* BabbleSim: no TCP peer, no shield */
+#endif
   const char *colon = tgt[0] != '\0' ? strrchr(tgt, ':') : NULL;
 
   if (colon != NULL && colon != tgt) {

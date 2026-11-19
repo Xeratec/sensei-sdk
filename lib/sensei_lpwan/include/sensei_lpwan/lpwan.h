@@ -85,17 +85,22 @@ struct sensei_lpwan_hooks {
  * Set up the link and the shield pins, start the thread. The shield stays off until it is needed.
  * hooks and cfg are copied. Returns 0 or a negative errno.
  *
- * Whether a shield is stacked is decided here, once (sensei_lpwan_shield_state()). The I/O expander (I2C 0x20) is on
- * the shield only: if it does not answer, init returns -ENODEV (-EIO if its pins fail), the state is ABSENT, and the
- * client does not start: nothing is powered, no thread, no retries (a reboot looks again). The calls below then fail
- * without effect: sensei_lpwan_radio_ready() is false, the sends, the fix, the update and the version query give
- * -ENODEV, and sensei_lpwan_gnss_supported() is 0. An app that gets an error here does not register the LPWAN radios,
- * so its uplink scheduler falls back to BLE. -ENODEV also means that the build has no LPWAN_Shield_v1 devices for the
- * client.
+ * Whether a shield is stacked is decided here, once (sensei_lpwan_shield_state(), lpwan_shield.h). The I/O expander
+ * (I2C 0x20) is on the shield only, and a TCAL6408 answers there (its register 0x40 reads 0xFF):
+ * - nothing answers: init returns -ENODEV, the state is ABSENT, the client does not start: nothing is powered, no
+ *   thread, no retries (a reboot looks again);
+ * - the expander answers but cannot be used (its driver is down, its pins fail three times, the EVENT interrupt cannot
+ *   be set up): init returns -EIO, the state is FAULT. A shield is there and may be powered (the 1 M pull-up of EN_3V3
+ *   switches it on while the expander pins are inputs), so the client tries to drive EN_3V3 low. Otherwise it is as
+ *   with ABSENT.
+ * The calls below then fail without effect: sensei_lpwan_radio_ready() is false, the sends, the fix, the update, the
+ * version query and the LoRa keys give -ENODEV, and sensei_lpwan_gnss_supported() is 0. An app that gets an error here
+ * does not register the LPWAN radios, so its uplink scheduler falls back to BLE. -ENODEV also means that the build has
+ * no LPWAN_Shield_v1 devices for the client.
  */
 int sensei_lpwan_init(const struct sensei_lpwan_hooks *hooks, const struct sensei_lpwan_config *cfg);
 
-/** UNKNOWN until sensei_lpwan_init() has run, then PRESENT or ABSENT for the rest of the run (see there). */
+/** UNKNOWN until sensei_lpwan_init() has run, then PRESENT, ABSENT or FAULT for the rest of the run (see there). */
 enum lpwan_shield_state sensei_lpwan_shield_state(void);
 
 /** Replace the configuration. Safe from any thread. */
@@ -232,7 +237,8 @@ int sensei_lpwan_lora_provision(const sensei_LoraProvision *keys);
  * connection stays up and no join is started. The keys go to the shield when LoRa is connected the next time (the
  * radio setting changed to LoRa, or sensei_lpwan_lora_provision() again) and are wiped as described there. Until
  * then they stay in RAM, so they are lost at a reset. 0 means queued, not "the shield has them":
- * `sensei lpwan status` says "LoRaWAN keys waiting" until they are sent. Returns -EINVAL for NULL.
+ * `sensei lpwan status` says "LoRaWAN keys waiting" until they are sent. Returns -EINVAL for NULL, -ENODEV with no
+ * shield (absent or fault: the keys are not kept).
  */
 int sensei_lpwan_lora_keys_queue(const sensei_LoraProvision *keys);
 

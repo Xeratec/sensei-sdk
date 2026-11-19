@@ -37,7 +37,7 @@ static int node_calls(void) {
                                                .save_counters = sensei_commission_settings_counters_save};
   struct sensei_commission_record rec;
   struct sensei_commission_counters cnt;
-  uint8_t b[400], c[65];
+  uint8_t b[400], c[SENSEI_COMMISSION_POP_SIZE]; /* the proof plaintext (80 B), also the 65 B share */
   size_t n;
   volatile int k = 0;
 

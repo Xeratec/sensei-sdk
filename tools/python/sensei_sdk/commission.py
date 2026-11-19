@@ -323,18 +323,19 @@ def check_key_proof(proof: bytes,
     left as it was. If the proof says that the node started again at generation 0 while the store is ahead, the store is
     reset first (`KeyStore.reset_if_node_restarted`); then the proof is checked against the state as it is, in any
     generation. Returns the backup of that reset (None if there was none), which the caller rolls back with the entry of
-    `add_node_for_commissioning` if the key step fails after all. If the proof does not pass, the reset made here is
-    rolled back and ProofError is raised."""
-    reset = None
+    `add_node_for_commissioning` if the key step fails after all. The reset happens only after the proof has been opened
+    in memory with the generation 0 keys (the header is not authenticated). If the proof does not pass, the reset made
+    here is rolled back and ProofError is raised. If that rollback fails, or the store cannot be saved, SecureError is
+    raised (not ProofError): the live generation may be lost until the key step is run again."""
+    reset = store.reset_if_node_restarted(node_id, proof)  # SecureError if the store cannot be saved
     try:
-        reset = store.reset_if_node_restarted(node_id, proof)
         check_proof(proof, store, node_id, nonce_g, nonce_n, session_id, commit)
     except BaseException as exc:
         if reset is not None:
             try:
                 store.rollback_node(reset)
-            except SecureError:
-                pass
+            except (SecureError, OSError) as back:
+                raise SecureError(f"the key store could not be put back after a failed proof: {back}") from exc
         if isinstance(exc, SecureError) and not isinstance(exc, ProofError):
             raise ProofError(f"proof of possession failed: {exc}") from exc
         raise

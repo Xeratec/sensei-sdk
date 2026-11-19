@@ -193,7 +193,7 @@ def password(code: str) -> bytes:
 @dataclass(frozen = True)
 class QrData:
     node_id: int
-    code: str  # 12 digits
+    code: str = field(repr = False)  # 12 digits
     fp: bytes  # 16 B, `node_fingerprint`
 
 
@@ -328,7 +328,8 @@ def check_key_proof(proof: bytes,
     in memory with the generation 0 keys (the header is not authenticated). If the proof does not pass, the reset made
     here is rolled back and ProofError is raised. If that rollback fails, or the store cannot be saved, SecureError is
     raised (not ProofError): the live generation may be lost until the key step is run again."""
-    reset = store.reset_if_node_restarted(node_id, proof)  # SecureError if the store cannot be saved
+    # SecureError if the store cannot be saved; the proof must be this run's before anything is reset
+    reset = store.reset_if_node_restarted(node_id, proof, expect = proof_plain(node_id, nonce_g, nonce_n, session_id))
     try:
         check_proof(proof, store, node_id, nonce_g, nonce_n, session_id, commit)
     except BaseException as exc:

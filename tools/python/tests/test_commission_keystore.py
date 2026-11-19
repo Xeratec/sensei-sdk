@@ -155,14 +155,17 @@ def test_a_save_that_fails_raises_and_leaves_the_store_as_it_was(tmp_path, monke
 
 def test_a_rollback_that_fails_raises(tmp_path, monkeypatch):
     rig, fresh = _gen1_store_with_restarted_node(tmp_path)
-    other = bytes([SID[0] ^ 1]) + SID[1:]  # a good generation 0 proof of another PAKE run: reset, then the check fails
+
+    def late_failure(*_a, **_k):  # the reset was made for a good proof; the check after it fails all the same
+        raise ProofError("the counter was seen")
 
     def broken(_backup):
         raise OSError("disk full")
 
+    monkeypatch.setattr(com, "check_proof", late_failure)
     monkeypatch.setattr(rig.store, "rollback_node", broken)
     with pytest.raises(secure.SecureError) as e:
-        com.check_key_proof(proof_of(fresh, other), rig.store, NODE_ID, NG, NN, SID)
+        com.check_key_proof(proof_of(fresh), rig.store, NODE_ID, NG, NN, SID)
     assert not isinstance(e.value, ProofError) and "put back" in str(e.value)
 
 
@@ -190,3 +193,61 @@ def test_the_commissioned_record_is_saved_merged_and_followed(tmp_path):
         rig.store.set_commissioned(NODE_ID + 1, "usb")
     with pytest.raises(secure.SecureError):
         rig.store.set_commissioned(NODE_ID, "other")
+
+
+def test_rollback_after_a_new_key_keeps_the_commissioned_record(tmp_path):
+    """A re-commissioning with a new key whose proof failed: the old key comes back with its record, also in the file."""
+    rig = make_rig(tmp_path)
+    assert com.mark_commissioned(rig.store, NODE_ID)
+    old_key = rig.store.key_id(NODE_ID)
+    before = rig.store.node_state(NODE_ID)
+    _, new_pub = secure.generate_keypair()
+    backup = rig.store.add_node_for_commissioning(NODE_ID, new_pub)
+    assert rig.store.node_state(NODE_ID).commissioned is None  # the new key has no record
+    rig.store.rollback_node(backup)
+    assert rig.store.key_id(NODE_ID) == old_key
+    for st in (rig.store.node_state(NODE_ID), secure.KeyStore.load(rig.path,
+                                                                   private_pem = rig.pem).node_state(NODE_ID)):
+        assert (st.commissioned, st.commissioned_at,
+                st.commissioned_fp) == (before.commissioned, before.commissioned_at, before.commissioned_fp)
+        assert st.commissioned == "ble-pake"
+
+
+def test_a_replayed_real_generation_zero_proof_of_another_run_writes_nothing(tmp_path):
+    """The node sealed a proof for another run in generation 0 (the attacker's own continuation); it never reached the
+    collector, and the node mixed since. A fake node replays it: the tag and the counter are good, the plaintext is not
+    this run's. The store must not be reset, not even for a moment (a collector reads the file)."""
+    rig = make_rig(tmp_path)
+    other_run = bytes([SID[0] ^ 1]) + SID[1:]
+    stolen = proof_of(rig.node, other_run)  # sealed in generation 0
+    rig.mix()
+    rig.promote()
+    assert rig.store.generation(NODE_ID) == 1
+    com.mark_commissioned(rig.store, NODE_ID)
+    prov, text = rig.store._nodes[NODE_ID].prov, rig.path.read_bytes()
+    node = rig.store._nodes[NODE_ID]
+    secure.ReplayWindow(node.up.highest,
+                        node.up.bitmap).check(secure.parse_header(stolen).counter)  # the counter is fresh
+    seen = []
+    real_check = com.check_proof
+
+    def spy(*a, **kw):
+        seen.append(secure.KeyStore.load(rig.path, private_pem = rig.pem).generation(NODE_ID))
+        return real_check(*a, **kw)
+
+    com.check_proof, restore = spy, real_check
+    try:
+        rig.store.add_node_for_commissioning(NODE_ID, rig.node.node_pub)
+        with pytest.raises(ProofError):
+            com.check_key_proof(stolen, rig.store, NODE_ID, NG, NN, SID)
+    finally:
+        com.check_proof = restore
+    assert seen == [1]  # the file was still in generation 1 when the proof was checked
+    assert rig.store._nodes[NODE_ID].prov == prov and rig.path.read_bytes() == text
+    assert rig.store.generation(NODE_ID) == 1 and rig.store.node_state(NODE_ID).commissioned == "ble-pake"
+
+
+def test_the_qr_data_code_is_not_in_the_repr():
+    code = com.generate_code()
+    qr = com.parse_qr(com.qr_payload(NODE_ID, code, bytes(16)))
+    assert code not in repr(qr) and qr.code == code

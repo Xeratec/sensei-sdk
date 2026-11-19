@@ -85,7 +85,13 @@ static void test_flags(void) {
   static uint8_t store[6000], big[MQ_MAX_MSG], out[MQ_MAX_MSG];
   uint8_t m[20] = {1, 2, 3};
   struct msg_queue q;
-  static const uint8_t all[] = {0, MQ_FLAG_PLAIN, MQ_FLAG_REPORT, MQ_FLAG_PLAIN | MQ_FLAG_REPORT};
+  static const uint8_t all[] = {0,
+                                MQ_FLAG_PLAIN,
+                                MQ_FLAG_REPORT,
+                                MQ_FLAG_REKEY,
+                                MQ_FLAG_PLAIN | MQ_FLAG_REPORT,
+                                MQ_FLAG_REPORT | MQ_FLAG_REKEY,
+                                MQ_FLAG_PLAIN | MQ_FLAG_REPORT | MQ_FLAG_REKEY};
 
   mq_init(&q, store, sizeof(store));
   for (size_t i = 0; i < sizeof(big); i++) {
@@ -98,8 +104,8 @@ static void test_flags(void) {
     mq_pop(&q);
     CHECK(mq_peek_flags(&q) == 0);
   }
-  CHECK(mq_push_flags(&q, big, sizeof(big), MQ_FLAG_REPORT) == 0);
-  CHECK(mq_peek_len(&q) == MQ_MAX_MSG && mq_peek_flags(&q) == MQ_FLAG_REPORT);
+  CHECK(mq_push_flags(&q, big, sizeof(big), MQ_FLAG_REPORT | MQ_FLAG_REKEY | MQ_FLAG_PLAIN) == 0);
+  CHECK(mq_peek_len(&q) == MQ_MAX_MSG && mq_peek_flags(&q) == (MQ_FLAG_REPORT | MQ_FLAG_REKEY | MQ_FLAG_PLAIN));
   CHECK(mq_peek(&q, out, sizeof(out)) == sizeof(big) && memcmp(out, big, sizeof(big)) == 0);
 }
 

@@ -1193,6 +1193,12 @@ class KeyStore:
         """True if this store writes its file sealed (it has a key file)."""
         return self._key is not None
 
+    @property
+    def following(self) -> Path | None:
+        """The file this store follows (`follow=`: the key store file of the collector), or None. A follower takes over
+        the ratchet state of the nodes from it; it cannot provision nodes or answer mixes."""
+        return self._follow
+
     @classmethod
     def load(cls, path: str | os.PathLike, private_pem: str | os.PathLike | None = None, **kw) -> KeyStore:
         """Read the file; a missing file gives an empty store that save() creates."""

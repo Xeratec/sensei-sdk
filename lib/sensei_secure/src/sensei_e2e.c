@@ -749,6 +749,11 @@ static bool rekey_trigger(struct sensei_e2e *e) {
   if (period == 0) {
     return false;
   }
+  /* The uptime plus the stored age cannot be moved by the network, a host or a GNSS spoofer: when it says "due", the
+   * mix comes, whatever the clock says. The clock adds the time the node was off. */
+  if ((uint64_t)(uint32_t)(now_up(e) - e->r.gen_start_up) >= period) {
+    return true;
+  }
   unix_now = now_unix(e);
   if (unix_now != 0 && e->r.gen_start_unix == 0) {
     /* The clock was not set when the generation started: back-date the start by the age (the stored age and the
@@ -760,8 +765,7 @@ static bool rekey_trigger(struct sensei_e2e *e) {
   if (unix_now != 0 && e->r.gen_start_unix != 0 && unix_now >= e->r.gen_start_unix) {
     return (uint64_t)(unix_now - e->r.gen_start_unix) >= period;
   }
-  /* no clock, or one that is behind the start of the generation (it was wrong then): count the uptime */
-  return (uint64_t)(uint32_t)(now_up(e) - e->r.gen_start_up) >= period;
+  return false; /* no clock, or one that is behind the start of the generation (it was wrong then) */
 }
 
 static bool can_mix(const struct sensei_e2e *e) { return e->ready && e->cfg.rekey && ratchet_ok(e) && !e->damaged; }
@@ -795,6 +799,14 @@ static int rekey_create(struct sensei_e2e *e) {
   }
   wipe(&n, sizeof(n));
   return err;
+}
+
+/* The pending request is older than SENSEI_E2E_REKEY_STALE_EPOCHS of sending (a node that streams and never gets the
+ * answer). The answer walks from its up_base to the current epoch: this keeps the walk short. */
+static bool request_stale(const struct sensei_e2e *e) {
+  uint32_t ep = sensei_ratchet_epoch(e->s.tx_last);
+
+  return ep > e->r.pend_up_base && ep - e->r.pend_up_base > SENSEI_E2E_REKEY_STALE_EPOCHS;
 }
 
 static size_t put_varint(uint8_t *p, uint32_t v) {
@@ -842,7 +854,14 @@ int sensei_e2e_rekey_due(struct sensei_e2e *e, uint8_t *out, size_t cap) {
     return 0;
   }
   t = now_up(e);
-  if (e->r.pending) {
+  if (e->r.pending && request_stale(e)) {
+    /* Too many epochs since the request was made: an answer would need a long chain walk, or fail. Ask again. */
+    int err = rekey_create(e);
+
+    if (err) {
+      return err;
+    }
+  } else if (e->r.pending) {
     if (e->sent_valid && (uint64_t)(uint32_t)(t - e->sent_t) < (uint64_t)e->cfg.retry_h * 3600u) {
       return 0;
     }
@@ -903,6 +922,10 @@ int sensei_e2e_rekey_answer(struct sensei_e2e *e, uint32_t gen, const uint8_t *p
   }
   if (gen != e->r.gen + 1u || up_base != e->r.pend_up_base || pub_len != SENSEI_RATCHET_KEY_SIZE || pub == NULL) {
     return -EBADMSG;
+  }
+  if (request_stale(e)) {
+    e->sent_valid = false; /* the next Uplink carries a new request */
+    return -ETIMEDOUT;
   }
   err = sensei_ratchet_mix(e->c, SENSEI_SECURE_ROLE_NODE, e->r.pend_priv, e->r.root, e->s.key_id, gen, up_base,
                            e->r.pend_pub, pub, &mix);

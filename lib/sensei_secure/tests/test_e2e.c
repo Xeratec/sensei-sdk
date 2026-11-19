@@ -2090,6 +2090,88 @@ static void test_fs_init_wipes(void) {
   CHECK(memcmp(nv.rat, zero, sizeof(nv.rat)) == 0 && memcmp(nv.priv, zero, 32) == 0);
 }
 
+/* L-3: a clock that is held back or stopped (network time, GNSS, USB host) does not postpone the mix: the uptime plus
+ * the stored age says "due" on its own. */
+static void test_fs_clock_attack(void) {
+  struct sensei_e2e e, e2;
+  struct collector col;
+  struct backend b;
+  uint8_t pl[8] = {1}, env[100], req[SENSEI_E2E_REKEY_MAX];
+
+  /* the clock stands still */
+  setup(&e, &col, &b);
+  to_gen(&e, &col, 1);
+  t_up += 7u * 86400u - 1u;
+  CHECK(sensei_e2e_rekey_due(&e, req, sizeof(req)) == 0);
+  t_up += 1;
+  CHECK(sensei_e2e_rekey_due(&e, req, sizeof(req)) > 0); /* t_unix did not move */
+  /* the clock runs backwards, after a restart that keeps 3 days of age in the record */
+  setup(&e, &col, &b);
+  to_gen(&e, &col, 1);
+  CHECK(cycle(&e, &col, false, NULL) > 0);
+  for (int day = 1; day <= 3; day++) {
+    t_up = (uint32_t)day * 86400u; /* a new epoch every day: the record is written with the age */
+    CHECK(sensei_e2e_seal(&e, SENSEI_SECURE_KIND_UPLINK, pl, sizeof(pl), env, sizeof(env)) > 0);
+  }
+  CHECK(rec_age_h() == 72u);
+  t_up = 0;
+  t_unix -= 100u * 86400u;
+  node_boot(&e2);
+  t_up = 4u * 86400u - 1u;
+  t_unix -= 1000u;
+  CHECK(sensei_e2e_rekey_due(&e2, req, sizeof(req)) == 0);
+  t_up += 1;
+  CHECK(sensei_e2e_rekey_due(&e2, req, sizeof(req)) > 0);
+  /* a clock that runs fast still brings the mix early (the node was off, or the clock is right) */
+  setup(&e, &col, &b);
+  to_gen(&e, &col, 1);
+  t_up += 100;
+  t_unix += 7u * 86400u;
+  CHECK(sensei_e2e_rekey_due(&e, req, sizeof(req)) > 0);
+}
+
+/* L-4: a request whose answer does not come while the node streams is replaced by a new one, not repeated: the answer
+ * walk stays short and an old answer is refused. */
+static void test_fs_stale_request(void) {
+  struct sensei_e2e e;
+  struct collector col;
+  struct backend b;
+  uint8_t req[SENSEI_E2E_REKEY_MAX], req2[SENSEI_E2E_REKEY_MAX];
+  struct answer a_old, a_new;
+  uint32_t u1;
+  int rl, rl2;
+
+  setup(&e, &col, &b);
+  to_gen(&e, &col, 1);
+  CHECK(cycle(&e, &col, false, NULL) > 0); /* the collector is in generation 1 too */
+  CHECK(sensei_e2e_rekey_now(&e) == 0);
+  rl = sensei_e2e_rekey_due(&e, req, sizeof(req));
+  CHECK(rl > 0);
+  u1 = e.r.pend_up_base;
+  CHECK(coll_answer(&col, req, (size_t)rl, &a_old));
+  /* 4096 epochs since the request: the same request is still repeated after the retry time, and answered */
+  CHECK(sensei_secure_tx_jump(&e.s, 64u * (u1 + SENSEI_E2E_REKEY_STALE_EPOCHS) + 1) == 0);
+  t_up += SENSEI_E2E_REKEY_RETRY_H * 3600u;
+  CHECK(sensei_e2e_rekey_due(&e, req2, sizeof(req2)) == rl && e.r.pend_up_base == u1);
+  /* one more: the answer is refused (no long walk), and the next uplink carries a new request at once */
+  CHECK(sensei_secure_tx_jump(&e.s, 64u * (u1 + SENSEI_E2E_REKEY_STALE_EPOCHS + 1) + 1) == 0);
+  CHECK(deliver(&e, &col, &a_old) == -ETIMEDOUT && e.r.pending && sensei_e2e_gen(&e) == 1);
+  rl2 = sensei_e2e_rekey_due(&e, req2, sizeof(req2));
+  CHECK(rl2 > 0 && e.r.pend_up_base > u1 && e.r.pend_up_base > sensei_ratchet_epoch(e.s.tx_last));
+  /* a stale request is replaced before the retry time too, once */
+  CHECK(sensei_e2e_rekey_due(&e, req2, sizeof(req2)) == 0);
+  CHECK(sensei_secure_tx_jump(&e.s, 64u * (e.r.pend_up_base + SENSEI_E2E_REKEY_STALE_EPOCHS + 1) + 1) == 0);
+  u1 = e.r.pend_up_base;
+  rl2 = sensei_e2e_rekey_due(&e, req2, sizeof(req2));
+  CHECK(rl2 > 0 && e.r.pend_up_base > u1);
+  CHECK(coll_answer(&col, req2, (size_t)rl2, &a_new));
+  /* the answer of the first request is refused, the new one works and starts at the new epoch */
+  CHECK(deliver(&e, &col, &a_old) == -EBADMSG && sensei_e2e_gen(&e) == 1);
+  CHECK(deliver(&e, &col, &a_new) == 0 && sensei_e2e_gen(&e) == 2);
+  CHECK(e.r.up.idx <= 1);
+  CHECK(cycle(&e, &col, false, NULL) > 0);
+}
+
 /* L-1: a build without the ratchet drops a generation 0 record that only holds a pending request. */
 static void test_fs_no_ratchet_pending(void) {
   struct sensei_e2e e, e2;
@@ -2253,6 +2335,8 @@ int main(void) {
   test_fs_transcript();
   test_fs_wear();
   test_fs_age();
+  test_fs_clock_attack();
+  test_fs_stale_request();
   test_fs_init_wipes();
   test_fs_no_ratchet_pending();
   test_fs_tx_key_error();

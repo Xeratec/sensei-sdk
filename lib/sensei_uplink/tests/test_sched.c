@@ -44,7 +44,7 @@ static uint32_t op_rand(void *c) {
 static int n_end_report, n_end_dropped;
 static void op_msg_end(void *c, uint8_t flags, bool delivered) {
   (void)c;
-  CHECK(flags & MQ_FLAG_REPORT);
+  CHECK(flags & (MQ_FLAG_REPORT | MQ_FLAG_REKEY));
   if (delivered) {
     n_end_report++;
   } else {
@@ -1461,6 +1461,42 @@ static void test_report_flag(void) {
   CHECK(!us_radio_ready(&s));
 }
 
+/* A message with a key mix request (MQ_FLAG_REKEY): the app is told when it is dropped (evicted, or after the failed
+ * sessions), so it can send the request again, and when it is sent. */
+static void test_rekey_flag(void) {
+  uint8_t msg[100];
+  struct fake *f = &fk[2];
+
+  make_msg(msg, sizeof(msg), 7);
+  reset();
+  us_register(&s, &r_lte_ra);
+  us_set_config(&s, sensei_Radio_RADIO_LTEM, 0);
+  CHECK(us_submit_flags(&s, msg, 60, true, MQ_FLAG_REKEY) == 0);
+  us_start(&s);
+  CHECK(complete(f) && n_end_report == 1 && n_end_dropped == 0);
+
+  reset();
+  us_register(&s, &r_lte_ra);
+  us_set_config(&s, sensei_Radio_RADIO_LTEM, 0);
+  CHECK(us_submit_flags(&s, msg, 60, true, MQ_FLAG_REKEY) == 0);
+  f->fail_async = 100;
+  f->fail_err = -EIO;
+  for (int i = 0; i < US_MAX_SESSION_FAILS; i++) {
+    us_start(&s);
+    CHECK(complete(f));
+  }
+  CHECK(n_end_dropped == 1 && n_end_report == 0 && s.qa.count == 0);
+
+  reset();
+  us_register(&s, &r_lte_ra);
+  fk[2].ready = false;
+  CHECK(us_submit_flags(&s, msg, 60, true, MQ_FLAG_REKEY) == 0);
+  for (int i = 0; i < 40; i++) {
+    us_submit(&s, msg, 100, true);
+  }
+  CHECK(n_end_dropped == 1);
+}
+
 static void test_defer_rule(void) {
   const uint32_t h = 3600000u;
 
@@ -1781,6 +1817,7 @@ int main(void) {
   test_no_answer();
   test_unconfirmed();
   test_report_flag();
+  test_rekey_flag();
   test_defer_rule();
   test_link_deferral();
   test_link_wait_bound();

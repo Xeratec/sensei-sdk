@@ -10,7 +10,7 @@
  * @file msg_queue.h
  * @brief Byte-bounded FIFO of variable-size messages. No Zephyr, no locking.
  *
- * Each entry is stored as a 2 B header (14 bit length, bits 15 and 14 flags) and the data in a
+ * Each entry is stored as a 2 B header (13 bit length, bits 15 to 13 flags) and the data in a
  * ring. A full queue refuses new entries (the oldest are kept) and counts them. A user that prefers
  * the newest (the uplink scheduler) checks mq_free() and drops the oldest with mq_pop() first.
  */
@@ -28,6 +28,8 @@
 /* Flags kept with a message (the uplink scheduler's). */
 #define MQ_FLAG_PLAIN 0x01u  /* an unsealed message: ops->prepare may change it for the radio */
 #define MQ_FLAG_REPORT 0x02u /* the app is told when it is sent or dropped (us_ops.msg_end) */
+#define MQ_FLAG_REKEY                                                                                                  \
+  0x04u /* holds a key mix request: us_ops.msg_end is called too (the node asks again if it is dropped) */
 
 struct msg_queue {
   uint8_t *buf;

@@ -47,7 +47,8 @@ int mq_push_flags(struct msg_queue *q, const uint8_t *msg, size_t len, uint8_t f
     return -ENOMEM;
   }
   hdr[0] = (uint8_t)(len & 0xff);
-  hdr[1] = (uint8_t)((len >> 8) | ((flags & MQ_FLAG_PLAIN) ? 0x80u : 0u) | ((flags & MQ_FLAG_REPORT) ? 0x40u : 0u));
+  hdr[1] = (uint8_t)((len >> 8) | ((flags & MQ_FLAG_PLAIN) ? 0x80u : 0u) | ((flags & MQ_FLAG_REPORT) ? 0x40u : 0u) |
+                     ((flags & MQ_FLAG_REKEY) ? 0x20u : 0u));
   ring_write(q, hdr, MQ_HDR);
   ring_write(q, msg, len);
   q->used += len + MQ_HDR;
@@ -70,7 +71,7 @@ size_t mq_peek_len(const struct msg_queue *q) {
     return 0;
   }
   ring_read(q, q->head, hdr, MQ_HDR);
-  return (size_t)hdr[0] | ((size_t)(hdr[1] & 0x3fu) << 8);
+  return (size_t)hdr[0] | ((size_t)(hdr[1] & 0x1fu) << 8);
 }
 
 uint8_t mq_peek_flags(const struct msg_queue *q) {
@@ -80,7 +81,8 @@ uint8_t mq_peek_flags(const struct msg_queue *q) {
     return 0;
   }
   ring_read(q, q->head, hdr, MQ_HDR);
-  return (uint8_t)(((hdr[1] & 0x80u) ? MQ_FLAG_PLAIN : 0u) | ((hdr[1] & 0x40u) ? MQ_FLAG_REPORT : 0u));
+  return (uint8_t)(((hdr[1] & 0x80u) ? MQ_FLAG_PLAIN : 0u) | ((hdr[1] & 0x40u) ? MQ_FLAG_REPORT : 0u) |
+                   ((hdr[1] & 0x20u) ? MQ_FLAG_REKEY : 0u));
 }
 
 bool mq_peek_flag(const struct msg_queue *q) { return (mq_peek_flags(q) & MQ_FLAG_PLAIN) != 0; }

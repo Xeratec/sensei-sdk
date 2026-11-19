@@ -57,6 +57,9 @@
 #endif
 /** A chain that is this many epochs long triggers a mix. */
 #define SENSEI_E2E_REKEY_EPOCHS 4096u
+/** A pending request is replaced by a new one (not sent again) once the node has sent this many epochs since the
+ * request was made. An answer then needs a walk of at most this many epochs. */
+#define SENSEI_E2E_REKEY_STALE_EPOCHS 4096u
 /** The counters are persisted in blocks of whole epochs: one epoch after a start, twice the last block while the
  * persists come less than SENSEI_E2E_PERSIST_FAST_S apart (streaming), up to this many epochs (65 536 counters), half
  * of it after a persist that comes later (a slow sender is back at one epoch after a few). Flash writes then stay at

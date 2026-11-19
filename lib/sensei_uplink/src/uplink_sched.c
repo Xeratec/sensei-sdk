@@ -78,13 +78,13 @@ static void end_session(struct uplink_sched *s) {
   s->send_id++; /* a completion of the send in flight is stale from now on */
 }
 
-/* Remove the oldest message of q and tell the app if it is a report. */
+/* Remove the oldest message of q and tell the app if it is a report or holds a key mix request. */
 static void pop_head(struct uplink_sched *s, struct msg_queue *q, bool delivered) {
   uint8_t flags = mq_peek_flags(q);
 
   mq_pop(q);
   s->conn_defers = 0; /* the next head starts clean */
-  if ((flags & MQ_FLAG_REPORT) && s->ops->msg_end != NULL) {
+  if ((flags & (MQ_FLAG_REPORT | MQ_FLAG_REKEY)) && s->ops->msg_end != NULL) {
     s->ops->msg_end(s->ctx, flags, delivered);
   }
 }

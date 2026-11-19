@@ -407,6 +407,7 @@ def test_follower_takes_over_cur_next_and_prev_without_secrets(tmp_path):
     secure.open_sealed(rig.up(b"x"), rig.store)
     gui_path = tmp_path / "gui" / "keys.json"
     gui = KeyStore.load(gui_path, private_pem = rig.pem, follow = rig.path, clock = rig.clock)
+    assert gui.following == rig.path and rig.store.following is None  # a GUI asks this before it provisions
     gui.add_node(NODE_ID, rig.store._nodes[NODE_ID].node_pub)
     secure.seal_downlink(NODE_ID, KIND_DOWNLINK, b"gui", gui)  # its own counter and sender
     assert gui.sender != rig.store.sender

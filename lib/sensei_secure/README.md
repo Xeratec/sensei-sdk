@@ -236,7 +236,7 @@ The collector side is in the Python key store (a later phase). What the applicat
 | `sensei_e2e_configure(e, &cfg)` | once, after init | `rekey` (off: stays in its generation, never asks), `rekey_days` (7), `retry_h` (6), `epoch_max_s` (86400) |
 | `sensei_e2e_rekey_due(e, out, cap)` | before sealing every Uplink of kind 1 (not kind 3) | returns the encoded `Uplink.rekey` (field 14: tag `0x72`, length, `RekeyRequest{gen = 1, pub = 2, up_base = 3}`, at most `SENSEI_E2E_REKEY_MAX` = 48 B) to append to the encoded Uplink, 0 if nothing is due, or a negative errno. It starts a mix when one is due and stores it first |
 | `sensei_e2e_rekey_unsent(e)` | the Uplink was not sealed or sent | the request goes out with the next one |
-| `sensei_e2e_rekey_answer(e, gen, pub, len, up_base)` | a downlink carries `Downlink.rekey` (14), after `sensei_e2e_open()` accepted it | 0 switched, `-EALREADY` repeated or no request, `-EBADMSG` no match, `-EACCES` low-order key, or the error of the write (nothing changed) |
+| `sensei_e2e_rekey_answer(e, gen, pub, len, up_base)` | a downlink carries `Downlink.rekey` (14), after `sensei_e2e_open()` accepted it | 0 switched, `-EALREADY` repeated or no request, `-EBADMSG` no match, `-ETIMEDOUT` the request is stale (see Request), `-EACCES` low-order key, or the error of the write (nothing changed) |
 | `sensei_e2e_rekey_now(e)` | a sealed `Downlink.rekey_now` (8) | creates the request now (`-EALREADY` if one is pending, `-ENOTSUP` if the node cannot mix) |
 | `sensei_e2e_gen(e)`, `sensei_e2e_status(e, &st)` | `sensei e2e status` | generation, pending, previous generation kept, damaged, up_base, up_idx, mixes and refusals since start |
 | `sensei_e2e_settings_plain_pending()` | `sensei e2e status` | a plain `e2e_priv` waits for the confirmation of the image |
@@ -246,9 +246,12 @@ The collector side is in the Python key store (a later phase). What the applicat
 `sensei_e2e_settings_ops` has them: uptime from the kernel, the wall clock from `sensei_e2e_unix_time()`, a weak function that
 returns 0; the application (the node) defines it.
 
-- **Trigger.** Generation 0 after provisioning (at once); `rekey_days` since the generation started (wall clock, or
-  running time if the clock is not set); a chain of 4096 epochs; `sensei_e2e_rekey_now()`. A pending request is returned
-  again after `retry_h` hours and at the first call after a start; there is no give-up.
+- **Trigger.** Generation 0 after provisioning (at once); `rekey_days` since the generation started, by the running time
+  (uptime plus the stored age) or by the wall clock, whichever says "due" first: a clock that is held back or stopped
+  cannot postpone the mix; a chain of 4096 epochs; `sensei_e2e_rekey_now()`. A pending request is returned again after
+  `retry_h` hours and at the first call after a start; there is no give-up. A request that is more than 4096 epochs old
+  (`SENSEI_E2E_REKEY_STALE_EPOCHS`: a node that streams and never gets the answer) is replaced by a new one at the next
+  call, and an answer to it is refused with `-ETIMEDOUT`, so the answer walk stays short.
 - **Age of the generation.** Every write of `e2e_rat` carries the age of the generation in hours (the `u16` at offset 2,
   rounded up, at most 65535 h = 7.4 years). At the load the start is `uptime - age`, so a node that restarts more often
   than `rekey_days` and has no wall clock still mixes after about `rekey_days` of running time. What is lost at a restart
@@ -366,7 +369,7 @@ without the library).
   a restart, no (generation, counter) used again, the node talks to the collector as it was just before the next write, also across a
   mix), adaptive blocks (doubling, halving, the cap, flash wear at 50 messages a second) and the stored chain key, the age of the generation (restarts without a wall
   clock, a clock that appears late), the wipe of the caller's copy at init, a generation 0 record in a build without X25519, the error of a failing key hook,
-  time-bound epochs, triggers and retry timing, provisioning again, a damaged or
+  time-bound epochs, triggers and retry timing, a held-back or stopped clock, a stale request, provisioning again, a damaged or
   foreign record, and the transcript of vector 6 replayed on the device (the Python side as the collector: the device makes the same
   bytes).
 

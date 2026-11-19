@@ -51,7 +51,7 @@ us_start(&sched);                                   /* at the uplink time; also 
   of LTE. `link_check()` lets a radio hold data on a bad link up to `us_set_defer()` ms; alerts are never held.
 - `MQ_FLAG_PLAIN` marks an unsealed message. With `us_ops.prepare` and `uplink_radio.prepare` the app can change it
   when it starts on that radio (the node adds `Uplink.node_id` on plain LTE). `prepare` returns the new length, at most
-  `cap`, or 0 to drop the message. `MQ_FLAG_REPORT` calls `us_ops.msg_end` when the message is sent or dropped.
+  `cap`, or 0 to drop the message. `MQ_FLAG_REPORT` and `MQ_FLAG_REKEY` (a message with a key mix request: the node asks again if it is dropped) call `us_ops.msg_end` when the message is sent or dropped.
 - `us_node_offset_s()` and `us_next_tick_ms()`: the per-node offset in the uplink period and the delay to the next tick.
 - The full rules are in the comment of `uplink_sched.h`; the node's view is in its `src/comm/README.md`.
 

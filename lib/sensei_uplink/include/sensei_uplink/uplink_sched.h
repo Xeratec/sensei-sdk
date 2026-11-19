@@ -76,7 +76,8 @@
  * of the queue follows without a check. The wait ends when the data queue is empty.
  *
  * A message can carry MQ_FLAG_REPORT (us_submit_report): ops->msg_end() tells the app when it was
- * sent or dropped (the fault report counts there).
+ * sent or dropped (the fault report counts there). MQ_FLAG_REKEY does the same for a message that holds a key mix
+ * request: the node sends the request again with the next message if this one was dropped.
  */
 
 #ifndef SENSEI_UPLINK_SCHED_H_
@@ -257,8 +258,8 @@ int us_submit(struct uplink_sched *s, const uint8_t *enc, size_t len, bool alert
 int us_submit_plain(struct uplink_sched *s, const uint8_t *enc, size_t len, bool alert);
 
 /**
- * Like us_submit() with MQ_FLAG_* bits (MQ_FLAG_PLAIN: as us_submit_plain(); MQ_FLAG_REPORT: the
- * app is told about the end of this message through ops->msg_end).
+ * Like us_submit() with MQ_FLAG_* bits (MQ_FLAG_PLAIN: as us_submit_plain(); MQ_FLAG_REPORT and MQ_FLAG_REKEY:
+ * the app is told about the end of this message through ops->msg_end).
  */
 int us_submit_flags(struct uplink_sched *s, const uint8_t *enc, size_t len, bool alert, uint8_t flags);
 

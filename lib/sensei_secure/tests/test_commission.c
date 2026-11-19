@@ -1170,6 +1170,103 @@ static void test_tamper(void) {
   }
 }
 
+/* Encodings of a share that a verifier and a commissioner must refuse (the Python twin has the same list in
+ * vectors_commission.bad_points). Fixed 65 bytes: other lengths cannot be given to these functions (the protobuf layer
+ * refuses them). */
+static const uint8_t P256_GX[32] = {0x6b, 0x17, 0xd1, 0xf2, 0xe1, 0x2c, 0x42, 0x47, 0xf8, 0xbc, 0xe6,
+                                    0xe5, 0x63, 0xa4, 0x40, 0xf2, 0x77, 0x03, 0x7d, 0x81, 0x2d, 0xeb,
+                                    0x33, 0xa0, 0xf4, 0xa1, 0x39, 0x45, 0xd8, 0x98, 0xc2, 0x96};
+static const uint8_t P256_GY[32] = {0x4f, 0xe3, 0x42, 0xe2, 0xfe, 0x1a, 0x7f, 0x9b, 0x8e, 0xe7, 0xeb,
+                                    0x4a, 0x7c, 0x0f, 0x9e, 0x16, 0x2b, 0xce, 0x33, 0x57, 0x6b, 0x31,
+                                    0x5e, 0xce, 0xcb, 0xb6, 0x40, 0x68, 0x37, 0xbf, 0x51, 0xf5};
+static const uint8_t P256_P[32] = {0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+                                   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff,
+                                   0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+
+#define N_BAD 10
+
+static void bad_share(int i, uint8_t pt[65]) {
+  memset(pt, 0, 65);
+  pt[0] = 4;
+  memcpy(pt + 1, P256_GX, 32);
+  memcpy(pt + 33, P256_GY, 32);
+  switch (i) {
+  case 0: /* the identity: one zero byte, padded */
+    memset(pt, 0, 65);
+    break;
+  case 1: /* compressed prefix */
+    pt[0] = 2;
+    memset(pt + 33, 0, 32);
+    break;
+  case 2:
+    pt[0] = 5;
+    break;
+  case 3: /* hybrid prefix */
+    pt[0] = 6;
+    break;
+  case 4: /* 04 and zeros */
+    memset(pt + 1, 0, 64);
+    break;
+  case 5: /* y changed: off the curve */
+    pt[64] ^= 1;
+    break;
+  case 6: /* x is p */
+    memcpy(pt + 1, P256_P, 32);
+    break;
+  case 7: /* y is p */
+    memcpy(pt + 33, P256_P, 32);
+    break;
+  case 8: /* x and y swapped */
+    memcpy(pt + 1, P256_GY, 32);
+    memcpy(pt + 33, P256_GX, 32);
+    break;
+  default: /* a point of the curve with x = 0 coordinates changed in the last byte of x */
+    pt[32] ^= 1;
+    break;
+  }
+}
+
+static void test_invalid_points(void) {
+  struct pair a = {0};
+  uint8_t sv[65], cv[32], bad[65], cp[32];
+  static const uint8_t zero[32];
+
+  for (int i = 0; i < N_BAD; i++) {
+    bad_share(i, bad);
+    /* at the node: refused, not counted, nothing written, the session is over and wiped */
+    flash_reset(3, 2);
+    pair_begin(&a, 0);
+    memset(sv, 0, sizeof(sv));
+    memset(cv, 0, sizeof(cv));
+    CHECK(sensei_commission_verifier_pake1(&a.v, 1, bad, sv, cv) == SENSEI_SECURE_ERR_FORMAT);
+    CHECK(counters_are(3, 2) && F.writes == 0 && is_zeros(&a.v, sizeof(a.v)));
+    CHECK(is_zeros(sv, sizeof(sv)) && is_zeros(cv, sizeof(cv))); /* nothing was given out */
+    sensei_commission_prover_end(&a.p);
+    /* at the commissioner, as shareV: refused, the prover is wiped */
+    flash_reset(0, 0);
+    pair_begin(&a, 0);
+    CHECK(sensei_commission_verifier_pake1(&a.v, 1, a.share_p, sv, cv) == 0);
+    CHECK(sensei_commission_prover_finish(&a.p, bad, cv, cp) == SENSEI_SECURE_ERR_FORMAT);
+    CHECK(is_zeros(&a.p, sizeof(a.p)));
+    sensei_commission_verifier_end(&a.v);
+  }
+  /* a share X with X - w0*M = identity (x = 0): the node refuses it and counts nothing */
+  flash_reset(3, 2);
+  pair_begin(&a, 0);
+  CHECK(C0->spake2p_share(C0->ctx, a.w0, zero, sensei_commission_m, bad) == 0);
+  CHECK(sensei_commission_verifier_pake1(&a.v, 1, bad, sv, cv) == SENSEI_SECURE_ERR_FORMAT);
+  CHECK(counters_are(3, 2) && F.writes == 0 && is_zeros(&a.v, sizeof(a.v)));
+  sensei_commission_prover_end(&a.p);
+  /* after a refusal the node takes the next session as usual (nothing stays locked) */
+  pair_begin(&a, 10);
+  pair_pake1(&a, 11);
+  CHECK(counters_are(4, 3));
+  CHECK(sensei_commission_verifier_pake3(&a.v, 12, a.confirm_p) == 0);
+  CHECK(counters_are(3, 0));
+  sensei_commission_verifier_end(&a.v);
+  sensei_commission_prover_end(&a.p);
+}
+
 static void test_time(void) {
   struct pair a = {0};
   uint8_t out[100], msg[2] = {1, 2};
@@ -1428,6 +1525,7 @@ int main(void) {
   test_begin_twice();
   test_aborts();
   test_tamper();
+  test_invalid_points();
   test_time();
   test_counting();
   test_backend_faults();

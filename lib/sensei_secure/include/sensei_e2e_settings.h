@@ -45,8 +45,10 @@ extern const struct sensei_e2e_ops sensei_e2e_settings_ops;
  *
  * With sealing the key record is opened here, and a plain e2e_priv of an earlier version is migrated:
  * sealed to e2e_privx, read back and compared, then e2e_priv is deleted (the key and its key id stay
- * the same; the old flash page stays readable until the settings garbage collection). If the sealing key
- * is not available or the record does not open, nv->key_unreadable is set, nv->have_priv is false and the
+ * the same; the old flash page stays readable until the settings garbage collection). If both records are there:
+ * the same key (the migration stopped between the two writes): the plain one is deleted; different keys (an older
+ * firmware made a new key after the downgrade): the plain one is the newer, it is sealed over the old one. If the
+ * sealing key is not available or the record does not open, nv->key_unreadable is set, nv->have_priv is false and the
  * function returns the error (-EACCES for a record that does not open, the error of the provider
  * otherwise). sensei_e2e_init() then refuses to start. The stored record is not touched.
  */
@@ -70,6 +72,21 @@ int sensei_e2e_settings_seal_key(uint8_t key[SENSEI_SECURE_KEY_SIZE]);
  * A failure is remembered until sensei_e2e_settings_seal_close().
  */
 int sensei_e2e_settings_seal_status(void);
+
+/**
+ * Optional: call it once, early (in main() before other threads write to flash), so the provider can do its one-time
+ * setup. The HUK provider writes the hardware unique key here if there is none (hw_unique_key_write_random() writes
+ * the UICR through the NVMC without the flash driver lock, so no other flash write may run at the same time). Without
+ * this call the first use does it. Returns 0 or the error of the provider; providers that need no setup return 0.
+ */
+int sensei_e2e_settings_seal_prepare(void);
+
+/**
+ * Call before sensei_e2e_reset(): with sealing, forgets a cached failure, asks the provider again and returns 0 only
+ * if a new key can be sealed, else its error. reset erases the stored key first, so a reset while the sealing key is
+ * missing would leave no key at all. Without sealing it returns 0.
+ */
+int sensei_e2e_settings_reset_check(void);
 
 /** Destroy the key handle and forget a failure: the next use asks the provider again (a "reboot" in tests). */
 void sensei_e2e_settings_seal_close(void);

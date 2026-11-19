@@ -147,7 +147,12 @@ int sensei_e2e_init(struct sensei_e2e *e, const struct sensei_secure_crypto *c, 
     err = make_pair(e);
   } else {
     err = read_pub(e);
-    if (err) { /* a damaged key: start over, the collector has to be provisioned again */
+    if (err && e->nv.priv_sealed) { /* a sealed key is not damaged: a crypto error, keep the record, e2e stays off */
+      memset(e->nv.priv, 0, sizeof(e->nv.priv));
+      e->nv.have_priv = false;
+      return -EIO;
+    }
+    if (err) { /* a damaged plain key: start over, the collector has to be provisioned again */
       e->nv.have_backend = false;
       err = make_pair(e);
     }

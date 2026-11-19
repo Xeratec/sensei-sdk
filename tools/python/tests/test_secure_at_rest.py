@@ -108,6 +108,7 @@ def test_key_file_is_32_raw_bytes_mode_0400(tmp_path, key_file):
         secure.new_key_file(key_file)  # never overwrites a key
     short = tmp_path / "short.key"
     short.write_bytes(b"x" * 31)
+    short.chmod(0o600)
     with pytest.raises(SecureError, match = "32 raw bytes"):
         secure.load_key_file(short)
     with pytest.raises(SecureError, match = "cannot read"):
@@ -282,6 +283,81 @@ def test_processes_share_a_sealed_file_and_never_reuse_a_counter(tmp_path, pem, 
         counters += [int(x) for x in out.split()]
     assert sorted(counters) == list(range(1, 41))
     assert KeyStore.load(store.path, key_file = key_file).down_counter(NODE_ID) == 40
+
+
+def test_a_message_is_not_lost_when_the_key_file_changes_under_a_running_store(tmp_path, pem, key_file, caplog):
+    """rotate-file-key (or seal-file) on the file while the process runs: the autosave of a replay counter fails with a
+    SecureError. The uplink that moved the counter is still returned (the counter is marked in RAM), the failure is
+    logged and retried later. A downlink counter (must be saved at once) still raises."""
+    store = sealed_store(tmp_path, pem, key_file)
+    store.autosave_s = 0  # every uplink tries to save
+    node = add_node(store)
+    secure.open_sealed(node.seal(KIND_UPLINK, b"one"), store)
+    other = tmp_path / "secrets" / "other.key"
+    secure.rotate_file_key(store.path, key_file, other, create_key = True)  # the running store keeps the old key
+
+    with caplog.at_level("WARNING"):
+        kind_plain = secure.open_sealed(node.seal(KIND_UPLINK, b"two"), store)
+    assert kind_plain[2] == b"two"
+    assert "not saved" in caplog.text
+    assert secure.open_sealed(node.seal(KIND_UPLINK, b"three"), store)[2] == b"three"  # and the next one
+    with pytest.raises(ReplayError):  # the counter is used: a repeat is a replay
+        secure.open_sealed(node.seal(KIND_UPLINK, b"x", counter = 2), store)
+    with pytest.raises(SecureError, match = "does not belong"):
+        secure.seal_downlink(NODE_ID, KIND_DOWNLINK, b"x", store)
+    # a restart with the new key file has the node and the counters of what was saved
+    assert KeyStore.load(store.path, key_file = other).node_ids() == [NODE_ID]
+
+
+def test_a_plain_store_that_gets_sealed_under_a_running_process_keeps_its_uplinks(tmp_path, pem, key_file):
+    store = KeyStore.load(tmp_path / "keys.json", private_pem = pem)
+    store.autosave_s = 0
+    node = add_node(store)
+    secure.seal_file(store.path, key_file)  # the running store has no key
+    assert secure.open_sealed(node.seal(KIND_UPLINK, b"x"), store)[2] == b"x"  # the save fails, the message is fine
+
+
+def test_the_key_file_is_synced_with_its_folder(tmp_path, monkeypatch):
+    synced = []
+    real_fsync = os.fsync
+    monkeypatch.setattr(os, "fsync", lambda fd: (synced.append(os.fstat(fd).st_mode), real_fsync(fd))[1])
+    secure.new_key_file(tmp_path / "keys" / "a.key")
+    assert any(stat.S_ISREG(m) for m in synced), "the key file is synced"
+    assert any(stat.S_ISDIR(m) for m in synced), "its folder is synced"
+
+
+def test_a_key_file_that_cannot_be_written_is_removed(tmp_path, monkeypatch):
+
+    def broken(fd):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(os, "fsync", broken)
+    p = tmp_path / "a.key"
+    with pytest.raises(OSError, match = "disk full"):
+        secure.new_key_file(p)
+    assert not p.exists()  # no empty key file that blocks the next try
+
+
+@pytest.mark.skipif(os.name == "nt", reason = "modes")
+def test_a_key_file_that_others_can_read_is_refused(tmp_path, pem):
+    p = tmp_path / "k.key"
+    secure.new_key_file(p)
+    secure.load_key_file(p)
+    p.chmod(0o440)
+    with pytest.raises(SecureError, match = r"can be read by other users \(mode 0440\).*chmod 400"):
+        secure.load_key_file(p)
+    with pytest.raises(SecureError, match = "other users"):
+        KeyStore.load(tmp_path / "keys.json", private_pem = pem, key_file = p)
+    assert secure.load_key_file(p, check_mode = False) == p.read_bytes()
+    p.chmod(0o604)
+    with pytest.raises(SecureError, match = "0604"):
+        secure.load_key_file(p)
+    p.chmod(0o600)
+    secure.load_key_file(p)
+    with pytest.raises(SecureError, match = "not a file"):
+        secure.check_key_file_mode(tmp_path)
+    with pytest.raises(SecureError, match = "cannot read"):
+        secure.load_key_file(tmp_path)
 
 
 # ---- command line ----

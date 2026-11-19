@@ -74,6 +74,14 @@ void sensei_e2e_settings_seal_close(void) {
   seal_err = -ENODATA;
 }
 
+/* Providers that need nothing before the first use keep this; the HUK provider replaces it. */
+__weak int sensei_e2e_settings_seal_prepare(void) { return 0; }
+
+int sensei_e2e_settings_reset_check(void) {
+  sensei_e2e_settings_seal_close(); /* a failure that was cached at the start must not hide a provider that works now */
+  return sensei_e2e_settings_seal_status();
+}
+
 int sensei_e2e_settings_seal(const char *name, const uint8_t *pt, size_t len, uint8_t *out, size_t cap) {
   int err = sensei_e2e_settings_seal_status();
 
@@ -91,6 +99,8 @@ int sensei_e2e_settings_unseal(const char *name, const uint8_t *rec, size_t len,
 bool sensei_e2e_settings_sealed(void) { return false; }
 int sensei_e2e_settings_seal_status(void) { return -ENOTSUP; }
 void sensei_e2e_settings_seal_close(void) {}
+int sensei_e2e_settings_seal_prepare(void) { return 0; }
+int sensei_e2e_settings_reset_check(void) { return 0; }
 int sensei_e2e_settings_seal(const char *name, const uint8_t *pt, size_t len, uint8_t *out, size_t cap) {
   ARG_UNUSED(name);
   ARG_UNUSED(pt);
@@ -223,7 +233,7 @@ SETTINGS_STATIC_HANDLER_DEFINE(sensei_e2e, CONFIG_SENSEI_SECURE_SETTINGS_PREFIX,
 static int readback_cb(const char *key, size_t len, settings_read_cb read_cb, void *cb_arg, void *param) {
   struct load *l = param;
 
-  if (!strcmp(key, NAME_PRIVX) && len == sizeof(l->privx)) {
+  if (key != NULL && !strcmp(key, NAME_PRIVX) && len == sizeof(l->privx)) {
     l->have_privx = read_cb(cb_arg, l->privx, len) == (ssize_t)len;
   }
   return 0;
@@ -276,12 +286,26 @@ static int resolve_priv(struct load *l) {
 
     n = l->have_privx ? sensei_e2e_settings_unseal(NAME_PRIVX, l->privx, sizeof(l->privx), key, sizeof(key)) : -EBADMSG;
     if (n == (int)sizeof(key)) {
-      memcpy(nv->priv, key, sizeof(key));
-      nv->have_priv = true;
-      if (l->have_plain) { /* the migration stopped between the two writes */
-        (void)settings_delete(PFX "/" NAME_PRIV);
+      if (l->have_plain && memcmp(key, nv->priv, sizeof(key)) != 0) {
+        /* Both records, different keys: an older firmware made a new plain key after the key was sealed (downgrade,
+         * then upgrade). The plain one is the newer: the collector was provisioned for it. Seal it again. */
+        LOG_WRN("plain key next to a different sealed key: the plain key is newer, sealing it again");
+        wipe(key, sizeof(key));
+        n = migrate(l);
+        if (n != 0) {
+          wipe(nv->priv, sizeof(nv->priv));
+          nv->key_unreadable = true;
+          return n;
+        }
+      } else {
+        if (l->have_plain) { /* the migration stopped between the two writes: the same key twice */
+          (void)settings_delete(PFX "/" NAME_PRIV);
+        }
+        memcpy(nv->priv, key, sizeof(key));
+        wipe(key, sizeof(key));
       }
-      wipe(key, sizeof(key));
+      nv->have_priv = true;
+      nv->priv_sealed = true;
       return 0;
     }
     wipe(key, sizeof(key));
@@ -294,6 +318,7 @@ static int resolve_priv(struct load *l) {
     n = migrate(l);
     if (n == 0) {
       nv->have_priv = true;
+      nv->priv_sealed = true;
       return 0;
     }
     wipe(nv->priv, sizeof(nv->priv));

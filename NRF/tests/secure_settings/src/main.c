@@ -47,7 +47,9 @@ static int list_cb(const char *key, size_t len, settings_read_cb read_cb, void *
 
   ARG_UNUSED(read_cb);
   ARG_UNUSED(cb_arg);
-  if (!strcmp(key, "e2e_priv")) {
+  if (key == NULL) { /* a setting named exactly like the prefix */
+    n->other++;
+  } else if (!strcmp(key, "e2e_priv")) {
     n->len_priv = len;
   } else if (!strcmp(key, "e2e_privx")) {
     n->len_privx = len;
@@ -298,7 +300,7 @@ struct raw {
 static int raw_cb(const char *key, size_t len, settings_read_cb read_cb, void *cb_arg, void *param) {
   struct raw *r = param;
 
-  if (!strcmp(key, r->name) && len <= sizeof(r->buf)) {
+  if (key != NULL && !strcmp(key, r->name) && len <= sizeof(r->buf)) {
     r->len = read_cb(cb_arg, r->buf, len) == (ssize_t)len ? len : 0;
   }
   return 0;
@@ -591,27 +593,147 @@ ZTEST(secure_settings, test_migration_of_the_plain_key) {
   sensei_secure_close(&b.s);
 }
 
+/* The migration stopped between the two writes: the sealed record is there, the same plain key was not deleted yet. */
 ZTEST(secure_settings, test_migration_stopped_between_the_two_writes) {
   struct sensei_e2e e, e2;
   struct backend b;
   uint32_t key_id;
-  uint8_t pub[SENSEI_SECURE_PUB_SIZE], other[SENSEI_SECURE_PRIV_SIZE] = {9, 9, 9};
+  uint8_t pub[SENSEI_SECURE_PUB_SIZE], rec1[SEALED_LEN], rec2[SEALED_LEN];
   struct names n;
 
   write_plain_state(&e, &b, &key_id, pub);
-  /* the sealed record is there (written by the earlier run), the plain one was not deleted yet; it differs, the sealed
-   * one wins */
-  boot(&e2);
+  boot(&e2); /* the migration */
   stop(&e2);
-  zassert_equal(settings_save_one(PREFIX "/e2e_priv", other, sizeof(other)), 0);
+  zassert_equal(read_raw("e2e_privx", rec1), SEALED_LEN);
+  zassert_equal(settings_save_one(PREFIX "/e2e_priv", e2.nv.priv, SENSEI_SECURE_PRIV_SIZE), 0);
   boot(&e2);
   n = stored();
-  zassert_equal(n.len_priv, 0);
+  zassert_equal(n.len_priv, 0, "the plain copy of the same key is deleted");
   zassert_equal(n.len_privx, SEALED_LEN);
+  zassert_equal(read_raw("e2e_privx", rec2), SEALED_LEN);
+  zassert_mem_equal(rec1, rec2, SEALED_LEN, "the sealed record is not written again");
   zassert_mem_equal(e2.node_pub, pub, sizeof(pub));
   zassert_equal(sensei_e2e_key_id(&e2), key_id);
   stop(&e2);
   sensei_secure_close(&b.s);
+}
+
+/* Downgrade, then upgrade: the sealed key A is there, the old firmware made a new plain key B (its reset does not know
+ * e2e_privx) and the collector was provisioned for B. The plain key is the newer one: it is sealed over A. */
+ZTEST(secure_settings, test_downgrade_then_upgrade_keeps_the_newer_plain_key) {
+  struct sensei_e2e e, e2, e3;
+  struct backend b;
+  uint8_t priv_b[SENSEI_SECURE_PRIV_SIZE], pub_b[SENSEI_SECURE_PUB_SIZE], rec[SEALED_LEN], opened[32], pt[20], env[64];
+  struct names n;
+
+  boot(&e); /* key A, sealed */
+  stop(&e);
+  zassert_equal(sensei_secure_keygen(C, priv_b, pub_b), 0);
+  zassert_equal(settings_save_one(PREFIX "/e2e_priv", priv_b, sizeof(priv_b)), 0);
+  zassert_equal(memcmp(pub_b, e.node_pub, sizeof(pub_b)) != 0, true);
+
+  boot(&e2);
+  zassert_mem_equal(e2.node_pub, pub_b, sizeof(pub_b), "the identity is the plain key B, not the old A");
+  n = stored();
+  zassert_equal(n.len_priv, 0, "plain record deleted");
+  zassert_equal(n.len_privx, SEALED_LEN);
+  zassert_equal(read_raw("e2e_privx", rec), SEALED_LEN);
+  zassert_equal(sensei_e2e_settings_unseal("e2e_privx", rec, sizeof(rec), opened, sizeof(opened)), 32);
+  zassert_mem_equal(opened, priv_b, sizeof(priv_b), "B is sealed now");
+  backend_session(&b, e2.node_pub);
+  zassert_equal(sensei_e2e_provision(&e2, b.pub, sizeof(b.pub)), 0);
+  zassert_true(sensei_e2e_seal(&e2, SENSEI_SECURE_KIND_UPLINK, pt, sizeof(pt), env, sizeof(env)) > 0);
+  stop(&e2);
+
+  boot(&e3); /* and it stays B */
+  zassert_mem_equal(e3.node_pub, pub_b, sizeof(pub_b));
+  stop(&e3);
+  sensei_secure_close(&b.s);
+}
+
+static int fail_import(void *ctx, const uint8_t *priv, size_t len, sensei_secure_key_t *key) {
+  ARG_UNUSED(ctx);
+  ARG_UNUSED(priv);
+  ARG_UNUSED(len);
+  ARG_UNUSED(key);
+  return -ENOMEM; /* no free key slot */
+}
+
+/* The sealed key opens, but the public key cannot be derived (a crypto error such as a full key store): the stored
+ * record is not replaced by a new key pair, e2e stays off. */
+ZTEST(secure_settings, test_a_crypto_error_does_not_replace_the_sealed_key) {
+  struct sensei_e2e e, e2, e3;
+  struct sensei_e2e_nv nv;
+  struct sensei_secure_crypto bad = *sensei_secure_crypto_zephyr();
+  uint8_t rec1[SEALED_LEN], rec2[SEALED_LEN];
+
+  boot(&e);
+  stop(&e);
+  zassert_equal(read_raw("e2e_privx", rec1), SEALED_LEN);
+
+  bad.ecdh_import = fail_import;
+  sensei_e2e_settings_seal_close();
+  zassert_equal(sensei_e2e_settings_load(&nv), 0);
+  zassert_true(nv.have_priv);
+  zassert_true(nv.priv_sealed);
+  zassert_equal(sensei_e2e_init(&e2, &bad, &sensei_e2e_settings_ops, NULL, &nv, STEP), -EIO);
+  zassert_false(sensei_e2e_ready(&e2));
+  zassert_false(e2.nv.have_priv);
+  zassert_equal(read_raw("e2e_privx", rec2), SEALED_LEN);
+  zassert_mem_equal(rec1, rec2, SEALED_LEN, "the sealed key is untouched");
+
+  boot(&e3); /* the next start, with a working import, has the same key */
+  zassert_mem_equal(e3.node_pub, e.node_pub, sizeof(e.node_pub));
+  stop(&e3);
+}
+
+/* sensei_e2e_settings_reset_check(): a reset erases the key first, so it must not start while the sealing key is
+ * missing; a failure cached at the start must not block a reset when the key is back. */
+ZTEST(secure_settings, test_reset_check_needs_the_sealing_key) {
+  struct sensei_e2e e;
+  struct sensei_e2e_nv nv;
+  uint8_t rec1[SEALED_LEN], rec2[SEALED_LEN];
+  int lrc, irc;
+
+  boot(&e);
+  stop(&e);
+  zassert_equal(read_raw("e2e_privx", rec1), SEALED_LEN);
+
+  sensei_e2e_testkey_set(NULL); /* the sealing key is not available at the start */
+  boot_rc(&e, &nv, &lrc, &irc);
+  zassert_equal(irc, -EACCES);
+  zassert_equal(sensei_e2e_settings_reset_check(), -EIO, "no sealing key: the reset must not start");
+  zassert_equal(read_raw("e2e_privx", rec2), SEALED_LEN);
+  zassert_mem_equal(rec1, rec2, SEALED_LEN, "the check does not touch the key");
+
+  sensei_e2e_testkey_set(KEY_A); /* the key is back; the failure was cached until the check asks again */
+  zassert_equal(sensei_e2e_settings_reset_check(), 0);
+  zassert_equal(sensei_e2e_reset(&e), 0);
+  zassert_equal(read_raw("e2e_privx", rec2), SEALED_LEN);
+  zassert_not_equal(memcmp(rec1 + 1, rec2 + 1, SENSEI_E2E_SEAL_NONCE_SIZE), 0, "a new key is sealed");
+  stop(&e);
+}
+
+ZTEST(secure_settings, test_seal_prepare_needs_nothing_from_the_test_provider) {
+  zassert_equal(sensei_e2e_settings_seal_prepare(), 0);
+}
+
+/* A setting named exactly like the prefix has no key name: the loader must not use it. */
+ZTEST(secure_settings, test_a_setting_named_like_the_prefix_is_harmless) {
+  struct sensei_e2e e, e2;
+  uint8_t other[4] = {1, 2, 3, 4};
+
+  boot(&e);
+  stop(&e);
+  /* the plain layout again, so that the migration reads back the subtree */
+  zassert_equal(settings_save_one(PREFIX "/e2e_priv", e.nv.priv, SENSEI_SECURE_PRIV_SIZE), 0);
+  zassert_equal(settings_delete(PREFIX "/e2e_privx"), 0);
+  zassert_equal(settings_save_one(PREFIX, other, sizeof(other)), 0);
+  boot(&e2);
+  zassert_mem_equal(e2.node_pub, e.node_pub, sizeof(e.node_pub));
+  zassert_equal(stored().len_privx, SEALED_LEN);
+  stop(&e2);
+  zassert_equal(settings_delete(PREFIX), 0);
 }
 
 ZTEST(secure_settings, test_migration_with_a_failing_provider_keeps_the_plain_key) {

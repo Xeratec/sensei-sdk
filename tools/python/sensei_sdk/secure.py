@@ -36,7 +36,9 @@ import logging
 import os
 import re
 import secrets
+import shlex
 import socket
+import stat
 import struct
 import subprocess
 import sys
@@ -360,26 +362,54 @@ _ENV_KEY_FILE = "SENSEI_KEYSTORE_KEY_FILE"
 _ENV_REQUIRE_SEALED = "SENSEI_KEYSTORE_REQUIRE_SEALED"
 
 
-def load_key_file(path: str | os.PathLike) -> bytes:
-    """Read the 32 byte key file of a sealed key store (raw bytes, `new_key_file` makes one)."""
+def check_key_file_mode(path: str | os.PathLike) -> None:
+    """Refuse a key file that the group or others can access (mode & 077), or that is not a plain file. Not checked on
+    Windows."""
+    p = Path(path)
+    try:
+        mode = p.stat().st_mode
+    except OSError as exc:
+        raise SecureError(f"cannot read the key store key file {p}: {exc}") from exc
+    if not stat.S_ISREG(mode):
+        raise SecureError(f"key store key file {p} is not a file")
+    if os.name != "nt" and mode & 0o077:
+        raise SecureError(f"key store key file {p} can be read by other users (mode {mode & 0o777:04o}) and holds the "
+                          f"key of the key store: chmod 400 {shlex.quote(str(p))}")
+
+
+def load_key_file(path: str | os.PathLike, check_mode: bool = True) -> bytes:
+    """Read the 32 byte key file of a sealed key store (raw bytes, `new_key_file` makes one). A file that the group or
+    others can access is refused (`check_mode`, see `check_key_file_mode`)."""
     p = Path(path)
     try:
         key = p.read_bytes()
     except OSError as exc:
         raise SecureError(f"cannot read the key store key file {p}: {exc}") from exc
-    if len(key) != KEY_FILE_SIZE:
+    if len(key) != KEY_FILE_SIZE:  # before the mode: a file of the wrong kind says so first
         raise SecureError(f"key store key file {p} must be exactly {KEY_FILE_SIZE} raw bytes (it has {len(key)}): "
                           "make one with python -m sensei_sdk.secure new-key-file <file>")
+    if check_mode:
+        check_key_file_mode(p)
     return key
 
 
 def new_key_file(path: str | os.PathLike) -> None:
-    """Write 32 random bytes to a new file (mode 0400). Refuses to overwrite a key."""
+    """Write 32 random bytes to a new file (mode 0400), sync the file and its folder, so that a power loss cannot leave
+    an empty key file next to a sealed key store. Refuses to overwrite a key. A file that could not be written is
+    removed."""
     p = Path(path)
     p.parent.mkdir(parents = True, exist_ok = True)
     fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o400)
-    with os.fdopen(fd, "wb") as f:
-        f.write(secrets.token_bytes(KEY_FILE_SIZE))
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(secrets.token_bytes(KEY_FILE_SIZE))
+            f.flush()
+            os.fsync(f.fileno())
+    except BaseException:
+        with contextlib.suppress(OSError):
+            p.unlink()
+        raise
+    _fsync_dir(p.parent)
 
 
 def _file_key_id(key: bytes) -> bytes:
@@ -778,7 +808,8 @@ class KeyStore:
 
     def _touch(self, now: bool = False) -> None:
         """Mark the store changed and save it if `now`, or if the last save is old. The save of a replay counter
-        (`now` false) may fail without losing the message that moved it: it is tried again later. A counter that
+        (`now` false) may fail (disk error, or a key file or key store file that changed under the process) without losing
+        the message that moved it: it is tried again later. A counter that
         must not be reused (`now` true) raises."""
         self._dirty = True
         if self.path is None:
@@ -788,7 +819,10 @@ class KeyStore:
         elif time.monotonic() - self._last_save >= self.autosave_s:
             try:
                 self.save()
-            except OSError as exc:
+            except (OSError, SecureError) as exc:
+                # A SecureError here: the file or its key changed under the running process (rotate-file-key,
+                # seal-file). The counter is marked in RAM already, so the message is still good: it is returned, the
+                # save is tried again later and the key store keeps working in RAM.
                 self._last_save = time.monotonic()  # do not retry on every message
                 log.warning("key store %s not saved, will retry: %s", self.path, exc)
 

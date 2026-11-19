@@ -132,13 +132,27 @@ The settings code imports the key once as a volatile PSA key and wipes the copy 
 
 - `sensei_e2e_settings_load()` opens the record. A plain `e2e_priv` of an earlier version is migrated at the first start: sealed
   to `e2e_privx`, read back and compared, then `e2e_priv` is deleted. The key and the key id do not change. If the migration
-  stops between the two writes, the next start keeps the sealed record and deletes the plain one. The old plain value stays in the
-  flash page until the garbage collection of the settings: a device whose flash others could read must be reset.
+  stops between the two writes, both records hold the same key: the next start deletes the plain one. If they hold different
+  keys, an older firmware made a new plain key after the key was sealed (downgrade, then upgrade; that firmware does not know
+  `e2e_privx`, and the collector was provisioned for its key): the plain key is the newer one and is sealed over the old one
+  (log line "the plain key is newer"). The old plain value stays in the flash page until the garbage collection of the
+  settings: a device whose flash others could read must be reset.
 - If the key is not available, or the record does not open (changed, sealed for another name, wrong size, another chip),
   `nv->key_unreadable` is set, `nv->have_priv` is false, and `sensei_e2e_init()` returns `-EACCES` without making a new key pair
   and without touching the stored record. The device then has no end-to-end security (visible to the caller). Only
   `sensei_e2e_reset()` starts over. A provider that fails when there is no key yet makes `sensei_e2e_init()` fail with its error
   and stores nothing.
+- A key that came from a sealed record (`nv->priv_sealed`) and cannot be turned into a public key (a crypto error such as no
+  free PSA key slot) is not "damaged": `sensei_e2e_init()` returns `-EIO`, keeps the record and does not make a new key pair
+  (a damaged plain key is still replaced).
+- `sensei_e2e_reset()` erases the stored key before it makes a new one. Call `sensei_e2e_settings_reset_check()` first: it asks
+  the provider again (also after a failure that was cached at the start) and returns 0 only if a new key can be sealed. Without
+  it a reset with no sealing key would end with no key at all.
+- `sensei_e2e_settings_seal_prepare()`: call it early in `main()`, before other threads write flash. The HUK provider writes
+  the hardware unique key there if there is none (`hw_unique_key_write_random()` writes the UICR through the NVMC inside the
+  CryptoCell library, without the flash driver lock). Without the call the first key request does it. A HUK that was only
+  partly written (power cut during the very first start) gives `HW_UNIQUE_KEY_ERR_MISSING` for good: only a chip erase
+  (`nrfutil device recover`) helps.
 - The name `e2e_rat` is reserved for the ratchet state of a later version (sealed the same way). `erase` deletes it.
 - `sensei_e2e_settings_seal()`, `_unseal()`, `_seal_status()` and `_seal_close()` are the pieces, for the application and tests.
   Call everything from the one thread that uses the key store.
@@ -174,7 +188,7 @@ without the library).
   `tests/generated/vectors.h`. The vectors come from the Python implementation in `tools/python`
   (`python -m sensei_sdk.vectors`, `make vectors`; CI checks that they are current); do not edit the file by hand.
 - `test_e2e` checks the key store (`sensei_e2e`) with a fake flash: first start, provisioning, key A then B then A,
-  two senders, failing writes, full table of senders, clearing and the floor, reset, a damaged key, an unreadable key and a key
+  two senders, failing writes, full table of senders, clearing and the floor, reset, a damaged key, a sealed key with a crypto error, an unreadable key and a key
   that cannot be stored.
 - `test_seal` checks the sealed settings records against the Python vectors (vector 7, `tests/generated/vectors.h`): the same bytes
   both ways, every byte covered by the tag, wrong name and key, short and long records, new nonce at every seal.

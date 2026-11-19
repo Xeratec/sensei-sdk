@@ -502,6 +502,27 @@ static void test_damaged_key(void) {
   CHECK(!sensei_e2e_ready(&e) && flash.have_priv && e.node_pub[0] == 4);
 }
 
+/* A key from a sealed record that cannot be turned into a public key is not "damaged": no new key pair, e2e stays off,
+ * nothing is stored. Without the flag (plain key) the key is replaced, see above. */
+static void test_sealed_key_crypto_error(void) {
+  struct sensei_e2e e;
+  struct sensei_e2e_nv nv;
+  struct backend b;
+
+  memset(&nv, 0, sizeof(nv));
+  memset(&flash, 0, sizeof(flash));
+  backend_new(&b);
+  nv.have_priv = true;
+  nv.priv_sealed = true;
+  /* nv.priv is all zero: not a valid scalar, the stand-in for a failing import */
+  nv.have_backend = true;
+  memcpy(nv.backend_pub, b.pub, 65);
+  erased = 0;
+  CHECK(sensei_e2e_init(&e, C, &ops, NULL, &nv, 4) == -EIO);
+  CHECK(!flash.have_priv && erased == 0 && !sensei_e2e_ready(&e) && !e.nv.have_priv);
+  CHECK(sensei_e2e_seal(&e, SENSEI_SECURE_KIND_UPLINK, nv.priv, 4, nv.priv, 0) == -ENOTCONN);
+}
+
 /* A stored key that cannot be read (sealed record that does not open): no new key pair over it, reset is the way out.
  */
 static void test_key_unreadable(void) {
@@ -555,6 +576,7 @@ int main(void) {
   test_replay_after_clear();
   test_reset();
   test_damaged_key();
+  test_sealed_key_crypto_error();
   test_key_unreadable();
   test_key_store_failure();
   return CHECK_DONE();

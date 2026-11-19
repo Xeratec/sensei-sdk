@@ -16,15 +16,18 @@
  * that fails stops it too. */
 
 #include <errno.h>
+#include <stdio.h>
 #include <string.h>
 
 #include <zephyr/settings/settings.h>
 #include <zephyr/storage/flash_map.h>
 #include <zephyr/ztest.h>
 
+#include "sensei_commission_settings.h"
 #include "sensei_e2e_settings.h"
 #include "sensei_ratchet.h"
-#include "vectors.h" /* lib/sensei_secure/tests/generated: vec_seal (sealed settings records) */
+#include "vectors.h"            /* lib/sensei_secure/tests/generated: vec_seal (sealed settings records) */
+#include "vectors_commission.h" /* the verifier record of the commissioning (V10) */
 
 #define PREFIX "sensei_comm" /* default of CONFIG_SENSEI_SECURE_SETTINGS_PREFIX: the keys of the SENSEI IEQ node */
 #define STEP 4
@@ -52,7 +55,7 @@ int __wrap_settings_delete(const char *name) {
 }
 
 struct names {
-  size_t len_priv, len_privx, len_rat, len_mrk, len_bpub, len_tx, len_rxs, len_rxf, other;
+  size_t len_priv, len_privx, len_rat, len_mrk, len_bpub, len_tx, len_rxs, len_rxf, len_cmv, len_cmf, other;
 };
 
 #ifdef CONFIG_SENSEI_SECURE_SETTINGS_SEAL
@@ -86,6 +89,10 @@ static int list_cb(const char *key, size_t len, settings_read_cb read_cb, void *
     n->len_rxs = len;
   } else if (!strcmp(key, "e2e_rxf")) {
     n->len_rxf = len;
+  } else if (!strcmp(key, "e2e_cmv")) {
+    n->len_cmv = len;
+  } else if (!strcmp(key, "e2e_cmf")) {
+    n->len_cmf = len;
   } else {
     n->other++;
   }
@@ -1397,5 +1404,347 @@ ZTEST(secure_settings, test_without_mcuboot_the_plain_record_goes_after_the_load
 }
 #endif
 #endif /* CONFIG_SENSEI_SECURE_SETTINGS_SEAL */
+
+/* ---- the commissioning records e2e_cmv (verifier, sealed with SEAL) and e2e_cmf (attempt counters) ---- */
+
+#ifdef CONFIG_SENSEI_SECURE_SETTINGS_SEAL
+#define CMV_STORED (SENSEI_COMMISSION_RECORD_SIZE + SENSEI_E2E_SEAL_OVERHEAD)
+#else
+#define CMV_STORED SENSEI_COMMISSION_RECORD_SIZE
+#endif
+
+static void cm_record(int reg, struct sensei_commission_record *rec) {
+  zassert_equal(sensei_commission_record_decode(C, vec_com_reg[reg].record, SENSEI_COMMISSION_RECORD_SIZE, rec), 0);
+}
+
+/* The stored bytes of a setting (name without the prefix); returns its length, -ENOENT if there is none. */
+struct cm_raw {
+  uint8_t buf[256];
+  int len;
+};
+
+static int cm_raw_cb(const char *key, size_t len, settings_read_cb read_cb, void *cb_arg, void *param) {
+  struct cm_raw *r = param;
+
+  ARG_UNUSED(key);
+  r->len = len <= sizeof(r->buf) && read_cb(cb_arg, r->buf, len) == (ssize_t)len ? (int)len : -EIO;
+  return 0;
+}
+
+static int cm_raw_read(const char *name, struct cm_raw *r) {
+  char path[48];
+
+  r->len = -ENOENT;
+  snprintf(path, sizeof(path), PREFIX "/%s", name);
+  zassert_equal(settings_load_subtree_direct(path, cm_raw_cb, r), 0);
+  return r->len;
+}
+
+static bool cm_contains(const uint8_t *hay, size_t n, const uint8_t *needle, size_t m) {
+  for (size_t i = 0; i + m <= n; i++) {
+    if (memcmp(hay + i, needle, m) == 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+ZTEST(secure_settings, test_commission_verifier_roundtrip) {
+  struct sensei_commission_record rec, got;
+  uint8_t plain[SENSEI_COMMISSION_RECORD_SIZE];
+  struct cm_raw r;
+  struct names n;
+
+  cm_record(0, &rec);
+  zassert_equal(sensei_commission_settings_verifier_load(&got), -ENOENT);
+  zassert_equal(sensei_commission_settings_verifier_erase(), 0, "erase of nothing");
+  zassert_equal(sensei_commission_settings_verifier_store(&rec), 0);
+  n = stored();
+  zassert_equal(n.len_cmv, CMV_STORED);
+  zassert_equal(n.len_cmf + n.other, 0, "no other record");
+  memset(&got, 0, sizeof(got));
+  zassert_equal(sensei_commission_settings_verifier_load(&got), 0);
+  zassert_equal(sensei_commission_record_encode(C, &got, plain), 0);
+  zassert_mem_equal(plain, vec_com_reg[0].record, sizeof(plain));
+  /* sealed: the verifier (w0, L) is not in the flash; plain (simulator build): it is */
+  zassert_equal(cm_raw_read("e2e_cmv", &r), (int)CMV_STORED);
+#ifdef CONFIG_SENSEI_SECURE_SETTINGS_SEAL
+  zassert_false(cm_contains(r.buf, (size_t)r.len, rec.w0, sizeof(rec.w0)));
+  zassert_false(cm_contains(r.buf, (size_t)r.len, rec.l, sizeof(rec.l)));
+  zassert_false(cm_contains(r.buf, (size_t)r.len, rec.params.salt, sizeof(rec.params.salt)));
+  zassert_false(flash_has(rec.w0, sizeof(rec.w0)), "w0 is not in any page of the flash");
+  zassert_false(flash_has(rec.l + 1, 32), "L is not in any page of the flash");
+#else
+  zassert_mem_equal(r.buf, vec_com_reg[0].record, sizeof(plain));
+  zassert_true(cm_contains(r.buf, (size_t)r.len, rec.w0, sizeof(rec.w0)));
+#endif
+  /* a second store replaces it (one record) */
+  cm_record(1, &rec);
+  zassert_equal(sensei_commission_settings_verifier_store(&rec), 0);
+  zassert_equal(stored().len_cmv, CMV_STORED);
+  zassert_equal(sensei_commission_settings_verifier_load(&got), 0);
+  zassert_mem_equal(got.w0, vec_com_reg[1].w0, 32);
+  zassert_equal(sensei_commission_settings_verifier_erase(), 0);
+  zassert_equal(stored().len_cmv, 0);
+  zassert_equal(sensei_commission_settings_verifier_load(&got), -ENOENT);
+}
+
+ZTEST(secure_settings, test_commission_store_refuses_a_bad_record_and_keeps_the_old_one) {
+  struct sensei_commission_record rec, bad, got;
+
+  cm_record(0, &rec);
+  zassert_equal(sensei_commission_settings_verifier_store(&rec), 0);
+  bad = rec;
+  memset(bad.w0, 0, sizeof(bad.w0)); /* w0 = 0 */
+  zassert_equal(sensei_commission_settings_verifier_store(&bad), -EINVAL);
+  bad = rec;
+  bad.l[64] ^= 1; /* L off the curve */
+  zassert_equal(sensei_commission_settings_verifier_store(&bad), -EINVAL);
+  bad = rec;
+  bad.params.log2n = 13;
+  zassert_equal(sensei_commission_settings_verifier_store(&bad), -EINVAL);
+  zassert_equal(sensei_commission_settings_verifier_load(&got), 0);
+  zassert_mem_equal(got.w0, rec.w0, 32);
+  /* a write that fails changes nothing */
+  cm_record(1, &bad);
+  fail_save = "e2e_cmv";
+  zassert_equal(sensei_commission_settings_verifier_store(&bad), -EIO);
+  fail_save = NULL;
+  zassert_equal(sensei_commission_settings_verifier_load(&got), 0);
+  zassert_mem_equal(got.w0, rec.w0, 32);
+}
+
+ZTEST(secure_settings, test_commission_verifier_of_the_wrong_size_or_content_is_refused) {
+  struct sensei_commission_record rec, got;
+  uint8_t buf[CMV_STORED + 1];
+
+  cm_record(0, &rec);
+  zassert_equal(sensei_commission_settings_verifier_store(&rec), 0);
+  {
+    struct cm_raw r;
+
+    zassert_equal(cm_raw_read("e2e_cmv", &r), (int)CMV_STORED);
+    memcpy(buf, r.buf, CMV_STORED);
+  }
+  buf[CMV_STORED] = 0;
+  zassert_equal(settings_save_one(PREFIX "/e2e_cmv", buf, CMV_STORED + 1), 0);
+  zassert_equal(sensei_commission_settings_verifier_load(&got), -EBADMSG, "one byte more");
+  zassert_equal(settings_save_one(PREFIX "/e2e_cmv", buf, CMV_STORED - 1), 0);
+  zassert_equal(sensei_commission_settings_verifier_load(&got), -EBADMSG, "one byte less");
+  zassert_equal(settings_save_one(PREFIX "/e2e_cmv", buf, 0), 0);
+  zassert_not_equal(sensei_commission_settings_verifier_load(&got), 0, "empty");
+  /* a record that opens (or is plain) but is not an acceptable verifier */
+  {
+    uint8_t plain[SENSEI_COMMISSION_RECORD_SIZE];
+    uint8_t out[CMV_STORED];
+
+    memcpy(plain, vec_com_reg[0].record, sizeof(plain));
+    memset(plain + 24, 0, 32); /* w0 = 0 */
+#ifdef CONFIG_SENSEI_SECURE_SETTINGS_SEAL
+    zassert_equal(sensei_e2e_settings_seal("e2e_cmv", plain, sizeof(plain), out, sizeof(out)), (int)CMV_STORED);
+#else
+    memcpy(out, plain, sizeof(plain));
+#endif
+    zassert_equal(settings_save_one(PREFIX "/e2e_cmv", out, sizeof(out)), 0);
+    memset(&got, 0x5A, sizeof(got));
+    zassert_equal(sensei_commission_settings_verifier_load(&got), -EBADMSG);
+    zassert_equal(((uint8_t *)&got)[0], 0x5A, "nothing written on an error");
+  }
+}
+
+#ifdef CONFIG_SENSEI_SECURE_SETTINGS_SEAL
+ZTEST(secure_settings, test_commission_verifier_sealed_record_negatives) {
+  struct sensei_commission_record rec, got;
+  struct cm_raw r;
+  uint8_t tmp[CMV_STORED];
+
+  cm_record(0, &rec);
+  zassert_equal(sensei_commission_settings_verifier_store(&rec), 0);
+  zassert_equal(cm_raw_read("e2e_cmv", &r), (int)CMV_STORED);
+  /* a changed byte in the version, nonce, ciphertext and tag */
+  for (size_t at = 0; at < CMV_STORED; at += 7) {
+    memcpy(tmp, r.buf, CMV_STORED);
+    tmp[at] ^= 0x01;
+    zassert_equal(settings_save_one(PREFIX "/e2e_cmv", tmp, CMV_STORED), 0);
+    zassert_true(sensei_commission_settings_verifier_load(&got) < 0, "byte %zu", at);
+  }
+  zassert_equal(settings_save_one(PREFIX "/e2e_cmv", r.buf, CMV_STORED), 0);
+  zassert_equal(sensei_commission_settings_verifier_load(&got), 0);
+  /* another chip (another sealing key) */
+  sensei_e2e_testkey_set(KEY_B);
+  sensei_e2e_settings_seal_close();
+  zassert_equal(sensei_commission_settings_verifier_load(&got), -EACCES);
+  sensei_e2e_testkey_set(KEY_A);
+  sensei_e2e_settings_seal_close();
+  zassert_equal(sensei_commission_settings_verifier_load(&got), 0);
+  /* a record sealed for another name (the private key's) does not open as the verifier */
+  {
+    uint8_t plain[SENSEI_COMMISSION_RECORD_SIZE];
+    uint8_t out[CMV_STORED];
+
+    memcpy(plain, vec_com_reg[0].record, sizeof(plain));
+    zassert_equal(sensei_e2e_settings_seal("e2e_priv", plain, sizeof(plain), out, sizeof(out)), (int)CMV_STORED);
+    zassert_equal(settings_save_one(PREFIX "/e2e_cmv", out, sizeof(out)), 0);
+    zassert_equal(sensei_commission_settings_verifier_load(&got), -EACCES);
+  }
+}
+
+ZTEST(secure_settings, test_commission_provider_failure_stores_nothing_and_loads_nothing) {
+  struct sensei_commission_record rec, other, got;
+
+  cm_record(0, &rec);
+  cm_record(1, &other);
+  zassert_equal(sensei_commission_settings_verifier_store(&rec), 0);
+  sensei_e2e_testkey_set(NULL); /* the sealing key is not available (what the node reports as AT_REST_FAILED) */
+  sensei_e2e_settings_seal_close();
+  zassert_true(sensei_commission_settings_verifier_store(&other) < 0);
+  zassert_true(sensei_commission_settings_verifier_load(&got) < 0);
+  zassert_not_equal(sensei_commission_settings_verifier_load(&got), -ENOENT);
+  sensei_e2e_testkey_set(KEY_A);
+  sensei_e2e_settings_seal_close();
+  zassert_equal(sensei_commission_settings_verifier_load(&got), 0);
+  zassert_mem_equal(got.w0, rec.w0, 32, "the old record stands");
+}
+#else
+ZTEST(secure_settings, test_commission_plain_verifier_needs_the_option) {
+  struct sensei_commission_record rec;
+
+  cm_record(0, &rec);
+#ifdef CONFIG_SENSEI_SECURE_COMMISSION_PLAIN_VERIFIER
+  zassert_equal(sensei_commission_settings_verifier_store(&rec), 0);
+#else
+  zassert_equal(sensei_commission_settings_verifier_store(&rec), -ENOTSUP);
+  zassert_equal(stored().len_cmv, 0);
+#endif
+}
+#endif
+
+ZTEST(secure_settings, test_commission_counters) {
+  struct sensei_commission_counters c = {7, 7}, d;
+  struct cm_raw r;
+  struct names n;
+
+  zassert_equal(sensei_commission_settings_counters_load(&c), 0);
+  zassert_true(c.fails_total == 0 && c.fails_since_ok == 0, "none stored: zeros");
+  zassert_equal(sensei_commission_settings_counters_erase(), 0, "erase of nothing");
+  c.fails_total = 0x01020304u;
+  c.fails_since_ok = 5;
+  zassert_equal(sensei_commission_settings_counters_save(NULL, &c), 0);
+  n = stored();
+  zassert_equal(n.len_cmf, 8);
+  zassert_equal(n.len_cmv + n.other, 0);
+  zassert_equal(cm_raw_read("e2e_cmf", &r), 8);
+  zassert_equal(r.buf[0], 0x04);
+  zassert_equal(r.buf[3], 0x01);
+  zassert_equal(r.buf[4], 5); /* plain, little endian, not sealed */
+  memset(&d, 0, sizeof(d));
+  zassert_equal(sensei_commission_settings_counters_load(&d), 0);
+  zassert_true(d.fails_total == 0x01020304u && d.fails_since_ok == 5);
+  /* a write that fails: the old value stands */
+  fail_save = "e2e_cmf";
+  c.fails_since_ok = 6;
+  zassert_equal(sensei_commission_settings_counters_save(NULL, &c), -EIO);
+  fail_save = NULL;
+  zassert_equal(sensei_commission_settings_counters_load(&d), 0);
+  zassert_equal(d.fails_since_ok, 5);
+  /* a record of the wrong size: locked (the maximum), not zeros */
+  {
+    const uint8_t seven[7] = {1};
+
+    zassert_equal(settings_save_one(PREFIX "/e2e_cmf", seven, sizeof(seven)), 0);
+    memset(&d, 0, sizeof(d));
+    zassert_equal(sensei_commission_settings_counters_load(&d), -EBADMSG);
+    zassert_true(d.fails_total == 0xFFFFFFFFu && d.fails_since_ok == 0xFFFFFFFFu);
+  }
+  zassert_equal(sensei_commission_settings_counters_erase(), 0);
+  zassert_equal(sensei_commission_settings_counters_load(&d), 0);
+  zassert_true(d.fails_total == 0 && d.fails_since_ok == 0);
+}
+
+ZTEST(secure_settings, test_reset_erases_the_commissioning_records) {
+  struct sensei_e2e e;
+  struct sensei_commission_record rec;
+  struct sensei_commission_counters c = {3, 2};
+  struct names n;
+
+  boot(&e);
+  cm_record(0, &rec);
+  zassert_equal(sensei_commission_settings_verifier_store(&rec), 0);
+  zassert_equal(sensei_commission_settings_counters_save(NULL, &c), 0);
+  n = stored();
+  zassert_true(n.len_cmv > 0 && n.len_cmf > 0);
+  zassert_equal(sensei_e2e_reset(&e), 0);
+  n = stored();
+  zassert_equal(n.len_cmv, 0, "the verifier does not outlive a reset: the old label must fail");
+  zassert_equal(n.len_cmf, 0);
+  zassert_equal(n.other, 0);
+  stop(&e);
+  /* an erase that fails on the verifier refuses the reset */
+  boot(&e);
+  zassert_equal(sensei_commission_settings_verifier_store(&rec), 0);
+  fail_delete = "e2e_cmv";
+  zassert_equal(sensei_e2e_reset(&e), -EIO);
+  fail_delete = NULL;
+  stop(&e);
+}
+
+/* A whole session with the counters in the settings: the attempt is in the flash before the answer, a restart keeps it,
+ * a confirmed code clears it, a write that fails ends the attempt. */
+ZTEST(secure_settings, test_commission_session_counts_in_the_settings) {
+  struct sensei_commission_record rec;
+  struct sensei_commission_counters cnt, flash;
+  struct sensei_commission_verifier v;
+  struct sensei_commission_prover p;
+  struct sensei_commission_verifier_cfg cfg;
+  uint8_t ng[16] = {1}, nn[16], sp[65], sv[65], cv[32], cp[32];
+  const uint64_t node = 0x1122334455667788ull;
+  const vec_com_reg_t *reg = &vec_com_reg[1];
+
+  cm_record(1, &rec);
+  zassert_equal(sensei_commission_settings_counters_load(&cnt), 0);
+  memset(&cfg, 0, sizeof(cfg));
+  cfg.c = C;
+  cfg.record = &rec;
+  cfg.node_id = node;
+  cfg.counters = &cnt;
+  cfg.save_counters = sensei_commission_settings_counters_save;
+
+  /* an attempt that fails to write is not started */
+  zassert_equal(sensei_commission_verifier_begin(&v, &cfg, ng, 0, nn), 0);
+  zassert_equal(sensei_commission_prover_begin(&p, C, reg->w0, reg->w1, node, &rec.params, ng, nn), 0);
+  zassert_equal(sensei_commission_prover_share(&p, sp), 0);
+  fail_save = "e2e_cmf";
+  zassert_equal(sensei_commission_verifier_pake1(&v, 1, sp, sv, cv), SENSEI_SECURE_ERR_STORE);
+  fail_save = NULL;
+  zassert_equal(sensei_commission_settings_counters_load(&flash), 0);
+  zassert_true(flash.fails_total == 0 && flash.fails_since_ok == 0 && cnt.fails_total == 0);
+  sensei_commission_prover_end(&p);
+
+  /* the attempt counts, the restart keeps it */
+  zassert_equal(sensei_commission_verifier_begin(&v, &cfg, ng, 0, nn), 0);
+  zassert_equal(sensei_commission_prover_begin(&p, C, reg->w0, reg->w1, node, &rec.params, ng, nn), 0);
+  zassert_equal(sensei_commission_prover_share(&p, sp), 0);
+  zassert_equal(sensei_commission_verifier_pake1(&v, 1, sp, sv, cv), 0);
+  zassert_equal(sensei_commission_settings_counters_load(&flash), 0);
+  zassert_true(flash.fails_total == 1 && flash.fails_since_ok == 1);
+  sensei_commission_verifier_end(&v); /* power cut here */
+  zassert_equal(sensei_commission_prover_finish(&p, sv, cv, cp), 0);
+  sensei_commission_prover_end(&p);
+  zassert_equal(sensei_commission_settings_counters_load(&cnt), 0);
+  zassert_true(cnt.fails_total == 1 && cnt.fails_since_ok == 1);
+
+  /* a confirmed code clears since_ok */
+  zassert_equal(sensei_commission_verifier_begin(&v, &cfg, ng, 0, nn), 0);
+  zassert_equal(sensei_commission_prover_begin(&p, C, reg->w0, reg->w1, node, &rec.params, ng, nn), 0);
+  zassert_equal(sensei_commission_prover_share(&p, sp), 0);
+  zassert_equal(sensei_commission_verifier_pake1(&v, 1, sp, sv, cv), 0);
+  zassert_equal(sensei_commission_prover_finish(&p, sv, cv, cp), 0);
+  zassert_equal(sensei_commission_verifier_pake3(&v, 2, cp), 0);
+  zassert_equal(sensei_commission_settings_counters_load(&flash), 0);
+  zassert_true(flash.fails_total == 1 && flash.fails_since_ok == 0, "total %u since_ok %u", flash.fails_total,
+               flash.fails_since_ok);
+  sensei_commission_verifier_end(&v);
+  sensei_commission_prover_end(&p);
+}
 
 ZTEST_SUITE(secure_settings, NULL, setup, before, NULL, NULL);

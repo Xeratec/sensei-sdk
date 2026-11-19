@@ -77,7 +77,16 @@ enum sensei_secure_kind {
   SENSEI_SECURE_KIND_DOWNLINK = 2,     /* backend to node: encoded Downlink */
   SENSEI_SECURE_KIND_NODE_TO_HOST = 3, /* node to host: encoded NodeToHost data message */
   SENSEI_SECURE_KIND_SETTINGS = 4,     /* backend to node: Settings patch for the BLE characteristic */
+  /* Commissioning channel (sensei_commission.h). Both directions, generation 0 format, no node id, key id = session
+   * id. Only sensei_secure_seal_commission() and sensei_secure_open_commission() handle it: sensei_secure_seal() and
+   * sensei_secure_open() refuse it, also with want 0. */
+  SENSEI_SECURE_KIND_COMMISSION = 5,
 };
+
+/* Kind 5: sender field of the envelopes that go to the node (the node sends direction 0, which has none), and the
+ * longest envelope. */
+#define SENSEI_SECURE_COMMISSION_SENDER 1u
+#define SENSEI_SECURE_COMMISSION_MAX 320u
 
 enum sensei_secure_role {
   SENSEI_SECURE_ROLE_NODE = 0,
@@ -139,6 +148,24 @@ struct sensei_secure_crypto {
    * inputs. The result may be all zero (a peer of low order) or the backend may refuse it with a nonzero return;
    * the caller treats both as failure. */
   int (*x25519)(void *ctx, const uint8_t priv[32], const uint8_t peer[32], uint8_t out[32]);
+  /* Commissioning (sensei_commission.h, SPAKE2+ on P-256). A backend without it leaves these NULL. Points are 65 B
+   * uncompressed (04 || X || Y), scalars 32 B big endian. On a device the scalar functions must be constant time. */
+  /** SHA-256 of msg (one shot; msg may be NULL when msg_len is 0). */
+  int (*sha256)(void *ctx, const uint8_t *msg, size_t msg_len, uint8_t out[32]);
+  /** 40 B big endian integer mod n (the order of P-256) as 32 B big endian. The result may be 0. */
+  int (*scalar_reduce)(void *ctx, const uint8_t in[40], uint8_t out[32]);
+  /** 0 if pt is a point of the curve (prefix 04, coordinates below p, on the curve; not the identity), else nonzero. */
+  int (*spake2p_check)(void *ctx, const uint8_t pt[65]);
+  /** share = xy*G + w0*mn (mn is M or N of RFC 9383). Nonzero if it fails or the result is the identity. */
+  int (*spake2p_share)(void *ctx, const uint8_t w0[32], const uint8_t xy[32], const uint8_t mn[65], uint8_t share[65]);
+  /**
+   * Common values. rest = peer - w0*nm (peer is the share of the other side, nm the element it used: N if the peer
+   * is the verifier, M if it is the prover). Z = xy*rest. V = xy*l (verifier: w1 is NULL, l is L) or V = w1*rest
+   * (prover: l is NULL). Nonzero if peer is not a valid point or rest is the identity: the caller treats that as an
+   * invalid share. w1 and l are not both set, and not both NULL.
+   */
+  int (*spake2p_zv)(void *ctx, const uint8_t w0[32], const uint8_t *w1, const uint8_t xy[32], const uint8_t peer[65],
+                    const uint8_t nm[65], const uint8_t *l, uint8_t z[65], uint8_t v[65]);
 };
 
 struct sensei_secure_keys {
@@ -320,13 +347,39 @@ int sensei_secure_seal(struct sensei_secure *s, enum sensei_secure_kind kind, co
                        const uint8_t *pt, size_t pt_len, uint8_t *out, size_t out_cap);
 
 /**
- * Open an envelope. want: expected kind, or 0 for any kind of this direction. own_id: if not NULL
- * and the envelope carries a node id, it must match. Returns 0 and sets *out_len and *kind, or a
- * negative error. Nothing changes on failure (no plaintext is left in out); on success the counter is
- * recorded. If the counter cannot be stored (store.rx fails) the message is refused with ERR_STORE.
+ * Open an envelope. want: expected kind, or 0 for any kind of this direction except kind 5 (the commissioning channel
+ * is refused here with ERR_FORMAT, whatever want is: it has its own functions). own_id: if not NULL and the envelope
+ * carries a node id, it must match. Returns 0 and sets *out_len and *kind, or a negative error. Nothing changes on
+ * failure (no plaintext is left in out); on success the counter is recorded. If the counter cannot be stored (store.rx
+ * fails) the message is refused with ERR_STORE.
  */
 int sensei_secure_open(struct sensei_secure *s, enum sensei_secure_kind want, const uint64_t *own_id, const uint8_t *in,
                        size_t in_len, uint8_t *out, size_t out_cap, size_t *out_len, enum sensei_secure_kind *kind);
+
+/**
+ * Kind 5, the commissioning channel. The caller owns the AES-128-GCM key handles (aead_import), the counters and the
+ * replay window; the layout is
+ *   flags (1) | kind (1) = 5 | session id (4) | [sender (4)] | counter (4) | ciphertext | tag (16)
+ * flags: marker, version 3, no node id, bit 0 = direction. Direction 0 (node to commissioner) has no sender field,
+ * direction 1 has sender SENSEI_SECURE_COMMISSION_SENDER. Nonce and associated data as for the other kinds. No
+ * generation bits. At most SENSEI_SECURE_COMMISSION_MAX bytes.
+ *
+ * Seal: counter is not 0. Returns the envelope length, ERR_SPACE (out is too small or the envelope would be over the
+ * limit), ERR_STATE (counter 0) or ERR_CRYPTO.
+ */
+int sensei_secure_seal_commission(const struct sensei_secure_crypto *c, sensei_secure_key_t key, uint32_t session_id,
+                                  bool to_node, uint32_t counter, const uint8_t *pt, size_t pt_len, uint8_t *out,
+                                  size_t out_cap);
+
+/**
+ * Open a kind 5 envelope that goes in the direction from_node (true: node to commissioner). ERR_FORMAT: not a kind 5
+ * envelope of this direction and session id, over the limit, a reserved or ratchet bit, a node id, the wrong sender,
+ * too short. ERR_REPLAY: counter 0, seen or too old in rx. ERR_AUTH: the tag. rx changes only on success, and no
+ * plaintext is left in out on failure.
+ */
+int sensei_secure_open_commission(const struct sensei_secure_crypto *c, sensei_secure_key_t key, uint32_t session_id,
+                                  bool from_node, struct sensei_secure_replay *rx, const uint8_t *in, size_t in_len,
+                                  uint8_t *out, size_t out_cap, size_t *out_len);
 
 /** Key id of an envelope without opening it (0 if it is not one). Lets a backend pick the session.
  */
@@ -346,7 +399,9 @@ struct sensei_secure_info {
 };
 
 /** Parse the header. SENSEI_SECURE_ERR_FORMAT if it is not an envelope of this version, is too short, has the reserved
- * kind bit or generation bits without the ratchet bit set, or the kind does not fit the direction. */
+ * kind bit or generation bits without the ratchet bit set, or the kind does not fit the direction. Kind 5 parses in
+ * both directions (a node id, the ratchet bit, or a sender other than SENSEI_SECURE_COMMISSION_SENDER in direction 1
+ * are refused): to_node tells the direction. A gateway uses it to tell the commissioning channel from the rest. */
 int sensei_secure_peek(const uint8_t *buf, size_t len, struct sensei_secure_info *info);
 
 /* Backends. */

@@ -10,6 +10,9 @@
 
 #include "crypto/sensei_crypto.h"
 #include "sensei_secure.h"
+#ifdef CONFIG_SENSEI_SECURE_COMMISSION
+#include "sensei_spake2p.h"
+#endif
 
 static int c_random(void *ctx, uint8_t *out, size_t len) {
   (void)ctx;
@@ -103,6 +106,35 @@ static int c_x25519(void *ctx, const uint8_t priv[32], const uint8_t peer[32], u
 }
 #endif
 
+#ifdef CONFIG_SENSEI_SECURE_COMMISSION
+static int c_sha256(void *ctx, const uint8_t *msg, size_t msg_len, uint8_t out[32]) {
+  (void)ctx;
+  return sensei_crypto_sha256(msg, msg_len, out) != SENSEI_CRYPTO_OK;
+}
+
+static int c_scalar_reduce(void *ctx, const uint8_t in[40], uint8_t out[32]) {
+  (void)ctx;
+  return sensei_spake2p_reduce(in, out);
+}
+
+static int c_spake2p_check(void *ctx, const uint8_t pt[65]) {
+  (void)ctx;
+  return sensei_spake2p_check(pt);
+}
+
+static int c_spake2p_share(void *ctx, const uint8_t w0[32], const uint8_t xy[32], const uint8_t mn[65],
+                           uint8_t share[65]) {
+  (void)ctx;
+  return sensei_spake2p_share(w0, xy, mn, share);
+}
+
+static int c_spake2p_zv(void *ctx, const uint8_t w0[32], const uint8_t *w1, const uint8_t xy[32],
+                        const uint8_t peer[65], const uint8_t nm[65], const uint8_t *l, uint8_t z[65], uint8_t v[65]) {
+  (void)ctx;
+  return sensei_spake2p_zv(w0, w1, xy, peer, nm, l, z, v);
+}
+#endif
+
 const struct sensei_secure_crypto *sensei_secure_crypto_zephyr(void) {
   static const struct sensei_secure_crypto c = {
       .ctx = NULL,
@@ -119,6 +151,13 @@ const struct sensei_secure_crypto *sensei_secure_crypto_zephyr(void) {
 #ifdef CONFIG_SENSEI_SECURE_RATCHET
       .x25519_keygen = c_x25519_keygen,
       .x25519 = c_x25519,
+#endif
+#ifdef CONFIG_SENSEI_SECURE_COMMISSION
+      .sha256 = c_sha256,
+      .scalar_reduce = c_scalar_reduce,
+      .spake2p_check = c_spake2p_check,
+      .spake2p_share = c_spake2p_share,
+      .spake2p_zv = c_spake2p_zv,
 #endif
   };
   static int inited;

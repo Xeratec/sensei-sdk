@@ -295,13 +295,16 @@ static int save_rat(void *u, uint32_t key_id, const uint8_t *rec, size_t len) {
   return err;
 }
 
-/* The collector key first, then the ratchet record (it belongs to the key) and the key records, the counters last: a
- * counter must not come back with a key that survived a failed delete. The first error stops it and is returned
+/* The collector key first, then the ratchet record (it belongs to the key) and the key records, then the commissioning
+ * records (a verifier does not outlive a reset: the old label must fail), the counters last: a counter must not come
+ * back with a key that survived a failed delete. The first error stops it and is returned
  * (sensei_e2e_reset() then refuses). */
 static int erase(void *u) {
   static const char *const names[] = {
-      PFX "/e2e_bpub", PFX "/" NAME_RAT, PFX "/" NAME_PRIV, PFX "/" NAME_PRIVX, PFX "/" NAME_MRK,
-      PFX "/e2e_tx",   PFX "/e2e_rxs",   PFX "/e2e_rxf",    PFX "/e2e_rx" /* first version of the node firmware */
+      PFX "/e2e_bpub",  PFX "/" NAME_RAT, PFX "/" NAME_PRIV, PFX "/" NAME_PRIVX,
+      PFX "/" NAME_MRK, PFX "/e2e_cmv",   PFX "/e2e_cmf", /* commissioning: the verifier and its attempt counters
+                                                             (sensei_commission_settings.h) */
+      PFX "/e2e_tx",    PFX "/e2e_rxs",   PFX "/e2e_rxf",    PFX "/e2e_rx" /* first version of the node firmware */
   };
 
   ARG_UNUSED(u);

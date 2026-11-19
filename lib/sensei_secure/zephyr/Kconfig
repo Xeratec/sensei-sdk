@@ -42,6 +42,53 @@ config SENSEI_SECURE_REKEY_STALE_EPOCHS
 	  is late by more than that. The range stops at 131072 epochs (8 to 20 s by the estimate, below the 30 s). A node that seals more than this x 64 messages between a request and its answer does
 	  not mix until the traffic drops (the collector alert for a node that never mixes shows it).
 
+config SENSEI_SECURE_COMMISSION
+	bool "Commissioning with a setup code (SPAKE2+, RFC 9383)"
+	depends on SENSEI_SECURE
+	select SENSEI_CRYPTO_HMAC
+	select SENSEI_CRYPTO_HKDF
+	help
+	  src/sensei_commission.c: the verifier (node) and prover (commissioner) of the SPAKE2+ exchange, the kind 5
+	  channel and the verifier record (sensei_commission.h). The cipher backend gets sha256, scalar_reduce and the
+	  spake2p_* functions of the choice below. With SENSEI_SECURE_SETTINGS the verifier record (e2e_cmv) and the
+	  attempt counters (e2e_cmf) are stored too (sensei_commission_settings.h). Flash: see lib/sensei_secure/README.md.
+
+if SENSEI_SECURE_COMMISSION
+
+choice SENSEI_SECURE_SPAKE2P_BACKEND
+	prompt "Point arithmetic of SPAKE2+"
+	help
+	  Where the P-256 point operations of the exchange come from.
+
+config SENSEI_SECURE_SPAKE2P_OCRYPTO
+	bool "ocrypto of nrf_oberon (constant time)"
+	depends on PSA_CRYPTO_DRIVER_OBERON
+	help
+	  ocrypto_spake2p_p256.h, in the library that nRF Security links for the Oberon PSA driver. For nRF boards.
+	  Constant time in the secret scalars, no allocation. It does not exist on native_sim: use the MBEDTLS_ECP choice
+	  there. Checked against the vectors on a Cortex-M33 in QEMU (NRF/tests/spake2p_ocrypto).
+
+config SENSEI_SECURE_SPAKE2P_MBEDTLS_ECP
+	bool "Mbed TLS ECP (native_sim and BabbleSim, tests only)"
+	depends on ARCH_POSIX
+	help
+	  For simulators and tests. Uses the private ECP functions of Mbed TLS (mbedtls_ecp_muladd). It is not constant time
+	  and it allocates. A real board cannot select it (the option needs the POSIX architecture), and a node image must
+	  not use it.
+
+endchoice
+
+config SENSEI_SECURE_COMMISSION_PLAIN_VERIFIER
+	bool "Keep the verifier record in plain flash when sealing is off (simulators)"
+	default y if ARCH_POSIX
+	depends on SENSEI_SECURE_SETTINGS && !SENSEI_SECURE_SETTINGS_SEAL
+	help
+	  Without CONFIG_SENSEI_SECURE_SETTINGS_SEAL the record e2e_cmv would be stored unsealed, and anyone who reads the
+	  flash could guess the setup code offline. Without this option the store function refuses (-ENOTSUP). It is on
+	  for the simulators; a device that keeps verifiers must seal (HUK).
+
+endif # SENSEI_SECURE_COMMISSION
+
 config SENSEI_SECURE_SETTINGS
 	bool "Keep the end-to-end keys and counters in the settings subsystem"
 	depends on SENSEI_SECURE

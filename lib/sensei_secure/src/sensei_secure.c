@@ -266,13 +266,23 @@ static int parse(const uint8_t *in, size_t len, struct hdr *h) {
   n = (h->has_node ? SENSEI_SECURE_HEADER_NODE : SENSEI_SECURE_HEADER) +
       (h->dir == DIR_DOWN ? SENSEI_SECURE_SENDER_SIZE : 0u);
   h->size = n;
-  if (len < n + SENSEI_SECURE_TAG_SIZE || kind_dir(h->kind) != (int)h->dir) {
+  if (len < n + SENSEI_SECURE_TAG_SIZE) {
+    return SENSEI_SECURE_ERR_FORMAT;
+  }
+  if (h->kind == SENSEI_SECURE_KIND_COMMISSION) { /* both directions, but nothing else that the other kinds have */
+    if (h->ratchet || h->has_node) {
+      return SENSEI_SECURE_ERR_FORMAT;
+    }
+  } else if (kind_dir(h->kind) != (int)h->dir) {
     return SENSEI_SECURE_ERR_FORMAT;
   }
   h->node_id = h->has_node ? get64(in + 2) : 0;
   h->key_id = get32(in + (h->has_node ? 10 : 2));
   h->sender = h->dir == DIR_DOWN ? get32(in + n - 8) : 0;
   h->counter = get32(in + n - 4);
+  if (h->kind == SENSEI_SECURE_KIND_COMMISSION && h->dir == DIR_DOWN && h->sender != SENSEI_SECURE_COMMISSION_SENDER) {
+    return SENSEI_SECURE_ERR_FORMAT;
+  }
   return h->dir == DIR_DOWN && h->sender == 0 ? SENSEI_SECURE_ERR_FORMAT : 0;
 }
 
@@ -425,7 +435,9 @@ int sensei_secure_open(struct sensei_secure *s, enum sensei_secure_kind want, co
   if (err) {
     return err;
   }
-  if (h.dir != dir) {
+  if (h.dir != dir || h.kind == SENSEI_SECURE_KIND_COMMISSION || want == SENSEI_SECURE_KIND_COMMISSION) {
+    /* Kind 5 belongs to the commissioning channel (sensei_secure_open_commission()): refused here whatever the
+     * keys, also when any kind is allowed (want 0). It consumes no counter and no window. */
     return SENSEI_SECURE_ERR_FORMAT;
   }
   if (want != 0 && h.kind != (unsigned)want) {
@@ -494,5 +506,72 @@ int sensei_secure_open(struct sensei_secure *s, enum sensei_secure_kind want, co
   if (kind) {
     *kind = (enum sensei_secure_kind)h.kind;
   }
+  return 0;
+}
+
+/* ---- kind 5: the commissioning channel ---- */
+
+int sensei_secure_seal_commission(const struct sensei_secure_crypto *c, sensei_secure_key_t key, uint32_t session_id,
+                                  bool to_node, uint32_t counter, const uint8_t *pt, size_t pt_len, uint8_t *out,
+                                  size_t out_cap) {
+  uint8_t nonce[NONCE_SIZE];
+  unsigned dir = to_node ? DIR_DOWN : DIR_UP;
+  size_t hs = SENSEI_SECURE_HEADER + (to_node ? SENSEI_SECURE_SENDER_SIZE : 0u);
+  size_t n = 0;
+  uint32_t sender = to_node ? SENSEI_SECURE_COMMISSION_SENDER : 0u;
+
+  if (counter == 0) {
+    return SENSEI_SECURE_ERR_STATE;
+  }
+  if (pt_len > SENSEI_SECURE_COMMISSION_MAX || hs + pt_len + SENSEI_SECURE_TAG_SIZE > SENSEI_SECURE_COMMISSION_MAX ||
+      out_cap < hs + pt_len + SENSEI_SECURE_TAG_SIZE) {
+    return SENSEI_SECURE_ERR_SPACE;
+  }
+  out[0] = (uint8_t)(SENSEI_SECURE_MARKER | (SENSEI_SECURE_VERSION << 2) | dir);
+  out[1] = (uint8_t)SENSEI_SECURE_KIND_COMMISSION;
+  put32(out + 2, session_id);
+  if (to_node) {
+    put32(out + 6, sender);
+  }
+  put32(out + hs - 4, counter);
+  make_nonce(nonce, dir, sender, counter);
+  if (c->aead_encrypt(c->ctx, key, nonce, out, hs, pt, pt_len, out + hs, out_cap - hs, &n) != 0) {
+    return SENSEI_SECURE_ERR_CRYPTO;
+  }
+  return (int)(hs + n);
+}
+
+int sensei_secure_open_commission(const struct sensei_secure_crypto *c, sensei_secure_key_t key, uint32_t session_id,
+                                  bool from_node, struct sensei_secure_replay *rx, const uint8_t *in, size_t in_len,
+                                  uint8_t *out, size_t out_cap, size_t *out_len) {
+  uint8_t nonce[NONCE_SIZE];
+  unsigned dir = from_node ? DIR_UP : DIR_DOWN;
+  struct hdr h;
+  size_t n = 0;
+  int err;
+
+  if (in_len > SENSEI_SECURE_COMMISSION_MAX) {
+    return SENSEI_SECURE_ERR_FORMAT;
+  }
+  err = parse(in, in_len, &h);
+  if (err) {
+    return err;
+  }
+  if (h.kind != SENSEI_SECURE_KIND_COMMISSION || h.dir != dir || h.key_id != session_id) {
+    return SENSEI_SECURE_ERR_FORMAT;
+  }
+  err = sensei_secure_replay_check(rx, h.counter);
+  if (err) {
+    return err;
+  }
+  if (out_cap < in_len - h.size - SENSEI_SECURE_TAG_SIZE) {
+    return SENSEI_SECURE_ERR_SPACE;
+  }
+  make_nonce(nonce, dir, h.sender, h.counter);
+  if (c->aead_decrypt(c->ctx, key, nonce, in, h.size, in + h.size, in_len - h.size, out, out_cap, &n) != 0) {
+    return SENSEI_SECURE_ERR_AUTH;
+  }
+  sensei_secure_replay_update(rx, h.counter);
+  *out_len = n;
   return 0;
 }

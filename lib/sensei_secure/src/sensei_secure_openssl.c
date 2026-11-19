@@ -285,6 +285,132 @@ static int c_x25519_keygen(void *ctx, uint8_t priv[32], uint8_t pub[32]) {
   return rc;
 }
 
+/* ---- commissioning: SHA-256, scalar reduction and the SPAKE2+ point operations (not constant time: host only) ---- */
+
+static int c_sha256(void *ctx, const uint8_t *msg, size_t msg_len, uint8_t out[32]) {
+  unsigned int n = 0;
+
+  (void)ctx;
+  return EVP_Digest(msg ? msg : (const uint8_t *)"", msg_len, out, &n, EVP_sha256(), NULL) == 1 && n == 32 ? 0 : -1;
+}
+
+static int c_scalar_reduce(void *ctx, const uint8_t in[40], uint8_t out[32]) {
+  BN_CTX *bc = BN_CTX_new();
+  EC_GROUP *grp = EC_GROUP_new_by_curve_name(NID_X9_62_prime256v1);
+  BIGNUM *a = BN_secure_new(), *r = BN_secure_new();
+  int rc = -1;
+
+  (void)ctx;
+  if (bc && grp && a && r && BN_bin2bn(in, 40, a) && BN_nnmod(r, a, EC_GROUP_get0_order(grp), bc) == 1 &&
+      BN_bn2binpad(r, out, 32) == 32) {
+    rc = 0;
+  }
+  BN_clear_free(a);
+  BN_clear_free(r);
+  EC_GROUP_free(grp);
+  BN_CTX_free(bc);
+  return rc;
+}
+
+/* A 65 B uncompressed point of the curve (prefix 04, coordinates below p, on the curve), else NULL. */
+static EC_POINT *load_point(const EC_GROUP *grp, const uint8_t pt[65], BN_CTX *bc) {
+  EC_POINT *p = EC_POINT_new(grp);
+
+  if (pt[0] != 0x04 || !p || EC_POINT_oct2point(grp, p, pt, 65, bc) != 1 || EC_POINT_is_at_infinity(grp, p)) {
+    EC_POINT_free(p);
+    return NULL;
+  }
+  return p;
+}
+
+static int store_point(const EC_GROUP *grp, const EC_POINT *p, uint8_t out[65], BN_CTX *bc) {
+  return !EC_POINT_is_at_infinity(grp, p) &&
+                 EC_POINT_point2oct(grp, p, POINT_CONVERSION_UNCOMPRESSED, out, 65, bc) == 65
+             ? 0
+             : -1;
+}
+
+static int c_spake2p_check(void *ctx, const uint8_t pt[65]) {
+  BN_CTX *bc = BN_CTX_new();
+  EC_GROUP *grp = EC_GROUP_new_by_curve_name(NID_X9_62_prime256v1);
+  EC_POINT *p = bc && grp ? load_point(grp, pt, bc) : NULL;
+  int rc = p ? 0 : -1;
+
+  (void)ctx;
+  EC_POINT_free(p);
+  EC_GROUP_free(grp);
+  BN_CTX_free(bc);
+  return rc;
+}
+
+static int c_spake2p_share(void *ctx, const uint8_t w0[32], const uint8_t xy[32], const uint8_t mn[65],
+                           uint8_t share[65]) {
+  BN_CTX *bc = BN_CTX_new();
+  EC_GROUP *grp = EC_GROUP_new_by_curve_name(NID_X9_62_prime256v1);
+  BIGNUM *bw = BN_secure_new(), *bx = BN_secure_new();
+  EC_POINT *m = bc && grp ? load_point(grp, mn, bc) : NULL;
+  EC_POINT *r = grp ? EC_POINT_new(grp) : NULL;
+  int rc = -1;
+
+  (void)ctx;
+  if (m && r && bw && bx && BN_bin2bn(w0, 32, bw) && BN_bin2bn(xy, 32, bx) &&
+      EC_POINT_mul(grp, r, bx, m, bw, bc) == 1) { /* xy*G + w0*mn */
+    rc = store_point(grp, r, share, bc);
+  }
+  BN_clear_free(bw);
+  BN_clear_free(bx);
+  EC_POINT_free(m);
+  EC_POINT_clear_free(r);
+  EC_GROUP_free(grp);
+  BN_CTX_free(bc);
+  return rc;
+}
+
+static int c_spake2p_zv(void *ctx, const uint8_t w0[32], const uint8_t *w1, const uint8_t xy[32],
+                        const uint8_t peer[65], const uint8_t nm[65], const uint8_t *l, uint8_t z[65], uint8_t v[65]) {
+  BN_CTX *bc = BN_CTX_new();
+  EC_GROUP *grp = EC_GROUP_new_by_curve_name(NID_X9_62_prime256v1);
+  BIGNUM *bw0 = BN_secure_new(), *bw1 = BN_secure_new(), *bx = BN_secure_new();
+  EC_POINT *pp = bc && grp ? load_point(grp, peer, bc) : NULL;
+  EC_POINT *pn = bc && grp ? load_point(grp, nm, bc) : NULL;
+  EC_POINT *pl = (bc && grp && l) ? load_point(grp, l, bc) : NULL;
+  EC_POINT *t = grp ? EC_POINT_new(grp) : NULL, *rest = grp ? EC_POINT_new(grp) : NULL;
+  EC_POINT *rz = grp ? EC_POINT_new(grp) : NULL, *rv = grp ? EC_POINT_new(grp) : NULL;
+  int rc = -1;
+
+  (void)ctx;
+  if (!pp || !pn || !t || !rest || !rz || !rv || !bw0 || !bw1 || !bx || (w1 != NULL) == (l != NULL) || (l && !pl) ||
+      !BN_bin2bn(w0, 32, bw0) || !BN_bin2bn(xy, 32, bx) || (w1 && !BN_bin2bn(w1, 32, bw1))) {
+    goto out;
+  }
+  /* rest = peer - w0*nm */
+  if (EC_POINT_mul(grp, t, NULL, pn, bw0, bc) != 1 || EC_POINT_invert(grp, t, bc) != 1 ||
+      EC_POINT_add(grp, rest, pp, t, bc) != 1 || EC_POINT_is_at_infinity(grp, rest)) {
+    goto out;
+  }
+  if (EC_POINT_mul(grp, rz, NULL, rest, bx, bc) != 1 ||
+      (w1 ? EC_POINT_mul(grp, rv, NULL, rest, bw1, bc) : EC_POINT_mul(grp, rv, NULL, pl, bx, bc)) != 1) {
+    goto out;
+  }
+  if (store_point(grp, rz, z, bc) == 0 && store_point(grp, rv, v, bc) == 0) {
+    rc = 0;
+  }
+out:
+  BN_clear_free(bw0);
+  BN_clear_free(bw1);
+  BN_clear_free(bx);
+  EC_POINT_free(pp);
+  EC_POINT_free(pn);
+  EC_POINT_free(pl);
+  EC_POINT_clear_free(t);
+  EC_POINT_clear_free(rest);
+  EC_POINT_clear_free(rz);
+  EC_POINT_clear_free(rv);
+  EC_GROUP_free(grp);
+  BN_CTX_free(bc);
+  return rc;
+}
+
 const struct sensei_secure_crypto *sensei_secure_crypto_openssl(void) {
   static const struct sensei_secure_crypto c = {
       .ctx = NULL,
@@ -300,6 +426,11 @@ const struct sensei_secure_crypto *sensei_secure_crypto_openssl(void) {
       .hmac_sha256 = c_hmac_sha256,
       .x25519_keygen = c_x25519_keygen,
       .x25519 = c_x25519,
+      .sha256 = c_sha256,
+      .scalar_reduce = c_scalar_reduce,
+      .spake2p_check = c_spake2p_check,
+      .spake2p_share = c_spake2p_share,
+      .spake2p_zv = c_spake2p_zv,
   };
 
   return &c;

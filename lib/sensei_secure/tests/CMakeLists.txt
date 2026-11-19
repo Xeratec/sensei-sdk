@@ -44,3 +44,9 @@ target_include_directories(test_ratchet PRIVATE ${CMAKE_CURRENT_LIST_DIR}/genera
 target_link_libraries(test_ratchet PRIVATE sensei_secure)
 target_compile_options(test_ratchet PRIVATE -Wall -Wextra -Werror)
 add_test(NAME test_ratchet COMMAND test_ratchet)
+
+add_executable(test_commission test_commission.c)
+target_include_directories(test_commission PRIVATE ${CMAKE_CURRENT_LIST_DIR}/generated)
+target_link_libraries(test_commission PRIVATE sensei_secure)
+target_compile_options(test_commission PRIVATE -Wall -Wextra -Werror)
+add_test(NAME test_commission COMMAND test_commission)

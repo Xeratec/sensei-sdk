@@ -22,6 +22,9 @@
  * may wait for a garbage collection of the settings, so it does not run on the system work queue; builds without
  * MCUboot call it after the load; any other application calls it itself), so a revert to the old image finds its key.
  *
+ * e2e_cmv (the verifier record of the commissioning, sealed) and e2e_cmf (its attempt counters) are kept by
+ * sensei_commission_settings.h; the erase of these ops deletes them, so a reset ends the old setup code.
+ *
  * e2e_rat is the ratchet state (forward secrecy): SENSEI_E2E_RAT_SIZE bytes, written as one settings entry (one
  * atomic write). With sealing the entry is key_id (4 B, plain) || sealed record, the key id is also the context of the
  * seal; without it the plain record. It is bound to the key pair it was made for: a record whose key id is not the

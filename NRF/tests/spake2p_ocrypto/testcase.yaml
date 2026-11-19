@@ -1,0 +1,11 @@
+# SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+# SPDX-License-Identifier: Apache-2.0
+---
+tests:
+  # The ocrypto backend of the commissioning (sensei_spake2p_ocrypto.c on ocrypto_spake2p_p256 of nrf_oberon) on a
+  # Cortex-M33 in QEMU: the RFC 9383 and session vectors, invalid points. The library is the build without the DSP
+  # extension (QEMU's model does not run the nRF5340 one), and the speed and the constant time are not measured.
+  sensei.secure.spake2p.ocrypto:
+    platform_allow:
+      - mps2/an521/cpu0
+    tags: sensei secure crypto

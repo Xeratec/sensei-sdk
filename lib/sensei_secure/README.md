@@ -15,6 +15,9 @@ allocation, no Zephyr in the core (`src/sensei_secure.c`). The cipher comes in t
 - `src/sensei_secure_zephyr.c`: the SDK crypto library (`NRF/system/crypto`, PSA Crypto), for nRF.
 - `src/sensei_secure_openssl.c`: OpenSSL 3, for host tests and tools.
 
+Adding a node over BLE with a setup code (SPAKE2+, kind 5 channel, verifier record) is `src/sensei_commission.c`, see
+"Commissioning".
+
 `src/sensei_ratchet.c` is the forward secrecy core (root key, mix, uplink chain; see "Forward secrecy"). On top of the envelope, `src/sensei_e2e.c` is the key store of a device (key pair, collector key, counters in flash), and
 `zephyr/sensei_e2e_settings.c` keeps it in the Zephyr settings subsystem (see Key store below). `src/sensei_e2e_seal.c` is
 the sealed record format for secret settings (keys at rest, see "Keys at rest").
@@ -41,7 +44,7 @@ One layout on every link. All integers are little endian.
 offset  size  field
 0       1     flags     bits 7..4 = 0xA (marker), bits 3..2 = version (3),
                         bit 1 = node id present, bit 0 = direction (0 node to backend, 1 backend to node)
-1       1     kind      1 uplink, 2 downlink, 3 node to host data, 4 settings write (generation 1 and later: see below)
+1       1     kind      1 uplink, 2 downlink, 3 node to host data, 4 settings write, 5 commissioning (generation 1 and later: see below)
 2       8     node_id   only if flags bit 1 is set
 n       4     key_id
 n+4     4     sender    only backend to node (direction 1), never 0
@@ -60,7 +63,9 @@ n+4/8   4     counter   per sender, starts at 1
   associated data (the header bytes as sent, so the generation bits are authenticated) do not change. Read the kind with
   `sensei_secure_kind(buf)` (Python: `kind_of()`), never as `buf[1]`.
 - The kinds say what an envelope is for; what each link seals is up to the app. `sensei_secure_open()` takes the kind
-  that is allowed there.
+  that is allowed there. Kind 5 is the commissioning channel (see "Commissioning"): `sensei_secure_open()` and
+  `sensei_e2e_open()` refuse it with `SENSEI_SECURE_ERR_FORMAT`, also when any kind is allowed (`want` 0), and consume no
+  counter and no sender slot; `sensei_secure_seal()` refuses it too. It has its own two functions.
 - `sensei_secure_is_sealed()` checks the marker and the version bits. Versions are odd (1, 3), so an envelope starts
   with 0xAC ... 0xAF. An encoded protobuf message starts with a tag below 0x80, and a plain Settings patch can start with
   0xA0 or 0xA8 (varint fields 20, 21, 36, 37, 52, 53) but never with 0xAC to 0xAF.
@@ -174,6 +179,7 @@ The settings code imports the key once as a volatile PSA key and wipes the copy 
   partly written (power cut during the very first start) gives `HW_UNIQUE_KEY_ERR_MISSING` for good: only a chip erase
   (`nrfutil device recover`) helps.
 - `e2e_rat` is the ratchet state (sealed the same way, see "Device side of forward secrecy"); `erase` deletes it and `e2e_mrk`.
+  It also deletes `e2e_cmv` and `e2e_cmf` of the commissioning (see "Commissioning"): a reset ends the old setup code.
 - `sensei_e2e_settings_seal()`, `_unseal()`, `_seal_status()` and `_seal_close()` are the pieces, for the application and tests.
   Call everything from the one thread that uses the key store.
 
@@ -325,12 +331,93 @@ returns 0; the application (the node) defines it.
   SMP (seen within 5 s) and at the start of an image that is confirmed already. Builds without MCUboot delete it after the load
   (`CONFIG_SENSEI_SECURE_SETTINGS_CONFIRM_AFTER_LOAD`, default on without `BOOTLOADER_MCUBOOT`).
 
+## Commissioning (`include/sensei_commission.h`, `src/sensei_commission.c`)
+
+A node gets its collector key over BLE with a setup code: SPAKE2+ (RFC 9383, suite P256-SHA256-HKDF-SHA256-HMAC-SHA256),
+then a secure channel (kind 5) for the key step, the LoRa keys and the settings. The node is the verifier: it keeps only
+the verifier record, never the code. The commissioner (GUI, CLI, a test, a simulator) is the prover. The message flow, the
+window and the limits are in the onboarding design; the Python mirror is `sensei_sdk.commission` and the vectors V9 to V15
+are `tests/generated/vectors_commission.h`. No Zephyr, no allocation in `sensei_commission.c`.
+
+**Verifier record** (121 B, `sensei_commission_record_decode()` / `_encode()`): `u8 version (1) | u8 suite (1) | u8 kdf (1,
+scrypt) | u8 log2n (14 to 17) | u8 r (8) | u8 p (1) | u16 0 | salt[16] | w0[32] | L[65]`. Decode refuses every other
+length, version, parameter, a reserved byte that is not 0, w0 outside 1 ... n-1 and an L that is not a point of the curve.
+
+**Kind 5 envelope**, both directions, generation 0 format, no node id, key id = session id:
+
+```
+flags (1) | kind (1) = 5 | session id (4) | [sender (4)] | counter (4) | ciphertext | tag (16)
+```
+
+flags: marker, version 3, node id bit 0, bit 0 = direction. Direction 0 (node to commissioner) has no sender field,
+direction 1 (commissioner to node) has sender 1. Nonce and associated data as for the other kinds. At most 320 B. Counters
+start at 1, live in RAM, window 64. The reader refuses another session id, direction, kind, the ratchet or reserved bit, a node
+id, another sender and more than 320 B (`SENSEI_SECURE_ERR_FORMAT`), counter 0, seen or too old (`_REPLAY`), a bad tag
+(`_AUTH`); the window moves only after a good tag. `sensei_secure_seal_commission()` and `_open_commission()` do one envelope
+on key handles that the caller owns; `struct sensei_commission_channel` (`sensei_commission_channel_open/seal/recv/close`) is
+the pair of keys, the counter and the window.
+
+**Node side** (`sensei_commission_verifier_*`): `begin` (checks the record and the lockout, draws `nonce_n` for
+`commission_params`), `pake1` (shareP in; shareV and confirmV out), `pake3` (confirmP in; the channel opens), `seal` and `recv`
+for kind 5 frames, `poll`, `end`. Each call takes the time in ms and ends the session with `SENSEI_COMMISSION_ERR_TIMEOUT` if a
+limit has passed (begin to pake1 30 s, pake2 to pake3 15 s, idle 60 s, begin to end 180 s; `struct sensei_commission_limits`).
+Every error of `begin`, `pake1` and `pake3` ends the session and wipes it (`end` is safe at any time, also twice); a frame that
+does not open does not. The secrets (w0, the ephemeral scalar, Z, V, the transcript, K_main, the confirmation keys, K_shared)
+are wiped before `pake1` returns, the channel keys after `pake3` imported them.
+
+**Attempt counting.** `pake1` checks shareP first: 65 B, prefix 04, a point of the curve, and shareP minus w0*M is not the
+identity (`SENSEI_SECURE_ERR_FORMAT`, **not counted**). Then it computes everything, increments the counters (`fails_total`,
+`fails_since_ok`) and calls `save_counters()`; only if that returns 0 are shareV and confirmV written. A write that fails ends
+the session (`SENSEI_SECURE_ERR_STORE`): nothing is counted, nothing is sent, and no attempt can be taken back by a reset or a
+power cut. `pake3` with a wrong confirmP: `SENSEI_SECURE_ERR_AUTH`, the attempt stays counted. A right one stores
+`fails_since_ok = 0` and `fails_total - 1` (the attempt was not a failure); a failing write there is ignored (the counters stay
+higher). The lockout (`fails_since_ok >= fails_max`, default 30) is `SENSEI_COMMISSION_ERR_LOCKED` at `begin` and `pake1`. The
+window rules (5 failures per window, one pake1 per second) are the node's state machine, not here.
+
+**Commissioner side** (`sensei_commission_prover_*`): `begin` takes w0 and w1 (the scrypt over the code is not in this library;
+`sensei_commission_pwin()` is its input and `sensei_commission_derive_w()` turns its 80 B output into w0 and w1), `share`,
+`finish` (checks shareV and confirmV, gives confirmP, opens the channel), `seal`, `recv`, `end`. Pieces for tools and tests:
+context, identities, transcript, key schedule, channel keys, node and collector fingerprints, the plaintext of the proof of
+possession (the node seals it as kind 3 through `sensei_e2e_seal()`, the normal counter path), Verhoeff digit, setup code,
+QR payload and label lines (`sensei_commission_qr_parse()` and `_format()`).
+
+**Random numbers.** `random()` is called once in `begin` (nonce_n, 16 B) and once in `pake1` or the prover's `begin` (40 B reduced
+mod n, again in the 2^-250 case of 0). A test gives a backend whose `random()` returns fixed bytes.
+
+**Backends.** The cipher backend gets five entries (`struct sensei_secure_crypto`): `sha256`, `scalar_reduce` (40 B mod n),
+`spake2p_check` (a point of the curve), `spake2p_share` (xy*G + w0*M or N) and `spake2p_zv` (Z and V, both roles).
+
+| Backend | For | Kconfig |
+|---|---|---|
+| ocrypto (`ocrypto_spake2p_p256.h` of nrf_oberon, in `zephyr/sensei_spake2p_ocrypto.c`) | nRF boards: constant time in the secret scalars, no allocation | `SENSEI_SECURE_SPAKE2P_OCRYPTO` (needs `PSA_CRYPTO_DRIVER_OBERON`) |
+| Mbed TLS ECP (`mbedtls_ecp_muladd`, `zephyr/sensei_spake2p_mbedtls.c`) | native_sim and BabbleSim only: not constant time, allocates, private ECP interface | `SENSEI_SECURE_SPAKE2P_MBEDTLS_ECP` (depends on `ARCH_POSIX`: a real board cannot select it) |
+| OpenSSL 3 (`src/sensei_secure_openssl.c`) | host tests and tools: not constant time | always |
+
+The NCS PSA API has SPAKE2+ only in the Oberon driver, which does not exist on native_sim, and its API takes the secret
+scalar from inside PSA; ocrypto takes it as an argument, so the RFC vectors run on the chip. The Zephyr option is
+`CONFIG_SENSEI_SECURE_COMMISSION` (selects HMAC and HKDF of the crypto library; `sensei_commission.c` is built only with it).
+Flash on the nRF5340 (NCS v3.4.1, SENSEI board, Oberon driver; `NRF/tests/secure_ocrypto`): about 7.9 kB for what a node
+calls (verifier, record, settings, fingerprint; includes about 2 kB of ocrypto that was not linked before, mainly SHA-256), no
+static RAM. A session is about 380 B. `pake1` needs about 1.5 kB of stack in this library (544 B of its own and 864 B in
+the key derivation, which holds the 613 B transcript), plus what the crypto backend uses.
+
+**Settings** (`include/sensei_commission_settings.h`, with `CONFIG_SENSEI_SECURE_SETTINGS`): `e2e_cmv` is the verifier record,
+sealed like the private key (150 B; plain only with `CONFIG_SENSEI_SECURE_COMMISSION_PLAIN_VERIFIER`, default on for the
+simulators, else the store returns `-ENOTSUP`); `e2e_cmf` is the counters, 8 B plain. `sensei_commission_settings_verifier_load`,
+`_store`, `_erase`, `sensei_commission_settings_counters_load`, `_save` (the `save_counters` hook), `_erase`. A damaged counter
+record loads as the maximum (locked), not as zero. `sensei_e2e_reset()` erases both records.
+
+Step C (the node state machine) calls: `sensei_commission_settings_verifier_load/_store/_erase`, `..._counters_load/_save/_erase`,
+`sensei_commission_verifier_begin/pake1/pake3/seal/recv/poll/end/sid`, `sensei_commission_record_decode/_encode` (for
+`commission_setup` over USB), `sensei_commission_fingerprint()`, `sensei_commission_collector_fingerprint()` and
+`sensei_commission_proof_plain()`.
+
 ## API (`include/sensei_secure.h`)
 
 `sensei_secure_keygen`, `_derive`, `_priv_valid`, `_init` (clears the struct, takes the sender, counters, table of senders and the
 storage callbacks), `_close`, `_set_keyring`, `_tx_jump`, `_seal`, `_open`, `_peek`, `_peek_key_id`, `_kind`, `_rx_highest`,
-`_replay_check`, `_replay_update`. The key
-store has its own header, `sensei_e2e.h`. Backends:
+`_replay_check`, `_replay_update`, `_seal_commission`, `_open_commission` (kind 5). The key
+store has its own header, `sensei_e2e.h`, the commissioning `sensei_commission.h`. Backends:
 `sensei_secure_crypto_zephyr()` (`SENSEI_SECURE_BACKEND_ZEPHYR`) and `sensei_secure_crypto_openssl()`
 (`SENSEI_SECURE_BACKEND_OPENSSL`).
 
@@ -376,8 +463,21 @@ without the library).
   foreign record, and the transcript of vector 6 replayed on the device (the Python side as the collector: the device makes the same
   bytes).
 
+- `test_commission` checks the commissioning (OpenSSL backend) against the Python vectors V9 to V15: the RFC 9383 appendix C
+  exchange (points, shares, Z and V of both roles, transcript, schedule), scrypt registration (password input, w0, w1, L, the
+  121 B record), whole sessions with fixed random numbers (shares, confirmations, channel keys, frames), the kind 5 channel
+  (the vector frames fed in order to two receivers, the replay window, every format negative, the 320 B limit), fingerprints and
+  the proof, setup code, QR and label, kind 5 refused by every normal open path, a share that is w0*M (not counted), every bad
+  record, a session with a wrong code; and aborts at every step, out of order calls, tampered shares and confirmations, time
+  limits (the time is an input, also a clock that wraps), attempt counting with a store that fails (nothing counted and nothing
+  sent), lockout, backend errors at each point, wiping, and garbage at the channel and the record decoder.
+
 `test_ratchet.c` and `test_secure.c` also check the generation 0 bytes and the refusals of the kind byte. The same test files run with the Zephyr backend (PSA, Mbed TLS) on `native_sim`: `NRF/tests/secure` (`test_secure`) and
 `NRF/tests/secure_settings` (the settings storage: names, sizes, restart, erase; a second build with sealing and the fixed-key
 provider: sealed names, a record that is changed or does not belong, another key, a failing provider, the migration of the plain key
 and its deletion at the confirmation, a damaged plain key, the key id of the ratchet record as tie-breaker between two keys, a marker that cannot be written or deleted)
-(`make twister`).
+(`make twister`). `NRF/tests/secure` also runs `test_commission` with the Mbed TLS ECP backend (V9 on that backend), and
+`NRF/tests/secure_settings` the records `e2e_cmv` and `e2e_cmf` (sealed, plain in the simulator build, tampered, wrong key,
+failing provider and writes, erase by reset, a session with the counters in the settings). `NRF/tests/spake2p_ocrypto`
+runs the ocrypto backend on a Cortex-M33 in QEMU against the vectors; `NRF/tests/secure_ocrypto` is the build check for the
+nRF5340 (sizes, and a self-check for the first run on a board).

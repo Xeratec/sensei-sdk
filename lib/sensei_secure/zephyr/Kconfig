@@ -29,15 +29,17 @@ config SENSEI_SECURE_RATCHET
 config SENSEI_SECURE_REKEY_STALE_EPOCHS
 	int "Epochs after which an unanswered mix request is replaced"
 	default 32768
-	range 64 1048576
+	range 64 131072
 	depends on SENSEI_SECURE_RATCHET
 	help
 	  A pending request that is older than this many epochs of sending (64 messages each, counted over all sealed
 	  traffic, including kind 3 over BLE and USB) is replaced by a new one, and an answer to it is refused with
 	  -ETIMEDOUT. The answer walks the uplink chain from the request to the current epoch: 32768 epochs take about
-	  1 to 2 s on the crypto work queue of the nRF5340 (one HMAC-SHA256 per epoch, an estimate: untested on hardware).
-	  That is far below the watchdog (SENSEI_WDT_TIMEOUT_S, 60 s, fed from another work queue) and below the 15 minute
-	  stall limit of the uplink. A node that seals more than this x 64 messages between a request and its answer does
+	  2 to 5 s on the crypto work queue of the nRF5340 (one HMAC-SHA256 with a PSA key import and destroy per epoch,
+	  about 60 to 150 us each; an estimate: untested on hardware). While it runs the application work queue waits for
+	  the crypto queue (sealed replies, the uplink submit, streaming seals block, and a host request can time out once),
+	  and the node's health check (STUCK_MS 30 s in the node's scheduler) stops feeding the watchdog if the work queue
+	  is late by more than that. The range stops at 131072 epochs (8 to 20 s by the estimate, below the 30 s). A node that seals more than this x 64 messages between a request and its answer does
 	  not mix until the traffic drops (the collector alert for a node that never mixes shows it).
 
 config SENSEI_SECURE_SETTINGS

@@ -560,31 +560,32 @@ def new_key_file(path: str | os.PathLike) -> None:
     _fsync_dir(p.parent)
 
 
-def load_responder_id(path: str | os.PathLike) -> str:
+def load_responder_id(path: str | os.PathLike) -> str | None:
     """The id of a responder process: 16 random hex characters in a small file of its own (mode 0600), made at the first
     call. Keep the file in the config or state folder of the process that answers mixes, not in the key store folder: a
-    copy of the key store must not carry it (`KeyStore` records the id in the key store file, one responder per store)."""
+    copy of the key store must not carry it (`KeyStore` records the id in the key store file, one responder per store).
+
+    An empty or damaged file (power loss, full disk) is replaced by a new id, written through a temporary file and a rename,
+    with a warning. A folder that cannot be written gives a warning and None: nothing is recorded and the process goes on."""
     p = Path(path)
     try:
         text = p.read_text().strip()
     except FileNotFoundError:
         text = ""
-    except OSError as exc:
-        raise SecureError(f"cannot read the responder id file {p}: {exc}") from exc
-    if text:
-        if not re.fullmatch(r"[0-9a-f]{16}", text):
-            raise SecureError(f"responder id file {p} is damaged (16 hex characters expected): delete it")
+    except (OSError, ValueError) as exc:  # unreadable, or not text
+        log.warning("responder id file %s cannot be read, making a new id: %s", p, exc)
+        text = ""
+    if text and re.fullmatch(r"[0-9a-f]{16}", text):
         return text
-    p.parent.mkdir(parents = True, exist_ok = True)
+    if text or p.exists():
+        log.warning("responder id file %s is empty or damaged: replaced by a new id", p)
     new = secrets.token_hex(8)
     try:
-        fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    except FileExistsError:  # another start made it in between
-        return load_responder_id(p)
-    with os.fdopen(fd, "w") as f:
-        f.write(new + "\n")
-        f.flush()
-        os.fsync(f.fileno())
+        _write_atomic(p, new + "\n")  # temp file, fsync, mode 0600, rename
+    except OSError as exc:
+        log.warning("responder id file %s cannot be written (%s): the responder is not recorded in the key store", p,
+                    exc)
+        return None
     return new
 
 
@@ -1049,6 +1050,7 @@ class NodeState:
     up_idx: int | None  # chain index of the stored key (None in generation 0)
     up_base: int | None
     last_verified: float | None  # unix time of the last message that opened under the current chain
+    last_uplink: float | None  # unix time of the last uplink that verified, any generation (None: not known)
     highest: int  # highest uplink counter seen
     static_keys: bool  # the static keys of generation 0 are still held
 
@@ -1663,6 +1665,7 @@ class KeyStore:
                 up_idx = None if up is None else up.idx,
                 up_base = None if up is None else up.up_base,
                 last_verified = None if up is None or not up.t else up.t,
+                last_uplink = n.t_up or None,
                 highest = n.up.highest,
                 static_keys = n.k_up is not None,
             )

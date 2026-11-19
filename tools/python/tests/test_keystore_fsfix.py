@@ -9,13 +9,14 @@ request, one responder per key store."""
 from __future__ import annotations
 
 import json
+import logging
 import os
 import stat
 
 import pytest
 from fs_helpers import NODE_ID, Clock, make_rig, slack_walker
 from sensei_sdk import ratchet, secure
-from sensei_sdk.secure import KeyStore, SecureError
+from sensei_sdk.secure import KeyStore
 
 # ---- stale request (the node twin follows lib/sensei_secure request_stale) ----
 
@@ -88,10 +89,34 @@ def test_responder_id_file(tmp_path):
     a = secure.load_responder_id(p)
     assert len(a) == 16 and secure.load_responder_id(p) == a
     assert stat.S_IMODE(os.stat(p).st_mode) == 0o600
-    p.write_text("not hex\n")
-    with pytest.raises(SecureError, match = "damaged"):
-        secure.load_responder_id(p)
     assert secure.load_responder_id(tmp_path / "other") != a
+
+
+def test_responder_id_file_empty_damaged_or_unwritable(tmp_path, caplog):
+    p = tmp_path / "state" / "responder_id"
+    p.parent.mkdir()
+    for bad in ("", "\n", "not hex\n", "ABCDEF0123456789\n", "0123"):  # power loss, full disk, garbage
+        p.write_text(bad)
+        with caplog.at_level(logging.WARNING, logger = "sensei.secure"):
+            new = secure.load_responder_id(p)
+        assert new is not None and len(new) == 16 and p.read_text().strip() == new
+        assert "damaged" in caplog.text
+        caplog.clear()
+        assert secure.load_responder_id(p) == new  # stable from now on
+        assert stat.S_IMODE(os.stat(p).st_mode) == 0o600
+    assert not list(p.parent.glob("responder_id.*"))  # no temp file left
+    if os.name != "nt" and os.geteuid() != 0:  # a folder that cannot be written: warn, None, no exception
+        ro = tmp_path / "ro"
+        ro.mkdir()
+        ro.chmod(0o500)
+        try:
+            with caplog.at_level(logging.WARNING, logger = "sensei.secure"):
+                assert secure.load_responder_id(ro / "responder_id") is None
+            assert "cannot be written" in caplog.text
+            assert KeyStore(responder = True,
+                            responder_id = secure.load_responder_id(ro / "responder_id")).responder_id is None
+        finally:
+            ro.chmod(0o700)
 
 
 def stored_responder(path) -> str | None:
@@ -171,3 +196,15 @@ def test_gen_since_is_set_at_provisioning_and_at_promotion_and_survives_a_restar
     del data["nodes"][f"{NODE_ID:016x}"]["cur"]["since"]
     rig.path.write_text(json.dumps(data))
     assert KeyStore.load(rig.path, clock = clock).node_state(NODE_ID).gen_since is None
+
+
+def test_last_uplink_is_the_time_of_the_last_verified_message_in_any_generation(tmp_path):
+    clock = Clock()
+    rig = make_rig(tmp_path, clock = clock)
+    assert rig.store.node_state(NODE_ID).last_uplink is None
+    secure.open_sealed(rig.up(b"x"), rig.store)  # generation 0
+    assert rig.store.node_state(NODE_ID).last_uplink == pytest.approx(clock())
+    clock.advance(3600)
+    rig.mix()
+    rig.promote()
+    assert rig.store.node_state(NODE_ID).last_uplink == pytest.approx(clock())

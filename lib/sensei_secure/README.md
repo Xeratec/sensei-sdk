@@ -252,7 +252,7 @@ returns 0; the application (the node) defines it.
   `retry_h` hours and at the first call after a start; there is no give-up. A request that is more than 32768 epochs old
   (`SENSEI_E2E_REKEY_STALE_EPOCHS`, Kconfig `SENSEI_SECURE_REKEY_STALE_EPOCHS`: a node that streams and never gets the
   answer) is replaced by a new one at the next call, and an answer to it is refused with `-ETIMEDOUT`, so the answer walk
-  stays short (about 1 to 2 s on the nRF5340 crypto queue, untested on hardware). Limit: a node that seals more than
+  stays short (about 2 to 5 s on the nRF5340 crypto queue, which the application work queue waits for; untested on hardware; the Kconfig range stops at 131072). Limit: a node that seals more than
   32768 x 64 messages between a request and its answer does not mix until the traffic drops. The key store keeps the
   time of the first unanswered request (`NodeState.next_since`), so the alert for a node that never mixes still fires.
 - **Age of the generation.** Every write of `e2e_rat` carries the age of the generation in hours (the `u16` at offset 2,

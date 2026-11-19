@@ -1308,3 +1308,15 @@ def test_retire_merges_an_entry_of_the_same_key(tmp_path):
     store._retire(node, 11)
     r = store._retired[7]
     assert (r.up.highest, r.down_ctr, r.prov) == (9, 11, 4) and before[7].down_ctr == 3  # the old object is untouched
+
+
+def test_secrets_are_not_in_the_repr():
+    """A log line, a traceback or a failed assertion prints a repr: no w0, no key of the schedule, no channel key."""
+    ver = com.make_verifier(CODE, NODE_ID, log2n = 14)
+    assert ver.w0.hex() not in repr(ver)
+    tt = b"transcript"
+    sched = com.key_schedule(tt, bytes(65), bytes(65))
+    for key in (sched.k_main, sched.k_confirm_p, sched.k_confirm_v, sched.k_shared):
+        assert key.hex() not in repr(sched)
+    keys = com.channel_keys(sched.k_shared, NODE_ID, NG, NN)
+    assert keys.k_c2n.hex() not in repr(keys) and keys.k_n2c.hex() not in repr(keys)

@@ -31,7 +31,7 @@ import re
 import secrets
 import struct
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
@@ -404,7 +404,7 @@ def derive_w(code: str, node_id: int, params: Params) -> tuple[int, int]:
 class Verifier:
     """What the node stores for one code: scrypt parameters and salt, w0 and L = w1*G. The code is not in it."""
     params: Params
-    w0: bytes  # 32 B
+    w0: bytes = field(repr = False)  # 32 B (not in a log line or a traceback)
     l: bytes  # 65 B
 
     def __post_init__(self) -> None:
@@ -485,10 +485,10 @@ def transcript(ctx: bytes, id_prover: bytes, id_verifier_: bytes, share_p: bytes
 
 @dataclass(frozen = True)
 class Schedule:
-    k_main: bytes
-    k_confirm_p: bytes
-    k_confirm_v: bytes
-    k_shared: bytes
+    k_main: bytes = field(repr = False)
+    k_confirm_p: bytes = field(repr = False)
+    k_confirm_v: bytes = field(repr = False)
+    k_shared: bytes = field(repr = False)
     confirm_p: bytes  # HMAC(K_confirmP, shareV): sent by the prover
     confirm_v: bytes  # HMAC(K_confirmV, shareP): sent by the verifier
     session_id: bytes  # HKDF(nil, K_main, "SessionId", 16): names this PAKE run (not K_main itself)
@@ -510,8 +510,8 @@ def key_schedule(tt: bytes, share_p: bytes, share_v: bytes) -> Schedule:
 
 @dataclass(frozen = True)
 class ChannelKeys:
-    k_c2n: bytes  # commissioner to node, 16 B
-    k_n2c: bytes  # node to commissioner, 16 B
+    k_c2n: bytes = field(repr = False)  # commissioner to node, 16 B
+    k_n2c: bytes = field(repr = False)  # node to commissioner, 16 B
     sid: int  # session id: the key id field of the envelopes
 
 

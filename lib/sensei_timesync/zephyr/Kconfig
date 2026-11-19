@@ -1,0 +1,149 @@
+# SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+# SPDX-License-Identifier: Apache-2.0
+#
+# Authors:
+# - Philip Wiese <wiesep@iis.ee.ethz.ch>
+
+menuconfig SENSEI_TIMESYNC
+	bool "Precise time synchronization over BLE connection anchor points"
+	depends on SOC_COMPATIBLE_NRF5340_CPUAPP && BT
+	select NRFX_GPPI
+	select GPIO
+	select MBOX
+	select BT_HCI_VS_EVT_USER
+	select ENTROPY_GENERATOR
+	help
+	  Mirror of the Bluetooth controller clock on the application core (RTC + TIMER), a global time
+	  derived from the connection anchor points, hardware timestamping of pin edges and a timed
+	  output (PPS). The network core image needs CONFIG_BT_CTLR_SDC_CONN_ANCHOR_POINT_REPORT=y,
+	  CONFIG_MPSL_TRIGGER_IPC_TASK_ON_RTC_START=y and
+	  CONFIG_MPSL_TRIGGER_IPC_TASK_ON_RTC_START_CHANNEL=<SENSEI_TIMESYNC_IPC_CHANNEL>.
+
+if SENSEI_TIMESYNC
+
+config SENSEI_TIMESYNC_MASTER
+	bool "Master: send time samples to followers (BLE central)"
+	depends on BT_CENTRAL
+	select BT_GATT_CLIENT
+	help
+	  The global time is the local time of this node.
+
+config SENSEI_TIMESYNC_FOLLOWER
+	bool "Follower: follow a master (BLE peripheral)"
+	depends on BT_PERIPHERAL
+	help
+	  Registers the time sync GATT service. With both roles enabled, the follower state wins once
+	  a master has been found.
+
+config SENSEI_TIMESYNC_RTC
+	int "RTC instance of the controller clock mirror"
+	range 0 1
+	default 0
+	help
+	  Zephyr uses RTC1 as system timer on the nRF5340 application core, so the default is RTC0.
+	  CC0: PPS compare. CC1: software time capture. CC2, CC3: edge capture channels.
+
+config SENSEI_TIMESYNC_TIMER
+	int "TIMER instance for the sub-tick part"
+	range 0 2
+	default 2
+	help
+	  Cleared on every RTC tick. Neither Zephyr nor NCS enable a TIMER on the application core by
+	  default; TIMER2 leaves TIMER0 and TIMER1 to the samples and libraries that use them
+	  (Nordic samples: TIMER0, nrf_audio: TIMER1). CC0: PPS compare. CC1: software time capture.
+	  CC2, CC3: edge capture channels.
+
+config SENSEI_TIMESYNC_EGU
+	int "EGU instance for software capture, the IPC trigger and the PPS re-arm"
+	range 0 5
+	default 0
+	help
+	  Channel 0: software capture trigger. Channel 1: PPS edge done. Channel 2: IPC trigger seen.
+
+config SENSEI_TIMESYNC_IPC_CHANNEL
+	int "IPC channel the network core triggers when its RTC starts"
+	range 0 15
+	default 4
+	help
+	  Must be CONFIG_MPSL_TRIGGER_IPC_TASK_ON_RTC_START_CHANNEL of the network core image.
+	  Channels 0 and 1 are used by the HCI IPC link, 7 and 8 by the synchronized RTC (logging).
+
+config SENSEI_TIMESYNC_TIMER_16MHZ
+	bool "TIMER at 16 MHz (62.5 ns resolution), else 1 MHz (1 us)"
+	default y
+
+config SENSEI_TIMESYNC_HFXO
+	bool "Request the HFXO while the module runs"
+	default y
+	help
+	  The TIMER counts the sub-tick part (up to 30.5 us). Without the HFXO it runs from the
+	  internal RC oscillator (a few % off, up to about 1 us error). Costs a few hundred uA
+	  of supply current as the HFXO never stops. The guard against a stale TIMER value at an
+	  RTC tick (counts of a full tick or more are taken as 0) is only valid with the crystal;
+	  without it counts are limited to the tick length instead.
+
+config SENSEI_TIMESYNC_SAMPLE_PERIOD_MS
+	int "Master: period of the time samples sent to each follower (ms)"
+	range 20 60000
+	default 250
+	help
+	  More samples per averaging period also average the master side anchor jitter.
+
+config SENSEI_TIMESYNC_PAIR_PERIOD_MS
+	int "Follower: averaging period of anchor pairs per model point (ms)"
+	range 100 60000
+	default 1000
+	help
+	  All pairs of a period are averaged into one point for the clock model.
+
+config SENSEI_TIMESYNC_WINDOW
+	int "Follower: points in the clock model fit"
+	range 2 32
+	default 16
+
+config SENSEI_TIMESYNC_MIN_POINTS
+	int "Follower: points needed before the model is valid"
+	range 1 32
+	default 4
+
+config SENSEI_TIMESYNC_OUTLIER_NS
+	int "Follower: pair or point farther than this from the model prediction is an outlier (ns)"
+	range 1000 100000000
+	default 50000
+
+config SENSEI_TIMESYNC_HOLDOVER_MS
+	int "Follower: no sample for this long moves the state to HOLDOVER (ms)"
+	range 500 3600000
+	default 5000
+
+config SENSEI_TIMESYNC_MAX_FOLLOWERS
+	int "Master: maximum number of followers"
+	depends on SENSEI_TIMESYNC_MASTER
+	range 1 20
+	default 4
+
+config SENSEI_TIMESYNC_PPS_GUARD_COUNTS
+	int "PPS: TIMER counts kept free before the end of an RTC tick"
+	range 1 64
+	default 1
+	help
+	  The PPS compare value of the TIMER must be reached before the next RTC tick clears the TIMER. Edges whose
+	  position in the tick is closer than this to the tick end are moved to the nearer allowed position (error up
+	  to half of this many counts, 62.5 ns each at 16 MHz). BabbleSim has a time resolution of 1 us and needs 32.
+
+config SENSEI_TIMESYNC_CAPTURE_CHANNELS
+	int "Number of hardware edge capture channels"
+	range 0 2
+	default 1
+
+config SENSEI_TIMESYNC_FOLLOWER_BIAS_NS
+	int "Constant added to follower global times (ns)"
+	default 0
+	help
+	  Calibration of a constant master/follower anchor point offset.
+
+module = SENSEI_TIMESYNC
+module-str = SENSEI time synchronization
+source "subsys/logging/Kconfig.template.log_config"
+
+endif # SENSEI_TIMESYNC

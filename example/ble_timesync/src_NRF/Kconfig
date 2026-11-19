@@ -1,0 +1,70 @@
+# SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+# SPDX-License-Identifier: Apache-2.0
+#
+# Authors:
+# - Philip Wiese <wiesep@iis.ee.ethz.ch>
+
+mainmenu "BLE time synchronization example"
+
+config APP_CONN_INTERVAL_MS
+	int "Connection interval of the master (ms)"
+	default 100
+	range 10 4000
+	depends on SENSEI_TIMESYNC_MASTER
+	help
+	  Interval of the connections to the followers (latency 0). One anchor point per interval.
+	  A multiple of 5 ms avoids rounding.
+
+config APP_TEST_PULSE
+	bool "Drive the test pulse (master)"
+	default y
+	depends on SENSEI_TIMESYNC_MASTER
+	help
+	  The master raises the pin ts-test-out at irregular times. Wire it to ts-capture of every board.
+
+config APP_TEST_PULSE_BASE_MS
+	int "Shortest time between test pulses (ms)"
+	default 1000
+	range 100 60000
+	depends on APP_TEST_PULSE
+
+config APP_TEST_PULSE_JITTER_MS
+	int "Random extra time between test pulses (ms)"
+	default 600
+	range 1 60000
+	depends on APP_TEST_PULSE
+	help
+	  The time between pulses is the base plus a random value below this. Irregular pulses do not beat
+	  against the 1 s sample period or the PPS.
+
+config APP_MATCH_WINDOW_MS
+	int "Match window for a follower report (ms)"
+	default 50
+	depends on SENSEI_TIMESYNC_MASTER
+	help
+	  A follower report belongs to the master capture closest in global time, if it is within this window.
+
+config APP_STATS_EVERY
+	int "Print the statistics of a follower every N matches"
+	default 20
+	range 1 100000
+	depends on SENSEI_TIMESYNC_MASTER
+
+config APP_PPS_PULSE_WIDTH_US
+	int "PPS pulse width (us), 0 = toggle every period"
+	default 0
+	range 0 250000
+	help
+	  0: the PPS pin toggles every 500 ms (50 % duty). Otherwise it is high for this long after every
+	  multiple of 500 ms (sensei_ts_pps_start_pulse(), at least 100 us).
+
+config APP_STATUS_PERIOD_S
+	int "Period of the status log (s)"
+	default 10
+	range 1 3600
+
+module = APP
+module-str = Application
+source "subsys/logging/Kconfig.template.log_config"
+
+source "Kconfig.zephyr"

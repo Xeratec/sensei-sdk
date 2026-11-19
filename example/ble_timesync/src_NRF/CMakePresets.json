@@ -1,0 +1,57 @@
+{
+  "version": 2,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 20
+  },
+  "configurePresets": [
+    {
+      "name": "sensei_master",
+      "displayName": "Master on NRF5340 SENSEIv1 APP",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/sensei_master",
+      "cacheVariables": {
+        "BOARD": "nrf5340_senseiv1/nrf5340/cpuapp",
+        "EXTRA_ZEPHYR_MODULES": "$env{SENSEI_SDK_ROOT}/NRF",
+        "CACHED_CONF_FILE": "${sourceDir}/prj.conf",
+        "EXTRA_CONF_FILE": "${sourceDir}/master.conf"
+      }
+    },
+    {
+      "name": "sensei_follower",
+      "displayName": "Follower on NRF5340 SENSEIv1 APP",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/sensei_follower",
+      "cacheVariables": {
+        "BOARD": "nrf5340_senseiv1/nrf5340/cpuapp",
+        "EXTRA_ZEPHYR_MODULES": "$env{SENSEI_SDK_ROOT}/NRF",
+        "CACHED_CONF_FILE": "${sourceDir}/prj.conf",
+        "EXTRA_CONF_FILE": "${sourceDir}/follower.conf"
+      }
+    },
+    {
+      "name": "dk_master",
+      "displayName": "Master on nRF5340 DK APP",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/dk_master",
+      "cacheVariables": {
+        "BOARD": "nrf5340dk/nrf5340/cpuapp",
+        "EXTRA_ZEPHYR_MODULES": "$env{SENSEI_SDK_ROOT}/NRF",
+        "CACHED_CONF_FILE": "${sourceDir}/prj.conf",
+        "EXTRA_CONF_FILE": "${sourceDir}/master.conf"
+      }
+    },
+    {
+      "name": "dk_follower",
+      "displayName": "Follower on nRF5340 DK APP",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/dk_follower",
+      "cacheVariables": {
+        "BOARD": "nrf5340dk/nrf5340/cpuapp",
+        "EXTRA_ZEPHYR_MODULES": "$env{SENSEI_SDK_ROOT}/NRF",
+        "CACHED_CONF_FILE": "${sourceDir}/prj.conf",
+        "EXTRA_CONF_FILE": "${sourceDir}/follower.conf"
+      }
+    }
+  ]
+}

@@ -159,6 +159,7 @@ Plain C libraries for nRF (Zephyr), GAP9 and host builds. Each folder has `inclu
 | [lib/sensei_pwr_math](lib/sensei_pwr_math/README.md) | `CONFIG_SENSEI_PWR_MATH` | Battery charge estimate per chemistry and button press detection of the power module |
 | [lib/sensei_diag](lib/sensei_diag/README.md) | `CONFIG_SENSEI_DIAG_CODEC` | Reset cause bits, fault record and boot state of the diagnostics module (byte layout, names) |
 | [lib/sensei_charge](lib/sensei_charge/README.md) | `CONFIG_SENSEI_CHARGE` | Software charge counter: states and events from a table, self-discharge, days left, retained record, swap rules |
+| [lib/sensei_timesync](lib/sensei_timesync/README.md) | `CONFIG_SENSEI_TIMESYNC` | Time sync between nodes (target ~1 us) from BLE connection anchor points; hardware edge capture and PPS output in global time. Example and accuracy test: `example/ble_timesync` |
 
 ## Host tools: Python package (`tools/python`)
 [tools/python](tools/python/README.md) is the package `sensei_sdk` for the host side of every app: stream framing, the end-to-end envelope and key store, the MCUboot SMP client and simulator, fault record decoding and the serial and BLE transports. Each module mirrors one of the C libraries above, and the tests and the generated C test vectors keep the two in line (`make test-python`).

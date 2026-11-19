@@ -1,0 +1,172 @@
+SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+SPDX-License-Identifier: Apache-2.0
+
+Authors:
+- Philip Wiese <wiesep@iis.ee.ethz.ch>
+
+nrf_hw_models (rev 158b9710): model the RTC TICK event. The model does not generate it ("The TICK functionality is not
+modelled"), but the time sync library clears a TIMER on every RTC tick to get its sub-tick resolution. Applied by
+common.sh (bsim_fetch) to the fetched copy of the models.
+
+diff --git a/src/HW_models/NHW_RTC.c b/src/HW_models/NHW_RTC.c
+index 374ad31..93537e2 100644
+--- a/src/HW_models/NHW_RTC.c
++++ b/src/HW_models/NHW_RTC.c
+@@ -18,7 +18,8 @@
+  *
+  * Notes:
+  *
+- *  * TICK events are NOT modeled
++ *  * TICK events: patched in by the SENSEI time sync BabbleSim test (one event per COUNTER increment, at the
++ *    microsecond that follows the exact LF clock edge, only while TICK is enabled in EVTEN or INTEN)
+  *
+  *  * The COUNTER register is only updated when read with the proper HAL function
+  *
+@@ -118,6 +119,7 @@ struct rtc_status {
+ 
+   bs_time_t *cc_timers;     //[n_CCs] When each CC will match (in microseconds)
+   bs_time_t overflow_timer; // When the timer will overflow (in microseconds)
++  bs_time_t tick_timer;     // When the next TICK event happens (in microseconds)
+   uint64_t overflow_timer_sub_us; // When the timer will overflow (in sub-microsecond units)
+ 
+   uint64_t counter_startT_sub_us; //Time when the counter was "started" (really the time that would correspond to COUNTER = 0)
+@@ -150,6 +152,8 @@ static uint64_t us_time_to_sub_us_time(bs_time_t us_time);
+ static void nhw_rtc_TASKS_CLEAR(uint rtc);
+ static void nhw_rtc_signal_OVERFLOW(uint rtc);
+ static void nhw_rtc_signal_COMPARE(uint rtc, uint cc);
++static void update_tick_timer(uint rtc);
++void nhw_rtc_signal_TICK(uint rtc);
+ 
+ static void nhw_rtc_init(void) {
+ #if (NHW_HAS_DPPI)
+@@ -173,6 +177,7 @@ static void nhw_rtc_init(void) {
+     for (int j = 0 ; j < rtc_st->n_CCs ; j++) {
+       rtc_st->cc_timers[j] = TIME_NEVER;
+     }
++    rtc_st->tick_timer = TIME_NEVER;
+     rtc_st->overflow_timer = TIME_NEVER;
+     rtc_st->overflow_timer_sub_us = TIME_NEVER;
+ 
+@@ -341,6 +346,9 @@ static void nhw_rtc_update_master_timer(void) {
+     if (this->overflow_timer < Timer_RTC) {
+       Timer_RTC = this->overflow_timer;
+     }
++    if (this->tick_timer < Timer_RTC) {
++      Timer_RTC = this->tick_timer;
++    }
+   }
+   nsi_hws_find_next_event();
+ }
+@@ -373,6 +381,7 @@ static void update_timers(int rtc)
+ {
+   update_all_cc_timers(rtc);
+   update_overflow_timer(rtc);
++  update_tick_timer(rtc);
+   nhw_rtc_update_master_timer();
+ }
+ 
+@@ -445,6 +454,11 @@ static void nhw_rtc_timer_triggered(void) {
+       }
+     }
+ 
++    if (rtc_el->tick_timer == match_time) { //A TICK occurred now
++      update_tick_timer(rtc);
++      nhw_rtc_signal_TICK(rtc);
++    }
++
+     if (rtc_el->overflow_timer == match_time) { //Overflow occurred now
+       handle_overflow_event(rtc); // this must always be the last event, as it might update counter_startT_sub_us
+     }
+@@ -455,15 +469,6 @@ static void nhw_rtc_timer_triggered(void) {
+ 
+ NSI_HW_EVENT(Timer_RTC, nhw_rtc_timer_triggered, 50);
+ 
+-/**
+- * Check if an EVTEN or INTEN has the tick event set
+- */
+-static void check_not_supported_TICK(uint32_t i) {
+-  if (i &  RTC_EVTEN_TICK_Msk) {
+-    bs_trace_warning_line_time("RTC: The TICK functionality is not modelled\n");
+-  }
+-}
+-
+ void nhw_rtc_notify_first_lf_tick(void) {
+   first_lf_tick_time_sub_us = get_time_in_sub_us();
+   bs_trace_raw_time(9, "RTC: First lf tick\n");
+@@ -487,6 +492,21 @@ void nhw_rtc_update_COUNTER(uint rtc) {
+   }
+ }
+ 
++/*
++ * Save in tick_timer the time (in us) of the next COUNTER increment, if TICK is enabled and the RTC runs
++ */
++static void update_tick_timer(uint rtc) {
++  struct rtc_status *this = &nhw_rtc_st[rtc];
++  uint64_t match_sub_us; // Only to comply to the interface
++
++  this->tick_timer = TIME_NEVER;
++  if (this->running == false || !((NRF_RTC_regs[rtc].EVTEN | this->INTEN) & RTC_EVTEN_TICK_Msk)) {
++    return;
++  }
++  nhw_rtc_update_COUNTER(rtc);
++  this->tick_timer = get_counter_match_time(rtc, (NRF_RTC_regs[rtc].COUNTER + 1) & RTC_COUNTER_MASK, &match_sub_us);
++}
++
+ /**
+  * TASK_START triggered handler
+  */
+@@ -526,6 +546,7 @@ static void nhw_rtc_TASKS_STOP(uint rtc) {
+     this->cc_timers[cc] = TIME_NEVER;
+   }
+   this->overflow_timer = TIME_NEVER;
++  this->tick_timer = TIME_NEVER;
+   nhw_rtc_update_master_timer();
+ }
+ 
+@@ -683,7 +704,7 @@ static void nhw_rtc_signal_OVERFLOW(uint rtc)
+ }
+ 
+ 
+-/*static*/ void nhw_rtc_signal_TICK(uint rtc) /*Not yet used, as all TICK functionality is not yet implemented */
++void nhw_rtc_signal_TICK(uint rtc)
+ {
+   struct rtc_status *this = &nhw_rtc_st[rtc];
+   NRF_RTC_Type *RTC_regs = &NRF_RTC_regs[rtc];
+@@ -816,7 +837,8 @@ void nhw_rtc_regw_sideeffect_INTENSET(uint rtc)
+     this->INTEN |= RTC_regs->INTENSET;
+     RTC_regs->INTENSET = this->INTEN;
+ 
+-    check_not_supported_TICK(this->INTEN);
++    update_tick_timer(rtc);
++    nhw_rtc_update_master_timer();
+     nhw_rtc_eval_interrupts(rtc);
+   }
+ }
+@@ -831,6 +853,8 @@ void nhw_rtc_regw_sideeffect_INTENCLR(uint rtc)
+     RTC_regs->INTENSET = this->INTEN;
+     RTC_regs->INTENCLR = 0;
+ 
++    update_tick_timer(rtc);
++    nhw_rtc_update_master_timer();
+     nhw_rtc_eval_interrupts(rtc);
+   }
+ }
+@@ -841,7 +865,8 @@ void nhw_rtc_regw_sideeffect_EVTENSET(uint i) {
+   if ( RTC_regs->EVTENSET ){
+     RTC_regs->EVTEN |= RTC_regs->EVTENSET;
+     RTC_regs->EVTENSET = RTC_regs->EVTEN;
+-    check_not_supported_TICK(RTC_regs->EVTEN);
++    update_tick_timer(i);
++    nhw_rtc_update_master_timer();
+   }
+ }
+ 
+@@ -852,6 +877,8 @@ void nhw_rtc_regw_sideeffect_EVTENCLR(uint i) {
+     RTC_regs->EVTEN  &= ~RTC_regs->EVTENCLR;
+     RTC_regs->EVTENSET = RTC_regs->EVTEN;
+     RTC_regs->EVTENCLR = 0;
++    update_tick_timer(i);
++    nhw_rtc_update_master_timer();
+   }
+ }
+ 

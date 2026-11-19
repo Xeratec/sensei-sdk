@@ -19,6 +19,8 @@ repos:
         name: Check for added large files
       - id: trailing-whitespace
         name: Check for trailing whitespace
+        # Patch files: a context line of an empty source line is a single space.
+        exclude: '\.patch$'
   - repo: local
     hooks:
       - id: reuse

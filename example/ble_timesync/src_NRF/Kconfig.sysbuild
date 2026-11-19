@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+# SPDX-License-Identifier: Apache-2.0
+#
+# Authors:
+# - Philip Wiese <wiesep@iis.ee.ethz.ch>
+
+# The network core runs the NCS ipc_radio image (Bluetooth controller, HCI over IPC).
+# Its settings are in sysbuild/ipc_radio.conf.
+config NRF_DEFAULT_IPC_RADIO
+	default y
+
+config NETCORE_IPC_RADIO_BT_HCI_IPC
+	default y
+
+source "share/sysbuild/Kconfig"

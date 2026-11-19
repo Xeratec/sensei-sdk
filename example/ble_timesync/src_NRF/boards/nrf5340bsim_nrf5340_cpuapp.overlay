@@ -1,0 +1,36 @@
+// SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+// SPDX-License-Identifier: Apache-2.0
+//
+// Authors:
+// - Philip Wiese <wiesep@iis.ee.ethz.ch>
+
+/*
+ * BabbleSim (nrf5340bsim) pins, the same as the nRF5340 DK: P1.04 test pulse, P1.05 capture, P1.06 PPS.
+ * Nothing is wired between simulated devices; the PPS pin is logged by the GPIO model (-gpio_out_file).
+ */
+/ {
+	ts_pins: ts_pins {
+		compatible = "gpio-leds";
+
+		ts_test_out: ts_test_out {
+			gpios = <&gpio1 4 GPIO_ACTIVE_HIGH>;
+		};
+		ts_pps: ts_pps {
+			gpios = <&gpio1 6 GPIO_ACTIVE_HIGH>;
+		};
+	};
+
+	ts_inputs: ts_inputs {
+		compatible = "gpio-keys";
+
+		ts_capture: ts_capture {
+			gpios = <&gpio1 5 (GPIO_ACTIVE_HIGH | GPIO_PULL_DOWN)>;
+		};
+	};
+
+	aliases {
+		ts-test-out = &ts_test_out;
+		ts-capture = &ts_capture;
+		ts-pps = &ts_pps;
+	};
+};

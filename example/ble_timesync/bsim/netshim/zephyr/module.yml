@@ -1,0 +1,9 @@
+# SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+# SPDX-License-Identifier: Apache-2.0
+#
+# Authors:
+# - Philip Wiese <wiesep@iis.ee.ethz.ch>
+
+# Test-only Zephyr module of the BabbleSim network core build (see CMakeLists.txt).
+build:
+  cmake: .

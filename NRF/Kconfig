@@ -25,5 +25,6 @@ rsource "../lib/sensei_pwr_math/zephyr/Kconfig"
 rsource "../lib/sensei_diag/zephyr/Kconfig"
 rsource "../lib/sensei_charge/zephyr/Kconfig"
 rsource "../lib/sensei_uplink/zephyr/Kconfig"
+rsource "../lib/sensei_timesync/zephyr/Kconfig"
 
 endmenu

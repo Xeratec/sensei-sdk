@@ -1,0 +1,38 @@
+// SPDX-FileCopyrightText: 2026 ETH Zurich and University of Bologna
+// SPDX-License-Identifier: Apache-2.0
+//
+// Authors:
+// - Philip Wiese <wiesep@iis.ee.ethz.ch>
+
+/*
+ * Time sync pins (SENSEI base board: P1.13 = J2.25, P1.12 = J2.23, P0.31 = J1.2).
+ * ts-test-out: test pulse (master output). Wire to ts-capture of every board.
+ * ts-capture:  edge timestamped in hardware (input, pull-down).
+ * ts-pps:      timed output, rising edge on every full global second (500 ms period).
+ */
+/ {
+	ts_pins: ts_pins {
+		compatible = "gpio-leds";
+
+		ts_test_out: ts_test_out {
+			gpios = <&gpio1 13 GPIO_ACTIVE_HIGH>;
+		};
+		ts_pps: ts_pps {
+			gpios = <&gpio0 31 GPIO_ACTIVE_HIGH>;
+		};
+	};
+
+	ts_inputs: ts_inputs {
+		compatible = "gpio-keys";
+
+		ts_capture: ts_capture {
+			gpios = <&gpio1 12 (GPIO_ACTIVE_HIGH | GPIO_PULL_DOWN)>;
+		};
+	};
+
+	aliases {
+		ts-test-out = &ts_test_out;
+		ts-capture = &ts_capture;
+		ts-pps = &ts_pps;
+	};
+};

@@ -78,6 +78,20 @@ not rechargeable: the old default (charge to 3.6 V, Li-ion table with 4.2 V = 10
 primary cell and shown about 20 % for a fresh one. A Li-SOCl2 curve is flat near 3.6 V, so the percentage is a hint only.
 The table and the button logic are in `lib/sensei_pwr_math` (host tests).
 
+### ADC of the PMIC AMUX
+
+The battery voltage and the currents come from the PMIC AMUX on AIN3 (P0.07) of the SAADC. By default `bsp/pmic_bsp.c` converts
+with the Zephyr ADC API (`CONFIG_ADC`, the `zephyr,user` io-channel of the board, 12 bit, gain 1/6, 3600 mV full scale).
+
+`CONFIG_SENSEI_PMIC_ADC_EXTERNAL` (needs `CONFIG_SENSEI_PWR`, off by default) is for an application that owns the SAADC, for
+example one that streams samples with the nrfx driver and its own interrupt (the Zephyr driver would register the same interrupt
+twice). `pmic_bsp.c` then does not use the Zephyr ADC API or any ADC device, and `CONFIG_ADC` is not needed. Both read functions
+(`pmic_bsp_adc_read()`: 1 ms settle, `pmic_bsp_adc_read_fast()`: 10 us settle) call
+`pmic_bsp_adc_ext_read(settle_us, reading)`, which the application defines (declared and documented in `bsp/pmic_bsp.h`; a missing
+definition is a link error). It returns one conversion of the AMUX input whose sampling instant is at least `settle_us` after the
+call. The NULL and the DISCHG conversion of `max77654_measure_dischg_ua()` are two fast reads in a row: the application should
+take them close in time, because the AMUX draws current while it is on. The examples keep the Zephyr path.
+
 ## Button
 
 Key-down is the nEN falling edge (interrupt flag read from the PMIC), key-up is the Soft_nRST edge. A key-up without a

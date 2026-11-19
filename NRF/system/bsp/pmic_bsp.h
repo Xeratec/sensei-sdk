@@ -63,6 +63,28 @@ max77654_err_t pmic_bsp_adc_read(struct max77654_adc_reading *reading);
  */
 max77654_err_t pmic_bsp_adc_read_fast(struct max77654_adc_reading *reading);
 
+#ifdef CONFIG_SENSEI_PMIC_ADC_EXTERNAL
+/**
+ * @brief One conversion of the PMIC AMUX input, done by the application (CONFIG_SENSEI_PMIC_ADC_EXTERNAL).
+ *
+ * With this option pmic_bsp_adc_read() and pmic_bsp_adc_read_fast() call this function instead of the Zephyr ADC
+ * API. The application must define it; without a definition the link fails. The application owns the SAADC.
+ *
+ * Contract: return one conversion of the AMUX input (SENSEI board: AIN3 = P0.07) whose sampling instant is at
+ * least settle_us after the call. The caller has switched the AMUX before the call. pmic_bsp_adc_read() passes
+ * 1000, pmic_bsp_adc_read_fast() passes PMIC_BSP_AMUX_SETTLE_US (10). Two fast reads follow each other (the NULL and
+ * the DISCHG conversion of max77654_measure_dischg_ua()) and should be taken close in time: the AMUX draws current
+ * while it is on. The function may block (thread context only, not from an interrupt).
+ *
+ * @param settle_us Minimum time between the call and the sampling instant (us).
+ * @param reading   Out: raw value (not negative), adc_max_reading and adc_fullscale_mV. The voltage is
+ *                  reading x adc_fullscale_mV / adc_max_reading, so adc_max_reading is the value at full scale
+ *                  (2^resolution for a single ended SAADC input; the Zephyr path of this BSP reports 2^resolution - 1).
+ * @retval E_MAX77654_SUCCESS, or an error (for example E_MAX77654_COM_ERR when the conversion failed or timed out).
+ */
+max77654_err_t pmic_bsp_adc_ext_read(uint32_t settle_us, struct max77654_adc_reading *reading);
+#endif
+
 /**
  * @brief Reset I2C port hotfix
  * I2CB switch causes a glitch which confuses the PMIC. This performs

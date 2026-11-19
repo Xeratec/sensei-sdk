@@ -18,6 +18,17 @@ menuconfig SENSEI_PWR
 	help
 	  Enable the SENSEI Power Subsystem.
 
+config SENSEI_PMIC_ADC_EXTERNAL
+	bool "The application does the ADC conversions of the PMIC AMUX"
+	default n
+	depends on SENSEI_PWR
+	help
+	  The application owns the SAADC (for example because it streams samples with it). The PMIC board support
+	  (bsp/pmic_bsp.c) then does not use the Zephyr ADC API or an ADC device: it calls
+	  pmic_bsp_adc_ext_read(), which the application must define (a missing definition is a link error).
+	  The Zephyr ADC driver (CONFIG_ADC) is not needed and must not be on when the application uses the SAADC
+	  interrupt itself. See NRF/system/pwr/README.md.
+
 rsource "pwr/Kconfig"
 rsource "crypto/Kconfig"
 rsource "ota/Kconfig"

@@ -30,6 +30,7 @@ import itertools
 import re
 import secrets
 import struct
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -340,6 +341,29 @@ def check_key_proof(proof: bytes,
             raise ProofError(f"proof of possession failed: {exc}") from exc
         raise
     return reset
+
+
+def commissioned_text(st: secure.NodeState) -> str:
+    """How the key store says the node was commissioned, for lists: `added with the setup code, 2026-11-19`,
+    `provisioned over USB, 2026-11-19`, or `no record` (the node was added before this was recorded, or is not confirmed)."""
+    what = {"ble-pake": "added with the setup code", "usb": "provisioned over USB"}.get(st.commissioned or "")
+    if what is None:
+        return "no record of how it was added"
+    day = "" if not st.commissioned_at else ", " + time.strftime("%Y-%m-%d", time.gmtime(st.commissioned_at))
+    return what + day
+
+
+def mark_commissioned(store: secure.KeyStore, node_id: int, how: str = "ble-pake") -> bool:
+    """Write `commissioned` (how, time, node fingerprint) into the key store entry of the node. Call it once, after the
+    node has confirmed: the proof of the key step was checked ("ble-pake"), or the USB provisioning worked ("usb").
+    A failure is logged and does not fail the commissioning: returns False then."""
+    try:
+        fp = node_fingerprint(node_id, store.node_public_key(node_id)).hex()
+        store.set_commissioned(node_id, how, fp)
+    except (SecureError, KeyError, OSError) as exc:
+        secure.log.warning("key store: could not record how node %016x was commissioned: %s", node_id, exc)
+        return False
+    return True
 
 
 # ---- registration (scrypt) ----

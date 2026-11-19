@@ -691,6 +691,7 @@ def _flock(path: Path):
 # not yet used mix) and `prev_up` (the uplink chain of the generation before, with the counter c1 where it ends). Up to
 # version 2 a node had the static keys only; they migrate to generation 0 with the root key R_0 (`ratchet.root0`).
 FILE_VERSION = 3
+COMMISSIONED_HOW = ("ble-pake", "usb")  # a SPAKE2+ commissioning with the setup code, or USB provisioning
 REREAD_S = 1.0  # shortest time between two re-reads of the file for an unknown key id
 _monotonic = time.monotonic  # a module level name so that a test can move the time of the re-read limit
 _MAX_EPOCH_IDX = 1 << 26  # an epoch of a 32 bit counter is below this
@@ -735,6 +736,9 @@ class _Node:
     prev: ChainState | None = None  # previous generation; gen 0: only gen, c1 and t count (the key is k_up)
     t_up: float = 0.0  # unix time of the last uplink that verified (any generation), 0 if unknown
     prov: int = 0  # provisioning counter: `add_node` raises it, a copy of the node with a higher one replaces the ratchet state
+    commissioned: str | None = None  # how the node got its key: one of COMMISSIONED_HOW (metadata, no secret)
+    commissioned_at: float = 0.0  # unix time of that
+    commissioned_fp: str = ""  # node fingerprint (hex) at that time
 
     @property
     def keys(self) -> SessionKeys:
@@ -814,6 +818,8 @@ def _node_to_json(n: _Node) -> dict:
         "next": None,
         "prev_up": None,
     }
+    if n.commissioned:
+        out["commissioned"] = {"how": n.commissioned, "at": round(n.commissioned_at, 3), "fp": n.commissioned_fp}
     if n.next is not None:
         out["next"] = {
             "gen": n.next.gen,
@@ -1067,6 +1073,9 @@ class NodeState:
     last_uplink: float | None  # unix time of the last uplink that verified, any generation (None: not known)
     highest: int  # highest uplink counter seen
     static_keys: bool  # the static keys of generation 0 are still held
+    commissioned: str | None = None  # "ble-pake" or "usb" once a confirmed proof or a USB provisioning said so
+    commissioned_at: float | None = None  # unix time of that
+    commissioned_fp: str | None = None  # node fingerprint (hex) at that time
 
 
 @dataclass(frozen = True)
@@ -1099,6 +1108,13 @@ def _adopt_ratchet(mine: _Node, theirs: _Node) -> None:
     mine.t_up = max(mine.t_up, theirs.t_up)
     mine.prov = theirs.prov
     _prune_prev(mine)
+
+
+def _merge_commissioned(mine: _Node, theirs: _Node) -> None:
+    """The later record of how the node was commissioned wins (both copies are of the same key)."""
+    if theirs.commissioned and (not mine.commissioned or theirs.commissioned_at > mine.commissioned_at):
+        mine.commissioned, mine.commissioned_at = theirs.commissioned, theirs.commissioned_at
+        mine.commissioned_fp = theirs.commissioned_fp
 
 
 def _cur_pos(c: _Cur) -> tuple[int, int]:
@@ -1322,6 +1338,12 @@ class KeyStore:
         if version not in (1, 2, FILE_VERSION):
             raise SecureError(f"unsupported key store version {version}")
         nodes = {int(text, 16): _node_from_json(n) for text, n in data["nodes"].items()}
+        for text, n in data["nodes"].items():
+            c = n.get("commissioned")
+            if isinstance(c, dict) and c.get("how") in COMMISSIONED_HOW:
+                node = nodes[int(text, 16)]
+                node.commissioned, node.commissioned_at = c["how"], float(c.get("at") or 0.0)
+                node.commissioned_fp = str(c.get("fp") or "")
         retired = {int(text, 16): _retired_from_json(n) for text, n in data.get("retired", {}).items()}
         down = {int(text, 16): int(n) for text, n in data.get("down_ctr", {}).items()}
         for text, n in data["nodes"].items():  # version 1: the counter was in the node
@@ -1389,6 +1411,7 @@ class KeyStore:
                     self._by_key_id[theirs.key_id] = node_id
             elif same:
                 mine.up = _merge_window(mine.up, theirs.up)
+                _merge_commissioned(mine, theirs)
                 # a node that was provisioned again (`add_node`) starts in generation 0 with a higher `prov`: that copy
                 # wins in every process, the older one is ignored; the counters merge in any case
                 if theirs.prov > mine.prov:
@@ -1600,6 +1623,9 @@ class KeyStore:
             node = _fresh_node(node_pub, keys, window)
             node.cur.since = self._clock()
             node.prov = prov
+            if same:  # the same key again: how it was commissioned stays true
+                node.commissioned, node.commissioned_at = old.commissioned, old.commissioned_at
+                node.commissioned_fp = old.commissioned_fp
             self._nodes[node_id] = node
             self._by_key_id[keys.key_id] = node_id
             self._added.add(node_id)
@@ -1668,6 +1694,26 @@ class KeyStore:
             return self.add_node(node_id, node_pub, reset = True)
         except OSError as exc:
             raise SecureError(f"the key store could not be saved: {exc}") from exc
+
+    def node_public_key(self, node_id: int) -> bytes:
+        return self._nodes[node_id].node_pub
+
+    def set_commissioned(self, node_id: int, how: str, fp: str = "", at: float | None = None) -> None:
+        """Record how the node got its key: `how` is "ble-pake" (the proof of a SPAKE2+ commissioning was checked) or "usb"
+        (provisioned over the cable), `fp` the node fingerprint as hex. Call it only after the node has confirmed (never
+        at `add_node`: a node that stays unconfirmed has no record). It is metadata, no secret. Saved at once; the later
+        record wins in a merge with another process, and the same key added again keeps it. Raises SecureError for an
+        unknown node or `how`."""
+        if how not in COMMISSIONED_HOW:
+            raise SecureError(f"unknown commissioning kind {how!r}")
+        with self._lock, self._file_lock():
+            self._merge_from_disk()
+            node = self._nodes.get(node_id)
+            if node is None:
+                raise SecureError(f"unknown node {_node_text(node_id)}")
+            node.commissioned, node.commissioned_fp = how, fp
+            node.commissioned_at = self._clock() if at is None else at
+            self._touch(now = True)
 
     def rollback_node(self, backup: NodeBackup) -> None:
         """Undo an `add_node` that changed the node, because the provisioning of the node failed: the node has its old keys
@@ -1765,6 +1811,9 @@ class KeyStore:
                 last_uplink = n.t_up or None,
                 highest = n.up.highest,
                 static_keys = n.k_up is not None,
+                commissioned = n.commissioned,
+                commissioned_at = n.commissioned_at or None,
+                commissioned_fp = n.commissioned_fp or None,
             )
 
     # ---- the mix: the collector answers a request of a node ----
@@ -1908,6 +1957,7 @@ class KeyStore:
         copy with a higher `prov` (the node was provisioned again there) replaces everything, a lower one is ignored."""
         a, b = mine.cur, theirs.cur
         mine.t_up = max(mine.t_up, theirs.t_up)
+        _merge_commissioned(mine, theirs)
         if theirs.prov < mine.prov:
             return
         if theirs.prov > mine.prov:
@@ -2045,7 +2095,9 @@ def _select(node: _Node, h: Header, walker: Walker, now: float, node_id: int | N
         prev = node.prev
         if prev is not None and prev.gen == 0:
             if h.counter >= prev.c1:
-                raise SecureError("generation 0 envelope beyond the end of generation 0")
+                # a node that was provisioned again seals in generation 0 with a higher counter: GenerationError, so that
+                # the store reads its file again (the reset may be in it)
+                raise GenerationError("generation 0 envelope beyond the end of generation 0")
             return _Selection("prev", 0, prev, node.k_up, None)
         raise GenerationError(f"generation 0 envelope from a node that is in generation {cur.gen}: dropped")
     bits = h.gen_bits
@@ -2055,7 +2107,7 @@ def _select(node: _Node, h: Header, walker: Walker, now: float, node_id: int | N
         which, gen, st = "next", node.next.gen, node.next.up
     elif node.prev is not None and node.prev.gen >= 1 and node.prev.gen & 3 == bits:
         if h.counter >= node.prev.c1:
-            raise SecureError(f"generation {node.prev.gen} envelope beyond the end of its generation")
+            raise GenerationError(f"generation {node.prev.gen} envelope beyond the end of its generation")
         which, gen, st = "prev", node.prev.gen, node.prev
     else:
         raise GenerationError(f"no key for generation {bits} (mod 4) of this node (current {cur.gen}): "
@@ -2100,9 +2152,15 @@ def _open_up(payload: bytes, store: KeyStore, commit: bool) -> Opened:
                     resynced = True
                     continue
                 store.stats["node_ahead"] += 1
-                store._warn(
-                    f"ahead-{node_id}", "node %s sent generation %d, the key store is at %d: node ahead of key "
-                    "store, re-provision it", _node_text(node_id), h.gen_bits, node.cur.gen)
+                if h.ratchet:
+                    store._warn(
+                        f"ahead-{node_id}", "node %s sent generation %d, the key store is at %d: node ahead of key "
+                        "store, re-provision it", _node_text(node_id), h.gen_bits, node.cur.gen)
+                else:
+                    store._warn(
+                        f"ahead-{node_id}", "node %s sent a generation 0 envelope, the key store is at generation %d: "
+                        "the node was provisioned again, provision or commission it with this key store (or one "
+                        "that shares its file)", _node_text(node_id), node.cur.gen)
                 raise
             except EpochError:
                 store.stats["epoch_refused"] += 1

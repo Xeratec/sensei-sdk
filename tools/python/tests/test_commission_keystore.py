@@ -164,3 +164,29 @@ def test_a_rollback_that_fails_raises(tmp_path, monkeypatch):
     with pytest.raises(secure.SecureError) as e:
         com.check_key_proof(proof_of(fresh, other), rig.store, NODE_ID, NG, NN, SID)
     assert not isinstance(e.value, ProofError) and "put back" in str(e.value)
+
+
+def test_the_commissioned_record_is_saved_merged_and_followed(tmp_path):
+    rig = make_rig(tmp_path)
+    assert rig.store.node_state(NODE_ID).commissioned is None  # add_node writes none
+    rig.store.set_commissioned(NODE_ID, "ble-pake", "cd" * 16, at = 1000.0)
+    st = rig.store.node_state(NODE_ID)
+    assert (st.commissioned, st.commissioned_at, st.commissioned_fp) == ("ble-pake", 1000.0, "cd" * 16)
+    # a new process reads it; a file from before this record loads without it
+    again = secure.KeyStore.load(rig.path, private_pem = rig.pem)
+    assert again.node_state(NODE_ID).commissioned == "ble-pake"
+    assert "commissioned" not in secure._node_to_json(
+        secure._fresh_node(b"\x04" * 65, rig.node.keys, secure.ReplayWindow()))
+    # the later record wins in every copy
+    again.set_commissioned(NODE_ID, "usb", at = 2000.0)
+    rig.store.save()
+    assert rig.store.node_state(NODE_ID).commissioned == "usb"
+    # a follower shows it too
+    follower = secure.KeyStore.load(tmp_path / "gui.json", private_pem = rig.pem, follow = rig.path)
+    follower.add_node(NODE_ID, rig.node.node_pub)
+    assert follower.node_state(NODE_ID).commissioned == "usb"
+    # an unknown node or kind is refused
+    with pytest.raises(secure.SecureError):
+        rig.store.set_commissioned(NODE_ID + 1, "usb")
+    with pytest.raises(secure.SecureError):
+        rig.store.set_commissioned(NODE_ID, "other")
